@@ -331,6 +331,29 @@ test.describe('mock core', () => {
     await expect(cube.locator('.changed')).toHaveAttribute('title', 'Changed in this session');
   });
 
+  test('alt+click adds a range of rows; shift+alt+click takes a level up with its subtree', async ({ page }) => {
+    await open(page, MOCK);
+    const state = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { selection: [...v.selection], active: v.active };
+    });
+    const row = (name: string) => page.locator('usd-viewer .row .name', { hasText: new RegExp(`^${name}$`) });
+    await row('Cube').click();
+    await row('Light').click({ modifiers: ['Alt'] });
+    expect(await state()).toEqual({ selection: ['/World/Cube', '/World/Instances', '/World/Big', '/World/Light'], active: '/World/Light' });
+    // Shift+Alt on Cube: World is the first unselected level up; it comes with everything below it.
+    await row('Cube').click({ modifiers: ['Shift', 'Alt'] });
+    await expect.poll(async () => (await state()).active).toBe('/World');
+    const { selection } = await state();
+    expect(selection).toContain('/World/Big/Child_0');
+    // The 10,000 cap (World/Big has 50,000 children, so the walk stops inside it) plus Light from the
+    // range, which comes after Big and is cut off; Cube, Instances and Big are in both.
+    expect(selection.length).toBe(10000 + 1);
+    await page.locator('usd-viewer .toolbar button', { hasText: '?' }).click();
+    await expect(page.locator('usd-viewer dialog.help')).toContainText('Shift+Alt+click');
+    await expect(page.locator('usd-viewer dialog.help')).toContainText('Alt+click (hierarchy)');
+  });
+
   test('shift+ctrl click climbs the hierarchy; the prim menu clears edits', async ({ page }) => {
     await open(page, MOCK);
     const viewer = () => page.evaluate(() => {

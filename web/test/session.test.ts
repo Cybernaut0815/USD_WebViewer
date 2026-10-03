@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { History, modifySelect, UsdSession } from '../src/session.ts';
+import { History, modifySelect, selectUpWithSubtree, UsdSession } from '../src/session.ts';
 
 class FakeWorker {
   onmessage: ((event: any) => void) | null = null;
@@ -85,6 +85,35 @@ test('the change markers follow the list the core reports after each edit', asyn
   await s.commands.undo();
   assert.deepEqual([s.changeState('/a/b'), s.changeState('/a')], [null, null]);
   assert.equal(events, 2);
+});
+
+test('adding thousands of prims keeps order and the active prim, and stays fast', () => {
+  const { s } = session();
+  s.select(['/a', '/p0']);
+  const many = Array.from({ length: 5000 }, (_, i) => `/p${i}`);
+  const started = performance.now();
+  modifySelect(s, many, 'add', 'api');
+  modifySelect(s, many.slice(0, 2500), 'remove', 'api');
+  assert.ok(performance.now() - started < 200, 'linear, not quadratic');
+  assert.equal(s.selection.length, 1 + 2500);
+  assert.deepEqual([s.selection[0], s.selection[1], s.active], ['/a', '/p2500', '/p4999']);
+});
+
+test('shift+alt climbs one level per click and takes the whole subtree there', async () => {
+  const { worker, s } = session();
+  const subtrees: Record<string, string[]> = {
+    '/a/b': ['/a/b', '/a/b/c', '/a/b/d', '/a/b/d/e'],
+    '/a': ['/a', '/a/b', '/a/b/c', '/a/b/d', '/a/b/d/e', '/a/x'],
+  };
+  worker.postMessage = function (message: any) {
+    this.posted.push(message);
+    const result = message.method === 'primSubtree' ? subtrees[message.args[0]] : {};
+    queueMicrotask(() => this.onmessage?.({ data: { id: message.id, result } }));
+  };
+  await selectUpWithSubtree(s, '/a/b/c', 'viewport');
+  assert.deepEqual([new Set(s.selection), s.active], [new Set(['/a/b/c', '/a/b', '/a/b/d', '/a/b/d/e']), '/a/b']);
+  await selectUpWithSubtree(s, '/a/b/c', 'viewport');
+  assert.deepEqual([s.selection.length, s.active], [6, '/a']);
 });
 
 test('shift+ctrl adds the nearest unselected ancestor, one level per click', () => {

@@ -28,6 +28,8 @@ public:
     std::string Details(const std::string& path, double time) const;       // PrimInfo
     std::string AttributeValue(const std::string& path, const std::string& name, double time) const;
     std::string Find(const std::string& text, const std::string& typeName, int limit) const; // Path[]
+    /// The prim and everything below it, in traversal order, at most `limit` paths.
+    std::string Subtree(const std::string& path, int limit) const; // Path[]
     /// usda text of a prim subtree: "composed" (flattened) or "authored" (the edit layer's opinions).
     std::string ExportPrim(const std::string& path, const std::string& mode) const;
 

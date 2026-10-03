@@ -37,6 +37,8 @@ export interface CoreApi {
   primDetails(path: Path, time: number): PrimInfo;
   attributeValue(path: Path, name: string, time: number): Json;
   findPrims(text: string, typeName: string, limit: number): Path[];
+  /** The prim and everything below it, in traversal order, at most `limit` paths. */
+  primSubtree(path: Path, limit: number): Path[];
   /** usda text of a prim subtree: composed (flattened) or only what the edit layer authors. '' on failure. */
   exportPrim(path: Path, mode: 'composed' | 'authored'): string;
   readAsset(resolvedPath: string): Uint8Array<ArrayBuffer> | null;

@@ -7,7 +7,7 @@ import { copyText, type MenuItem, showMenu } from './menu.ts';
 import { TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
 import type { Path, PickResult, StageInfo } from './protocol.ts';
-import { modifySelect, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
+import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
 import { SelectTool, type TransformMode, TransformTool } from './tools.ts';
@@ -47,6 +47,8 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Shift+click', 'Add to the selection (on a selected prim: make it active)'],
       ['Ctrl+click', 'Remove from the selection'],
       ['Shift+Ctrl+click', "Add the prim's parent; again: the next level up"],
+      ['Shift+Alt+click', 'Add the parent with everything below it; again: the next level up'],
+      ['Alt+click (hierarchy)', 'Add every row between the last clicked row and this one'],
       ['Shift+drag up', 'Add everything the rectangle touches'],
       ['Shift+drag down', 'Add everything fully inside the rectangle'],
       ['Ctrl+drag up / down', 'Remove, the same way'],
@@ -634,7 +636,8 @@ export class UsdViewerElement extends HTMLElement {
       this.props.globalRefine = { setting: session.refineLevel, effective: session.effectiveRefineLevel };
     });
 
-    this.tree.onselect = (path, mode) => modifySelect(session, [path], mode, 'hierarchy');
+    this.tree.onselect = (paths, mode) =>
+      mode === 'subtree' ? selectUpWithSubtree(session, paths[0], 'hierarchy').catch(() => {}) : modifySelect(session, paths, mode, 'hierarchy');
     this.tree.onvisible = (path, visible) => this.usd.setVisible(path, visible).catch(() => {});
     this.tree.onframe = (path) => this.frame([path]);
     this.props.onvariant = (path, set, variant) => this.usd.setVariant(path, set, variant).catch(() => {});

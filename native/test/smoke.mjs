@@ -363,6 +363,9 @@ def Xform "World"
   assert.deepEqual(visible('/World/G'), { C: true, D: true });
   assert.deepEqual(run('showAll', null), { '/World/A': 'invisible' });
   assert.deepEqual(visible('/World'), { A: true, B: true, G: true, M: true });
+  assert.deepEqual(JSON.parse(core.primSubtree('/World', 100)), ['/World', '/World/A', '/World/B', '/World/G', '/World/G/C', '/World/G/D', '/World/M']);
+  assert.equal(JSON.parse(core.primSubtree('/World', 3)).length, 3, 'capped');
+  assert.deepEqual(JSON.parse(core.primSubtree('/', 10)), [], 'not the pseudo-root');
   run('hide', ['/World/G']);
   assert.deepEqual(JSON.parse(core.primVisibility(JSON.stringify(['/World/G/C', '/World/A', '/World/M', '/nope']))), [false, true, true, true], 'computed: inherited from G');
   run('showAll', null);

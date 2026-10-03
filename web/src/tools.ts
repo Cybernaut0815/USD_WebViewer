@@ -3,7 +3,7 @@ import * as THREE from 'three/webgpu';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { Path, XformInfo } from './protocol.ts';
 import type { UsdSession, XformEntry } from './session.ts';
-import { modifySelect, type SelectMode } from './session.ts';
+import { modifySelect, type SelectMode, selectUpWithSubtree } from './session.ts';
 import type { Viewport } from './viewport.ts';
 
 export interface Tool {
@@ -12,7 +12,8 @@ export interface Tool {
 }
 
 /**
- * A click that did not drag selects what is under the pointer; Shift adds, Ctrl removes. With
+ * A click that did not drag selects what is under the pointer; Shift adds, Ctrl removes,
+ * Shift+Ctrl adds the next level up, Shift+Alt the next level up with its whole subtree. With
  * Shift or Ctrl a drag draws a rectangle instead of orbiting: dragged upward it takes what it
  * touches, dragged downward only what lies fully inside.
  */
@@ -28,7 +29,7 @@ export class SelectTool implements Tool {
     this.abort = new AbortController();
     const { signal } = this.abort;
     const canvas = viewport.canvas;
-    let down: { x: number; y: number; mode: SelectMode; orbit: boolean } | null = null;
+    let down: { x: number; y: number; mode: SelectMode | 'subtree'; orbit: boolean } | null = null;
     let box: HTMLElement | null = null;
     const rect = (from: { x: number; y: number }, e: PointerEvent) => ({
       left: Math.min(from.x, e.clientX),
@@ -42,7 +43,8 @@ export class SelectTool implements Tool {
       (e) => {
         down = null;
         if (e.button !== 0 || this.grabbed()) return;
-        const mode: SelectMode = (e.shiftKey && (e.ctrlKey || e.metaKey) ? 'up' : e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace');
+        const ctrl = e.ctrlKey || e.metaKey;
+        const mode: SelectMode | 'subtree' = e.shiftKey && e.altKey ? 'subtree' : e.shiftKey && ctrl ? 'up' : e.shiftKey ? 'add' : ctrl ? 'remove' : 'replace';
         down = { x: e.clientX, y: e.clientY, mode, orbit: viewport.controls.enabled };
         if (mode !== 'replace') {
           viewport.controls.enabled = false;
@@ -102,7 +104,9 @@ export class SelectTool implements Tool {
         } else return; // an orbit drag
         const results = await Promise.all(hits.map((hit) => this.session.usd.resolvePick(hit.rid, hit.instance)));
         const paths = [...new Set(results.flatMap((r) => (r && !this.session.isLocked(r.path) ? [r.path] : [])))];
-        modifySelect(this.session, paths, marquee && start.mode === 'up' ? 'add' : start.mode, 'viewport');
+        if (marquee) modifySelect(this.session, paths, start.mode === 'up' || start.mode === 'subtree' ? 'add' : start.mode, 'viewport');
+        else if (start.mode !== 'subtree') modifySelect(this.session, paths, start.mode, 'viewport');
+        else if (paths[0]) await selectUpWithSubtree(this.session, paths[0], 'viewport');
       },
       { signal },
     );

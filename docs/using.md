@@ -14,6 +14,8 @@ Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on t
 | Shift+click | Add a prim and make it the **active** one. On a prim that is already selected, it only makes it active |
 | Ctrl+click | Remove a prim from the selection |
 | Shift+Ctrl+click | Add the prim's parent. Each further Shift+Ctrl+click adds the next level up |
+| Shift+Alt+click | Add the prim's parent together with everything below it. Each further Shift+Alt+click does the same one level higher |
+| Alt+click (hierarchy) | Add every row between the last clicked row and this one |
 | Shift+drag **up** | Add everything the rectangle touches |
 | Shift+drag **down** | Add only what lies fully inside the rectangle |
 | Ctrl+drag | Remove from the selection, in the same two ways |
@@ -21,6 +23,8 @@ Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on t
 - The **active** prim has the brighter highlight. The property panel shows it, and the transform gizmo sits on it.
 - With several prims selected, a dropdown above the property panel picks which one is shown.
 - The rectangle tests screen-space bounding boxes, not exact outlines.
+- Shift+Alt takes at most 10,000 prims of a subtree; above that it warns in the messages.
+- An Alt+click range runs over the rows as they are shown, or over the search results when a search is shown. Collapsed rows are not included.
 
 ## Panels
 

@@ -51,7 +51,7 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 
 | Member | Purpose |
 |---|---|
-| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `attribute`, `find`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload` |
+| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `attribute`, `find`, `subtree`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload` |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |

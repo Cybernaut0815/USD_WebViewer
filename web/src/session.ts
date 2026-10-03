@@ -28,6 +28,8 @@ export interface UsdStageApi {
   prim(path: Path, time?: number): Promise<PrimInfo>;
   attribute(path: Path, name: string, time?: number): Promise<Json>;
   find(text: string, typeName?: string, limit?: number): Promise<Path[]>;
+  /** The prim and everything below it, in traversal order (at most `limit`, default 10,000). */
+  subtree(path: Path, limit?: number): Promise<Path[]>;
   resolvePick(rid: number, instance: number): Promise<PickResult | null>;
   setVariant(path: Path, variantSet: string, variant: string): Promise<void>;
   setVisible(path: Path, visible: boolean): Promise<void>;
@@ -164,6 +166,7 @@ export class UsdSession extends EventTarget {
     prim: (path, time = this.currentTime) => this.core.call('primDetails', path, time),
     attribute: (path, name, time = this.currentTime) => this.core.call('attributeValue', path, name, time),
     find: (text, typeName = '', limit = 500) => this.core.call('findPrims', text, typeName, limit),
+    subtree: (path, limit = SUBTREE_LIMIT) => this.core.call('primSubtree', path, limit),
     resolvePick: (rid, instance) => this.core.call('resolvePick', rid, instance),
     setVariant: (path, set, variant) =>
       this.recorded(
@@ -658,6 +661,17 @@ export class UsdSession extends EventTarget {
 /** add: Shift; remove: Ctrl; up: Shift+Ctrl adds the nearest ancestor that is not selected yet. */
 export type SelectMode = 'replace' | 'add' | 'remove' | 'up';
 
+/** Shift+Alt selects at most this many prims of a subtree. */
+export const SUBTREE_LIMIT = 10000;
+
+/** The nearest ancestor of `path` (below the pseudo-root) not in `selected`; undefined when all are. */
+function unselectedAncestor(path: Path, selected: ReadonlySet<Path>): Path | undefined {
+  for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) {
+    if (!selected.has(path.slice(0, i))) return path.slice(0, i);
+  }
+  return undefined;
+}
+
 /**
  * Shift (add) and Ctrl (remove) selection. Adding makes the last given path active, so Shift-click
  * on an already selected prim only activates it; removing keeps the active prim when it stays.
@@ -667,16 +681,31 @@ export function modifySelect(session: UsdSession, paths: readonly Path[], mode: 
   if (mode === 'up') {
     const path = paths.at(-1);
     if (!path) return;
-    const selected = new Set([...current, path]);
-    let up: Path | undefined;
-    for (let i = path.lastIndexOf('/'); i > 0 && !up; i = path.lastIndexOf('/', i - 1)) {
-      if (!selected.has(path.slice(0, i))) up = path.slice(0, i);
-    }
+    const up = unselectedAncestor(path, new Set([...current, path]));
     modifySelect(session, up ? [path, up] : [path], 'add', source);
   } else if (mode === 'replace') session.select(paths, source);
-  else if (mode === 'add') session.select([...current, ...paths.filter((p) => !current.includes(p))], source, paths.at(-1) ?? session.active ?? undefined);
-  else {
-    const kept = current.filter((p) => !paths.includes(p));
-    session.select(kept, source, session.active && kept.includes(session.active) ? session.active : undefined);
+  else if (mode === 'add') {
+    // Sets, not Array.includes: Shift+Alt can add thousands of prims at once.
+    const have = new Set(current);
+    const added = paths.filter((p) => !have.has(p) && (have.add(p), true));
+    session.select([...current, ...added], source, paths.at(-1) ?? session.active ?? undefined);
+  } else {
+    const drop = new Set(paths);
+    const kept = current.filter((p) => !drop.has(p));
+    session.select(kept, source, session.active && !drop.has(session.active) ? session.active : undefined);
   }
+}
+
+/**
+ * Shift+Alt: like Shift+Ctrl it climbs to the nearest ancestor not selected yet (one level per
+ * click), but adds that ancestor's whole subtree, which becomes the active prim. Once every
+ * ancestor is selected, the top-level ancestor's subtree is taken again.
+ */
+export async function selectUpWithSubtree(session: UsdSession, path: Path, source: SelectionSource): Promise<void> {
+  const second = path.indexOf('/', 1);
+  const topLevel = second > 0 ? path.slice(0, second) : path;
+  const target = unselectedAncestor(path, new Set([...session.selection, path])) ?? topLevel;
+  const subtree = await session.usd.subtree(target);
+  if (subtree.length >= SUBTREE_LIMIT) session.report('warn', `Selected the first ${SUBTREE_LIMIT.toLocaleString('en')} prims below ${target}.`);
+  modifySelect(session, [path, ...subtree.filter((p) => p !== target), target], 'add', source);
 }

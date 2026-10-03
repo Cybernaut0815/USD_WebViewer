@@ -908,6 +908,23 @@ std::string Stage::AttributeValue(const std::string& path, const std::string& na
     return stream.str();
 }
 
+std::string Stage::Subtree(const std::string& path, int limit) const
+{
+    std::ostringstream stream;
+    JsWriter w(stream);
+    w.BeginArray();
+    const UsdPrim prim = _stage && SdfPath::IsValidPathString(path) ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim();
+    if (prim && !prim.IsPseudoRoot()) {
+        int count = 0;
+        for (const UsdPrim& descendant : UsdPrimRange(prim)) {
+            if (count++ >= limit) break;
+            w.WriteValue(descendant.GetPath().GetString());
+        }
+    }
+    w.EndArray();
+    return stream.str();
+}
+
 std::string Stage::Find(const std::string& text, const std::string& typeName, int limit) const
 {
     std::ostringstream stream;

@@ -31,7 +31,9 @@ export function rowWindow(scrollTop: number, viewHeight: number, total: number):
 export class Tree {
   readonly element = document.createElement('div');
   /** Shift-click adds, Ctrl-click removes. */
-  onselect: (path: Path, mode: SelectMode) => void = () => {};
+  /** Shift-click adds, Ctrl-click removes, Shift+Ctrl adds the parent, Shift+Alt a level up with its
+   * subtree ('subtree'); Alt-click adds the rows between the last clicked row and this one. */
+  onselect: (paths: Path[], mode: SelectMode | 'subtree') => void = () => {};
   onvisible: (path: Path, visible: boolean) => void = () => {};
   onframe: (path: Path) => void = () => {};
   onlock: (path: Path, locked: boolean) => void = () => {};
@@ -45,6 +47,8 @@ export class Tree {
   private rows: TreeNode[] = [];
   private selected = new Set<Path>();
   private active: Path | null = null;
+  /** The last row clicked without Alt: where an Alt-click range starts. */
+  private anchor: Path | null = null;
   private readonly load: (path: Path) => Promise<PrimSummary[]>;
 
   constructor(load: (path: Path) => Promise<PrimSummary[]>) {
@@ -248,9 +252,13 @@ export class Tree {
       this.draw();
     } else if (target.classList.contains('lock')) {
       this.onlock(node.summary.path, !this.isLocked(node.summary.path));
+    } else if (event.altKey && !event.shiftKey) {
+      this.onselect(this.range(node.summary.path), 'add');
     } else {
       const e = event;
-      this.onselect(node.summary.path, (e.shiftKey && (e.ctrlKey || e.metaKey) ? 'up' : e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace'));
+      this.anchor = node.summary.path;
+      const ctrl = e.ctrlKey || e.metaKey;
+      this.onselect([node.summary.path], e.shiftKey && e.altKey ? 'subtree' : e.shiftKey && ctrl ? 'up' : e.shiftKey ? 'add' : ctrl ? 'remove' : 'replace');
     }
   }
 
@@ -268,7 +276,20 @@ export class Tree {
       this.refresh();
     } else return; // other keys (F, tools, hiding) are the viewer's
     event.preventDefault();
-    if (next !== current && this.rows[next]) this.onselect(this.rows[next].summary.path, 'replace');
+    if (next !== current && this.rows[next]) {
+      this.anchor = this.rows[next].summary.path;
+      this.onselect([this.anchor], 'replace');
+    }
+  }
+
+  /** The visible rows from the anchor to `path`, ending with `path` (just `path` when the anchor is not shown). */
+  private range(path: Path): Path[] {
+    const paths = this.rows.map((row) => row.summary.path);
+    const from = paths.indexOf(this.anchor ?? this.active ?? '');
+    const to = paths.indexOf(path);
+    if (from < 0 || to < 0) return [path];
+    const slice = paths.slice(Math.min(from, to), Math.max(from, to) + 1);
+    return from <= to ? slice : slice.reverse();
   }
 }
 

@@ -56,6 +56,16 @@ const api = {
   },
   closeStage() { open = false; },
   reloadStage: () => ({ ok: true, resynced: ['/'], dirty: [] }),
+  primSubtree(path, limit) {
+    const out = [];
+    const walk = (p) => {
+      if (out.length >= limit) return;
+      out.push(p);
+      for (const name of PRIMS[p] ?? []) walk(`${p}/${name}`);
+    };
+    if (path !== '/') walk(path);
+    return out;
+  },
   primVisibility: (json) => JSON.parse(json).map((path) => summary(path).visible),
   primChildren: (path) => (PRIMS[path] ?? []).map((name) => summary(path === '/' ? `/${name}` : `${path}/${name}`)),
   primDetails: (path) => ({

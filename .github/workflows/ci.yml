@@ -1,0 +1,100 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+env:
+  EMSDK_VERSION: 5.0.7 # the version OpenUSD 26.08 is tested with
+
+jobs:
+  # The wasm SDK (OpenUSD and its dependencies). Slow, so cached on the contents of sdk/.
+  sdk:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/sdk
+          key: sdk-${{ env.EMSDK_VERSION }}-${{ hashFiles('sdk/**') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y ninja-build
+          cmake -S sdk -B "$RUNNER_TEMP/b" -G Ninja -DSDK_PREFIX="$RUNNER_TEMP/sdk"
+          cmake --build "$RUNNER_TEMP/b"
+      - run: tar --zstd -cf usd-wasm-sdk.tar.zst -C "$RUNNER_TEMP" sdk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usd-wasm-sdk
+          path: usd-wasm-sdk.tar.zst
+
+  core:
+    needs: sdk
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: usd-wasm-sdk
+      - run: tar --zstd -xf usd-wasm-sdk.tar.zst -C "$RUNNER_TEMP"
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - run: |
+          sudo apt-get install -y ninja-build
+          emcmake cmake -S native -B "$RUNNER_TEMP/core" -G Ninja -DSDK_PREFIX="$RUNNER_TEMP/sdk"
+          cmake --build "$RUNNER_TEMP/core"
+          node native/test/smoke.mjs "$RUNNER_TEMP/core"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: usdcore
+          path: |
+            web/public/core/usdcore.js
+            web/public/core/usdcore.wasm
+
+  # Same OS as the machine the golden images were made on.
+  web:
+    needs: core
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: usdcore
+          path: web/public/core
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx playwright install chromium
+      - run: npm run e2e
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: web/test-results
+      - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: web
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/deploy-pages@v4

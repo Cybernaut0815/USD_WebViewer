@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>USD Web Viewer</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #1e1f22; }
+    </style>
+    <!-- Hosts that cannot send COOP/COEP headers (GitHub Pages) get cross-origin isolation from this
+         service worker instead; it does nothing where the headers are already present. -->
+    <script src="coi-serviceworker.min.js"></script>
+  </head>
+  <body>
+    <usd-viewer id="viewer"></usd-viewer>
+    <script>
+      // ?src=<url>  ?core=<dir>  ?forceWebGL=1  ?panels=none  -> attributes, before the element upgrades
+      const viewer = document.getElementById('viewer');
+      const query = new URLSearchParams(location.search);
+      if (query.has('core')) viewer.setAttribute('core-url', query.get('core'));
+      if (query.has('forceWebGL')) viewer.setAttribute('force-webgl', '');
+      if (query.has('panels')) viewer.setAttribute('panels', query.get('panels'));
+      if (query.has('src')) viewer.setAttribute('src', query.get('src'));
+    </script>
+    <script type="module" src="/src/index.ts"></script>
+  </body>
+</html>

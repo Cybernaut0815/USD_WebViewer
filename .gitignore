@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dist-lib/
+web/public/core/usdcore.js
+web/public/core/usdcore.wasm
+web/test-results/
+web/playwright-report/
+web/e2e/assets/
+web/public/test-assets/

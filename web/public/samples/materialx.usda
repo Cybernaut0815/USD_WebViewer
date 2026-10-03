@@ -1,0 +1,91 @@
+#usda 1.0
+(
+    doc = "MaterialX standard_surface networks authored in UsdShade."
+    defaultPrim = "World"
+    upAxis = "Y"
+)
+
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Copper"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/Copper/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color = (0.95, 0.5, 0.3)
+                float inputs:metalness = 1
+                float inputs:specular_roughness = 0.3
+                token outputs:out
+            }
+        }
+
+        def Material "CheckerPlastic"
+        {
+            token outputs:mtlx:surface.connect = </World/Looks/CheckerPlastic/Surface.outputs:out>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                float inputs:base = 1
+                color3f inputs:base_color.connect = </World/Looks/CheckerPlastic/Image.outputs:out>
+                float inputs:specular_roughness = 0.4
+                token outputs:out
+            }
+
+            def Shader "Image"
+            {
+                uniform token info:id = "ND_image_color3"
+                asset inputs:file = @./checker.png@ (
+                    colorSpace = "srgb_texture"
+                )
+                color3f outputs:out
+            }
+        }
+    }
+
+    def Sphere "Ball" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        double radius = 1
+        rel material:binding = </World/Looks/Copper>
+        double3 xformOp:translate = (-1.2, 1, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def Mesh "Card" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.2, 0, 0), (2.2, 0, 0), (2.2, 2, 0), (0.2, 2, 0)]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </World/Looks/CheckerPlastic>
+    }
+
+    def DistantLight "Sun"
+    {
+        float inputs:intensity = 3
+        bool inputs:normalize = 1
+        float3 xformOp:rotateXYZ = (-35, 25, 0)
+        uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+    }
+
+    def DomeLight "Sky"
+    {
+        float inputs:intensity = 0.6
+        asset inputs:texture:file = @./sky.hdr@
+    }
+}

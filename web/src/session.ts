@@ -1,0 +1,588 @@
+// UsdSession: the headless part of the viewer. Owns the core connection, the
+// open stage, selection, time, locks, the command stack and the flush pump.
+// Panels, tools and host pages talk to this; nothing here touches the DOM.
+import { collectHandle, download, isUsdFile, type LocalFile, rootCandidates } from './files.ts';
+import type { Edit, Json, LayerInfo, LogEntry, Path, PickResult, PrimInfo, PrimSummary, RenderDelta, StageInfo, XformInfo } from './protocol.ts';
+import { CoreClient } from './rpc.ts';
+
+export interface OpenOptions {
+  /** Root layer path inside a set of files; defaults to the shallowest USD file. */
+  root?: string;
+  loadPayloads?: boolean;
+}
+export interface SchemeOptions {
+  /** Base URL of a gateway that serves `<gateway>/read?url=<asset url>`. */
+  gateway: string;
+  /** Value for the Authorization header, asked for before each stage open. */
+  getAuth?: () => Promise<string> | string;
+}
+export type SelectionSource = 'viewport' | 'hierarchy' | 'api';
+export interface XformEntry {
+  path: Path;
+  matrix: number[]; // 16, THREE.Matrix4.elements order
+}
+
+/** Stage access for host pages. Namespaced because HTMLElement already owns getAttribute/setAttribute. */
+export interface UsdStageApi {
+  children(path?: Path): Promise<PrimSummary[]>;
+  prim(path: Path, time?: number): Promise<PrimInfo>;
+  attribute(path: Path, name: string, time?: number): Promise<Json>;
+  find(text: string, typeName?: string, limit?: number): Promise<Path[]>;
+  resolvePick(rid: number, instance: number): Promise<PickResult | null>;
+  setVariant(path: Path, variantSet: string, variant: string): Promise<void>;
+  setVisible(path: Path, visible: boolean): Promise<void>;
+  setPayloadLoaded(path: Path, loaded: boolean): Promise<void>;
+  /** Writes to the stage's edit target; `time` omitted writes the default value. */
+  setAttribute(path: Path, name: string, value: Json, time?: number): Promise<void>;
+  /** Removes the edit target's opinion (the default value, or the sample at `time`). */
+  clearAttribute(path: Path, name: string, time?: number): Promise<void>;
+  /** Local, parent and world matrices of a prim that can move; null otherwise. `time` defaults to the current frame. */
+  xformInfo(path: Path, time?: number): Promise<XformInfo | null>;
+  /** Authors a local matrix (16 numbers in THREE.Matrix4.elements order) at the current frame. */
+  setXform(path: Path, matrix: ArrayLike<number>, time?: number): Promise<void>;
+  /** Several prims in one undoable edit. */
+  setXforms(entries: XformEntry[], time?: number): Promise<void>;
+  layers(): Promise<LayerInfo[]>;
+  /** Where edits go: any layer of the local stack (root, its sublayers, the session layer). */
+  setEditTarget(identifier: string): Promise<void>;
+  /** A layer as usda text or usdc binary, or the whole stage flattened (any identifier). */
+  exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Promise<Uint8Array<ArrayBuffer> | null>;
+  /** Re-reads layers from their files or URLs (all of them when omitted), discarding unsaved edits and the undo history. */
+  reload(identifiers?: string[]): Promise<void>;
+  /** Global subdivision refinement level; -1 = automatic. */
+  setComplexity(level: number): Promise<void>;
+  /** Omniverse-style per-prim override (refinementEnableOverride + refinementLevel on the mesh). */
+  setRefinement(path: Path, enabled: boolean, level: number): Promise<void>;
+  clearRefinement(path: Path): Promise<void>;
+  clearRefinementOverrides(): Promise<void>;
+  /** usda text of a prim and its children: fully composed, or only what the edit layer authors. */
+  exportPrim(path: Path, mode?: 'composed' | 'authored'): Promise<string>;
+  /** Clears the session layer (viewer-only edits made while it was the edit target). */
+  clearEdits(): Promise<void>;
+}
+
+/** An undoable action. `do` runs when the command is first run and on redo. */
+export interface Command {
+  label: string;
+  do(): void | Promise<void>;
+  undo(): void | Promise<void>;
+}
+
+/** Linear undo/redo stack. ponytail: unbounded, no coalescing; add both when a tool needs them. */
+export class History extends EventTarget {
+  private done: Command[] = [];
+  private undone: Command[] = [];
+  get canUndo(): boolean {
+    return this.done.length > 0;
+  }
+  get canRedo(): boolean {
+    return this.undone.length > 0;
+  }
+  async run(command: Command): Promise<void> {
+    await command.do();
+    this.done.push(command);
+    this.undone = [];
+    this.dispatchEvent(new Event('change'));
+  }
+  async undo(): Promise<void> {
+    const command = this.done.pop();
+    if (!command) return;
+    await command.undo();
+    this.undone.push(command);
+    this.dispatchEvent(new Event('change'));
+  }
+  async redo(): Promise<void> {
+    const command = this.undone.pop();
+    if (!command) return;
+    await command.do();
+    this.done.push(command);
+    this.dispatchEvent(new Event('change'));
+  }
+  /** Records a command that already ran (a drag that wrote as it went). */
+  push(command: Command): void {
+    this.done.push(command);
+    this.undone = [];
+    this.dispatchEvent(new Event('change'));
+  }
+  clear(): void {
+    this.done = [];
+    this.undone = [];
+    this.dispatchEvent(new Event('change'));
+  }
+}
+
+export interface UsdSessionEventMap {
+  stageopen: CustomEvent<StageInfo>;
+  stageclose: Event;
+  selectionchange: CustomEvent<{ paths: Path[]; source: SelectionSource; active: Path | null }>;
+  timechange: CustomEvent<{ time: number }>;
+  playchange: Event;
+  primschange: CustomEvent<{ resynced: Path[] }>;
+  /** Every render delta the core produced, in order; the viewport applies them. */
+  delta: CustomEvent<RenderDelta>;
+  lockchange: CustomEvent<{ path: Path; locked: boolean }>;
+  refinechange: CustomEvent<{ level: number }>;
+  /** The set of layers with unsaved edits changed. */
+  dirtychange: CustomEvent<{ dirty: string[] }>;
+  /** Layers were re-read because their files changed on disk. */
+  diskchange: CustomEvent<{ identifiers: string[] }>;
+  log: CustomEvent<LogEntry>;
+  error: CustomEvent<LogEntry>;
+}
+
+export class UsdSession extends EventTarget {
+  readonly core: CoreClient;
+  readonly ready: Promise<{ usd: string; threads: number }>;
+  stage: StageInfo | null = null;
+  readonly log: LogEntry[] = [];
+  readonly commands = new History();
+  /** Prims (and their subtrees) that tools must not select or edit. Editor state only, never saved. */
+  readonly locked = new Set<Path>();
+  /** Global refinement level: 0 like usdview and Omniverse; -1 = automatic from a triangle budget. */
+  refineLevel = 0;
+  /** The level the core resolved the global setting to. */
+  effectiveRefineLevel = 0;
+  /** Identifiers of layers with unsaved edits. */
+  readonly dirty = new Set<string>();
+  /** Edits below are undoable: the core reports what each one replaced, and the inverse re-authors it. */
+  readonly usd: UsdStageApi = {
+    children: (path = '/') => this.core.call('primChildren', path),
+    prim: (path, time = this.currentTime) => this.core.call('primDetails', path, time),
+    attribute: (path, name, time = this.currentTime) => this.core.call('attributeValue', path, name, time),
+    find: (text, typeName = '', limit = 500) => this.core.call('findPrims', text, typeName, limit),
+    resolvePick: (rid, instance) => this.core.call('resolvePick', rid, instance),
+    setVariant: (path, set, variant) =>
+      this.recorded(
+        () => this.core.call('setVariant', path, set, variant),
+        (previous) => this.core.call('setVariant', path, set, typeof previous === 'string' ? previous : ''),
+      ),
+    setVisible: (path, visible) =>
+      this.recorded(
+        () => this.core.call('setVisible', path, visible),
+        (previous) => this.restore(path, 'visibility', previous, NaN),
+      ),
+    setPayloadLoaded: (path, loaded) =>
+      this.recorded(
+        () => this.core.call('setLoaded', path, loaded),
+        () => this.core.call('setLoaded', path, !loaded),
+      ),
+    setAttribute: (path, name, value, time = NaN) =>
+      this.recorded(
+        () => this.core.call('setAttribute', path, name, JSON.stringify(value), time),
+        (previous) => this.restore(path, name, previous, time),
+      ),
+    clearAttribute: (path, name, time = NaN) =>
+      this.recorded(
+        () => this.core.call('clearAttribute', path, name, time),
+        (previous) => (previous === undefined ? null : this.restore(path, name, previous, time)),
+      ),
+    xformInfo: (path, time = this.currentTime) => this.core.call('xformInfo', path, time),
+    setXform: (path, matrix, time = this.currentTime) =>
+      this.recorded(
+        () => this.core.call('setXform', path, [...(matrix as number[])], time),
+        (previous) => this.core.call('setXform', path, previous as number[], time),
+      ),
+    setXforms: (entries, time = this.currentTime) =>
+      this.recorded(
+        () => this.core.call('setXforms', JSON.stringify(entries), time),
+        (previous) => {
+          const matrices = previous as number[][];
+          return this.core.call('setXforms', JSON.stringify(entries.map((e, i) => ({ path: e.path, matrix: matrices[i] }))), time);
+        },
+      ),
+    setComplexity: async (level) => {
+      this.refineLevel = level;
+      this.core.call('setRefineLevel', level);
+      this.emit('refinechange', { level });
+      await this.flush();
+    },
+    setRefinement: (path, enabled, level) =>
+      this.recorded(
+        () => this.core.call('setRefinement', path, enabled, level),
+        (previous) => this.restoreRefinement(path, previous),
+      ),
+    clearRefinement: (path) =>
+      this.recorded(
+        () => this.core.call('clearRefinement', path),
+        (previous) => this.restoreRefinement(path, previous),
+      ),
+    clearRefinementOverrides: () => this.edit(this.core.call('clearRefinementOverrides')).then(() => undefined), // ponytail: not undoable
+    exportPrim: (path, mode = 'composed') => this.core.call('exportPrim', path, mode),
+    layers: () => this.core.call('listLayers'),
+    setEditTarget: (identifier) => this.edit(this.core.call('setEditTarget', identifier)).then(() => undefined),
+    exportLayer: (identifier, format) => this.core.call('exportLayer', identifier, format),
+    reload: async (identifiers = []) => {
+      await this.edit(this.core.call('reloadLayers', identifiers));
+      this.commands.clear();
+    },
+    clearEdits: async () => {
+      await this.edit(this.core.call('clearSessionEdits'));
+      this.commands.clear();
+    },
+  };
+
+  private selected: Path[] = [];
+  private activePath: Path | null = null;
+  private currentTime = NaN;
+  private wantedTime: number | undefined;
+  private needFlush = false;
+  private pumping: Promise<void> | null = null;
+  private playStart = 0;
+  private playFrom = 0;
+  private playRequest = 0;
+  private disposed = false;
+  private readonly drops = new Map<string, Map<string, File>>();
+  private readonly schemes = new Map<string, SchemeOptions>();
+  /** Write-back handles of a picked folder, by layer identifier (/drop/<n>/<path>). */
+  private readonly handles = new Map<string, FileSystemFileHandle>();
+  private readonly seen = new Map<string, number>(); // lastModified per watched file
+  private watchTimer = 0;
+  private checking = false;
+  private warnedDisk = false;
+
+  constructor(coreUrl: URL | string, makeWorker?: (url: URL) => Worker) {
+    super();
+    this.core = new CoreClient(coreUrl, makeWorker);
+    this.core.onlog = (entry) => this.report(entry.level, entry.message);
+    this.ready = this.core.ready;
+  }
+
+  /* ---------- stage ---------- */
+
+  /** Opens a URL (absolute), a set of local files, or a picked folder (which can then be saved into). */
+  async open(source: string | readonly LocalFile[] | FileSystemDirectoryHandle, options: OpenOptions = {}): Promise<StageInfo> {
+    await this.ready;
+    await this.close();
+    let url: string;
+    if (typeof source === 'string') url = source;
+    else {
+      let files: LocalFile[];
+      let handles = new Map<string, FileSystemFileHandle>();
+      if ('kind' in source) ({ files, handles } = await collectHandle(source));
+      else files = [...source];
+      const root = options.root ?? rootCandidates(files)[0];
+      if (!root) throw new Error('No USD file found in the selection.');
+      const dir = await this.core.call('mount', files);
+      this.drops.set(dir, new Map(files.map((f) => [f.path, f.file])));
+      for (const [path, handle] of handles) {
+        if (!isUsdFile(path)) continue; // ponytail: textures are not watched or written
+        this.handles.set(`${dir}/${path}`, handle);
+        this.seen.set(`${dir}/${path}`, (await handle.getFile()).lastModified);
+      }
+      url = `${dir}/${root}`;
+    }
+    for (const [scheme, options] of this.schemes) {
+      this.core.call('registerScheme', scheme, options.gateway, (await options.getAuth?.()) ?? '');
+    }
+    const logged = this.log.length;
+    const info = await this.core.call('openStage', url, options.loadPayloads ?? true);
+    if (!info.ok) throw new Error(info.error ?? 'could not open stage');
+    // The browser only hands over the files the user picked, never their siblings.
+    if (this.log.slice(logged).some((entry) => entry.message.includes('Could not open asset @/drop/'))) {
+      this.report('error', 'Referenced files are missing: the browser only sees the files you picked. Use "Folder…" or drop the whole folder that contains the USD file.');
+    }
+    this.stage = info;
+    this.emit('stageopen', info);
+    await this.flush(info.hasTimeRange ? info.startTimeCode : NaN);
+    if (this.handles.size) this.watchTimer = window.setInterval(() => this.checkDisk(), 2000);
+    return info;
+  }
+
+  async close(): Promise<void> {
+    if (!this.stage) return;
+    this.pause();
+    clearInterval(this.watchTimer);
+    this.stage = null;
+    this.selected = [];
+    this.activePath = null;
+    this.locked.clear();
+    this.commands.clear();
+    await this.core.call('closeStage');
+    this.drops.clear();
+    this.handles.clear();
+    this.seen.clear();
+    this.warnedDisk = false;
+    this.setDirty([]);
+    this.dispatchEvent(new Event('stageclose'));
+  }
+
+  /* ---------- saving and watching ---------- */
+
+  /** True when a folder was picked with write access, so Save overwrites the files. */
+  get canWriteBack(): boolean {
+    return this.handles.size > 0;
+  }
+
+  /**
+   * Writes every layer with unsaved edits: into the picked folder when there is one, else as a
+   * download. The in-memory layer is then re-read from what was written, which marks it clean.
+   * Returns the identifiers saved.
+   */
+  async save(): Promise<string[]> {
+    const saved: string[] = [];
+    for (const layer of await this.usd.layers()) {
+      if (!layer.dirty || layer.anonymous) continue;
+      if (layer.format === 'usdz') {
+        this.report('warn', `${layer.displayName}: members of a usdz package cannot be written back; use "Download flattened".`);
+        continue;
+      }
+      const format = layer.format === 'usdc' ? 'usdc' : 'usda';
+      const bytes = await this.usd.exportLayer(layer.identifier, format);
+      if (!bytes) continue;
+      const handle = this.handles.get(layer.identifier);
+      if (handle) {
+        const writable = await handle.createWritable();
+        await writable.write(bytes);
+        await writable.close();
+        this.seen.set(layer.identifier, (await handle.getFile()).lastModified);
+      } else download(layer.displayName, bytes);
+      const drop = /^(\/drop\/\d+)\/(.*)$/.exec(layer.identifier);
+      const files = drop ? this.drops.get(drop[1]) : undefined;
+      if (drop && files) {
+        files.set(drop[2], new File([bytes], drop[2].split('/').pop()!));
+        await this.core.call('remount', drop[1], [...files].map(([path, file]) => ({ path, file })));
+        await this.edit(this.core.call('reloadLayers', [layer.identifier]));
+      }
+      saved.push(layer.identifier);
+    }
+    return saved;
+  }
+
+  /** Re-reads layers whose files changed on disk; with unsaved edits it only warns. */
+  private async checkDisk(): Promise<void> {
+    if (this.checking || !this.stage) return;
+    this.checking = true;
+    try {
+      const changed: string[] = [];
+      for (const [identifier, handle] of this.handles) {
+        const file = await handle.getFile();
+        if (this.seen.get(identifier) === file.lastModified) continue;
+        this.seen.set(identifier, file.lastModified);
+        changed.push(identifier);
+        const drop = /^(\/drop\/\d+)\/(.*)$/.exec(identifier)!;
+        this.drops.get(drop[1])?.set(drop[2], file);
+      }
+      if (!changed.length) return;
+      if (this.dirty.size) {
+        if (!this.warnedDisk) this.report('warn', `Changed on disk while you have unsaved edits: ${changed.join(', ')}. Save overwrites the files; Reload takes the disk version.`);
+        this.warnedDisk = true;
+        return;
+      }
+      for (const dir of new Set(changed.map((id) => id.replace(/^(\/drop\/\d+)\/.*$/, '$1')))) {
+        const files = this.drops.get(dir);
+        if (files) await this.core.call('remount', dir, [...files].map(([path, file]) => ({ path, file })));
+      }
+      await this.edit(this.core.call('reloadLayers', changed));
+      this.commands.clear();
+      this.emit('diskchange', { identifiers: changed });
+    } catch (error: any) {
+      this.report('error', error.message);
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /** Resolves when no flush is pending. */
+  async idle(): Promise<void> {
+    while (this.pumping) await this.pumping;
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.pause();
+    this.core.dispose();
+  }
+
+  /** Routes a URL scheme (for example `omniverse`) through an HTTP gateway. */
+  registerScheme(scheme: string, options: SchemeOptions): void {
+    this.schemes.set(scheme, options);
+  }
+
+  /* ---------- selection and locks ---------- */
+
+  get selection(): readonly Path[] {
+    return this.selected;
+  }
+
+  /** The prim the panels show and tools act on: the last one selected unless chosen explicitly. */
+  get active(): Path | null {
+    return this.activePath;
+  }
+
+  select(paths: readonly Path[], source: SelectionSource = 'api', active?: Path): void {
+    this.selected = [...paths];
+    this.activePath = active !== undefined && this.selected.includes(active) ? active : (this.selected.at(-1) ?? null);
+    this.core.call('setSelection', this.selected);
+    this.flush();
+    this.emit('selectionchange', { paths: this.selected, source, active: this.activePath });
+  }
+
+  /** True when the prim or one of its ancestors is locked. */
+  isLocked(path: Path): boolean {
+    for (const locked of this.locked) {
+      if (path === locked || path.startsWith(locked === '/' ? '/' : `${locked}/`)) return true;
+    }
+    return false;
+  }
+
+  setLocked(path: Path, locked: boolean): void {
+    if (locked) this.locked.add(path);
+    else this.locked.delete(path);
+    if (locked && this.selected.some((p) => this.isLocked(p))) this.select(this.selected.filter((p) => !this.isLocked(p)));
+    this.emit('lockchange', { path, locked });
+  }
+
+  /* ---------- time ---------- */
+
+  get time(): number {
+    return this.currentTime;
+  }
+  set time(value: number) {
+    this.currentTime = value;
+    this.flush(value);
+    this.emit('timechange', { time: value });
+  }
+
+  get playing(): boolean {
+    return this.playRequest !== 0;
+  }
+  play(): void {
+    const stage = this.stage;
+    if (!stage?.hasTimeRange || this.playing) return;
+    this.playStart = performance.now();
+    this.playFrom = Number.isNaN(this.currentTime) ? stage.startTimeCode : this.currentTime;
+    const tick = () => {
+      // Time follows the wall clock, so slow frames are dropped instead of queued.
+      const span = stage.endTimeCode - stage.startTimeCode;
+      const elapsed = ((performance.now() - this.playStart) / 1000) * stage.timeCodesPerSecond;
+      this.time = stage.startTimeCode + ((this.playFrom - stage.startTimeCode + elapsed) % (span || 1));
+      this.playRequest = requestAnimationFrame(tick);
+    };
+    this.playRequest = requestAnimationFrame(tick);
+    this.dispatchEvent(new Event('playchange'));
+  }
+  pause(): void {
+    if (!this.playRequest) return;
+    cancelAnimationFrame(this.playRequest);
+    this.playRequest = 0;
+    this.dispatchEvent(new Event('playchange'));
+  }
+
+  /* ---------- core traffic ---------- */
+
+  /** Runs flushes one at a time; the latest requested time wins. Deltas go out as `delta` events. */
+  flush(time?: number): Promise<void> {
+    if (time !== undefined) this.wantedTime = time;
+    this.needFlush = true;
+    this.pumping ??= (async () => {
+      try {
+        while (this.needFlush && !this.disposed) {
+          this.needFlush = false;
+          if (this.wantedTime !== undefined) {
+            this.currentTime = this.wantedTime;
+            this.core.call('setTime', this.wantedTime);
+            this.wantedTime = undefined;
+          }
+          let delta;
+          do {
+            delta = await this.core.call('flush', 2000);
+            if (delta.refineLevel !== undefined && delta.refineLevel !== this.effectiveRefineLevel) {
+              this.effectiveRefineLevel = delta.refineLevel;
+              this.emit('refinechange', { level: this.refineLevel });
+            }
+            this.emit('delta', delta);
+          } while (delta.more);
+        }
+      } catch (error: any) {
+        this.report('error', error.message);
+      } finally {
+        this.pumping = null;
+      }
+    })();
+    return this.pumping;
+  }
+
+  /**
+   * Awaits an edit, fails on error, flushes, and tells listeners which prims resynced. Not
+   * undoable by itself; `quiet` skips the primschange event (a drag emits one at its end).
+   */
+  async edit(call: Promise<Edit>, options: { quiet?: boolean } = {}): Promise<Edit> {
+    const result = await call;
+    if (!result.ok) throw new Error(result.error ?? 'edit failed');
+    this.setDirty(result.dirty ?? []);
+    await this.flush();
+    if (!options.quiet) this.emit('primschange', { resynced: result.resynced });
+    return result;
+  }
+
+  /** Runs an edit as an undoable command; `inverse` builds the undo call from what the edit replaced. */
+  private recorded(forward: () => Promise<Edit>, inverse: (previous: Json | undefined) => Promise<Edit> | null): Promise<void> {
+    let previous: Json | undefined;
+    let first = true;
+    return this.commands.run({
+      label: 'edit',
+      do: async () => {
+        const result = await this.edit(forward());
+        if (first) previous = result.previous;
+        first = false;
+      },
+      undo: async () => {
+        const call = inverse(previous);
+        if (call) await this.edit(call);
+      },
+    });
+  }
+
+  /** Puts an attribute back to an earlier opinion, or removes the opinion when there was none. */
+  private restore(path: Path, name: string, previous: Json | undefined, time: number): Promise<Edit> {
+    return previous === undefined
+      ? this.core.call('clearAttribute', path, name, time)
+      : this.core.call('setAttribute', path, name, JSON.stringify(previous), time);
+  }
+
+  private restoreRefinement(path: Path, previous: Json | undefined): Promise<Edit> {
+    const before = previous as { enabled: boolean; level: number } | null | undefined;
+    return before ? this.core.call('setRefinement', path, before.enabled, before.level) : this.core.call('clearRefinement', path);
+  }
+
+  private setDirty(identifiers: string[]): void {
+    if (identifiers.length === this.dirty.size && identifiers.every((id) => this.dirty.has(id))) return;
+    this.dirty.clear();
+    for (const id of identifiers) this.dirty.add(id);
+    this.emit('dirtychange', { dirty: identifiers });
+  }
+
+  /** Bytes of a resolved asset path, for textures. */
+  async readBytes(resolved: string): Promise<ArrayBuffer | Blob | null> {
+    if (!resolved.includes('[')) {
+      const drop = /^(\/drop\/\d+)\/(.*)$/.exec(resolved);
+      if (drop) return this.drops.get(drop[1])?.get(drop[2]) ?? null;
+      if (/^https?:/.test(resolved)) {
+        const response = await fetch(resolved);
+        return response.ok ? response.blob() : null;
+      }
+    }
+    // Package members (file.usdz[texture.png]) and gateway schemes go through the core's resolver.
+    const bytes = await this.core.call('readAsset', resolved);
+    return bytes ? (bytes.buffer as ArrayBuffer) : null;
+  }
+
+  report(level: LogEntry['level'], message: string): void {
+    this.log.push({ level, message });
+    this.emit(level === 'error' ? 'error' : 'log', { level, message });
+  }
+
+  /** Dispatches a session event; modules use it for events they own (a tool's final primschange). */
+  emit(type: keyof UsdSessionEventMap, detail: unknown): void {
+    this.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+}
+
+/** Ctrl-click: adds a prim and makes it active; on another selected prim it only activates it; on the active one it deselects. */
+export function ctrlSelect(session: UsdSession, path: Path, source: SelectionSource): void {
+  const paths = session.selection;
+  if (!paths.includes(path)) session.select([...paths, path], source);
+  else if (session.active !== path) session.select(paths, source, path);
+  else session.select(paths.filter((p) => p !== path), source);
+}

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Host page sample: driving the viewer through its API</title>
+    <style>
+      body { margin: 0; display: grid; grid-template-columns: 1fr 320px; height: 100vh; font: 13px system-ui, sans-serif; }
+      aside { padding: 12px; overflow: auto; background: #f4f4f5; }
+      button { display: block; margin: 6px 0; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <!-- No built-in panels: this page supplies its own controls. -->
+    <usd-viewer id="viewer" panels="none"></usd-viewer>
+    <aside>
+      <button id="open">Open sample stage</button>
+      <button id="select">Select the sphere</button>
+      <button id="move">Move the spinner up</button>
+      <button id="variant">Switch spinner variant</button>
+      <button id="play">Play / pause</button>
+      <pre id="log"></pre>
+    </aside>
+    <script type="module">
+      import '/src/index.ts';
+
+      const viewer = document.getElementById('viewer');
+      const core = new URLSearchParams(location.search).get('core');
+      if (core) viewer.setAttribute('core-url', core);
+      if (location.search.includes('forceWebGL')) viewer.setAttribute('force-webgl', '');
+      const log = (text) => (document.getElementById('log').textContent += text + '\n');
+
+      viewer.addEventListener('stageopen', (e) => log(`opened, up axis ${e.detail.upAxis}`));
+      viewer.addEventListener('selectionchange', (e) => log(`selected ${e.detail.paths.join(', ') || 'nothing'} (${e.detail.source})`));
+      viewer.addEventListener('error', (e) => log(`error: ${e.detail.message}`));
+
+      const on = (id, action) => document.getElementById(id).addEventListener('click', action);
+      on('open', () => viewer.open('samples/showcase.usda'));
+      on('select', () => viewer.select('/World/Shapes/Sphere', { frame: true }));
+      on('move', async () => {
+        await viewer.usd.setAttribute('/World/Spinner', 'xformOp:translate', [0, 3.2, 0]);
+        log(`translate is now ${JSON.stringify(await viewer.usd.attribute('/World/Spinner', 'xformOp:translate'))}`);
+      });
+      on('variant', async () => {
+        const info = await viewer.usd.prim('/World/Spinner');
+        const current = info.variantSets[0].selection;
+        await viewer.usd.setVariant('/World/Spinner', 'shape', current === 'cube' ? 'cone' : 'cube');
+      });
+      on('play', () => (viewer.playing ? viewer.pause() : viewer.play()));
+    </script>
+  </body>
+</html>

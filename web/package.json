@@ -1,0 +1,26 @@
+{
+  "name": "usd-web-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\"",
+    "build": "tsc --noEmit && vite build",
+    "build:lib": "vite build --mode lib",
+    "preview": "vite preview",
+    "e2e": "playwright test",
+    "e2e:update": "playwright test --update-snapshots"
+  },
+  "dependencies": {
+    "three": "0.186.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "~1.63.0",
+    "@types/node": "^26.6.4",
+    "@types/three": "0.186.0",
+    "typescript": "~7.0.2",
+    "vite": "~8.3.2"
+  }
+}

@@ -42,7 +42,7 @@ export class SelectTool implements Tool {
       (e) => {
         down = null;
         if (e.button !== 0 || this.grabbed()) return;
-        const mode: SelectMode = e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace';
+        const mode: SelectMode = (e.shiftKey && (e.ctrlKey || e.metaKey) ? 'up' : e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace');
         down = { x: e.clientX, y: e.clientY, mode, orbit: viewport.controls.enabled };
         if (mode !== 'replace') {
           viewport.controls.enabled = false;
@@ -50,6 +50,22 @@ export class SelectTool implements Tool {
         }
       },
       { signal, capture: true },
+    );
+    // Right click without a drag (a right drag pans): the prim menu for what is under the pointer.
+    let rightDown: [number, number] | null = null;
+    canvas.addEventListener('pointerdown', (e) => (rightDown = e.button === 2 ? [e.clientX, e.clientY] : null), { signal });
+    canvas.addEventListener(
+      'contextmenu',
+      async (e) => {
+        const start = rightDown;
+        rightDown = null;
+        if (!start || Math.hypot(e.clientX - start[0], e.clientY - start[1]) > 4) return;
+        e.preventDefault();
+        const hit = viewport.pick(e.clientX, e.clientY);
+        const result = hit ? await this.session.usd.resolvePick(hit.rid, hit.instance) : null;
+        if (result) viewport.oncontext(result.path, e.clientX, e.clientY);
+      },
+      { signal },
     );
     canvas.addEventListener(
       'pointermove',
@@ -86,7 +102,7 @@ export class SelectTool implements Tool {
         } else return; // an orbit drag
         const results = await Promise.all(hits.map((hit) => this.session.usd.resolvePick(hit.rid, hit.instance)));
         const paths = [...new Set(results.flatMap((r) => (r && !this.session.isLocked(r.path) ? [r.path] : [])))];
-        modifySelect(this.session, paths, start.mode, 'viewport');
+        modifySelect(this.session, paths, marquee && start.mode === 'up' ? 'add' : start.mode, 'viewport');
       },
       { signal },
     );

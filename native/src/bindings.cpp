@@ -165,6 +165,9 @@ std::string setVariant(const std::string& path, const std::string& variantSet, c
 }
 std::string setVisible(const std::string& path, bool visible) { return gStage.SetVisible(path, visible); }
 std::string sessionVisibility(const std::string& mode, const std::string& json) { return gStage.SessionVisibility(mode, json); }
+std::string revertPrim(const std::string& path) { return gStage.RevertPrim(path); }
+std::string restorePrim(int stash) { return gStage.RestorePrim(stash); }
+void resetChanges() { gStage.ResetChanges(); }
 std::string setLoaded(const std::string& path, bool loaded) { return gStage.SetLoaded(path, loaded); }
 std::string setAttribute(const std::string& path, const std::string& name, const std::string& json, double time)
 {
@@ -232,6 +235,9 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setVisible", &setVisible);
     function("sessionVisibility", &sessionVisibility);
     function("setLoaded", &setLoaded);
+    function("revertPrim", &revertPrim);
+    function("restorePrim", &restorePrim);
+    function("resetChanges", &resetChanges);
     function("setAttribute", &setAttribute);
     function("clearSessionEdits", &clearSessionEdits);
     function("xformInfo", &xformInfo);

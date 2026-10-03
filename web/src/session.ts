@@ -35,6 +35,8 @@ export interface UsdStageApi {
   hide(paths: readonly Path[]): Promise<void>;
   isolate(paths: readonly Path[]): Promise<void>;
   showAll(): Promise<void>;
+  /** "Clear edits": the prim and everything below it back to how the stage was opened (undoable). */
+  clearPrimEdits(path: Path): Promise<void>;
   setPayloadLoaded(path: Path, loaded: boolean): Promise<void>;
   /** Writes to the stage's edit target; `time` omitted writes the default value. */
   setAttribute(path: Path, name: string, value: Json, time?: number): Promise<void>;
@@ -151,7 +153,7 @@ export class UsdSession extends EventTarget {
   effectiveRefineLevel = 0;
   /** Identifiers of layers with unsaved edits. */
   readonly dirty = new Set<string>();
-  /** Prims edited since the stage was opened or reloaded (saving keeps them); viewer hiding does not count. */
+  /** Prims whose specs differ from the stage as opened or reloaded (saving keeps them; undo or Clear edits removes them). Viewer hiding does not count. */
   readonly changed = new Set<Path>();
   private changedBelow = new Set<Path>(); // ancestors of changed prims
   /** Edits below are undoable: the core reports what each one replaced, and the inverse re-authors it. */
@@ -175,6 +177,11 @@ export class UsdSession extends EventTarget {
     hide: (paths) => this.sessionVisibility('hide', paths),
     isolate: (paths) => this.sessionVisibility('isolate', paths),
     showAll: () => this.sessionVisibility('showAll', []),
+    clearPrimEdits: (path) =>
+      this.recorded(
+        () => this.core.call('revertPrim', path),
+        (previous) => this.core.call('restorePrim', previous as number),
+      ),
     setPayloadLoaded: (path, loaded) =>
       this.recorded(
         () => this.core.call('setLoaded', path, loaded),
@@ -226,12 +233,12 @@ export class UsdSession extends EventTarget {
     setEditTarget: (identifier) => this.edit(this.core.call('setEditTarget', identifier)).then(() => undefined),
     exportLayer: (identifier, format) => this.core.call('exportLayer', identifier, format),
     reload: async (identifiers = []) => {
-      await this.edit(this.core.call('reloadLayers', identifiers), { viewOnly: true });
+      await this.edit(this.core.call('reloadLayers', identifiers));
       this.commands.clear();
-      this.clearChanged();
+      this.resetChanges();
     },
     clearEdits: async () => {
-      await this.edit(this.core.call('clearSessionEdits'), { viewOnly: true }); // viewer-only edits, never marked
+      await this.edit(this.core.call('clearSessionEdits'));
       this.commands.clear();
     },
   };
@@ -312,7 +319,7 @@ export class UsdSession extends EventTarget {
     this.activePath = null;
     this.locked.clear();
     this.commands.clear();
-    this.clearChanged();
+    this.setChanged([]);
     await this.core.call('closeStage');
     this.drops.clear();
     this.handles.clear();
@@ -357,7 +364,7 @@ export class UsdSession extends EventTarget {
       if (drop && files) {
         files.set(drop[2], new File([bytes], drop[2].split('/').pop()!));
         await this.core.call('remount', drop[1], [...files].map(([path, file]) => ({ path, file })));
-        await this.edit(this.core.call('reloadLayers', [layer.identifier]), { viewOnly: true }); // saving keeps the markers
+        await this.edit(this.core.call('reloadLayers', [layer.identifier])); // saving keeps the markers: the baseline stays
       }
       saved.push(layer.identifier);
     }
@@ -388,9 +395,9 @@ export class UsdSession extends EventTarget {
         const files = this.drops.get(dir);
         if (files) await this.core.call('remount', dir, [...files].map(([path, file]) => ({ path, file })));
       }
-      await this.edit(this.core.call('reloadLayers', changed), { viewOnly: true });
+      await this.edit(this.core.call('reloadLayers', changed));
       this.commands.clear();
-      this.clearChanged();
+      this.resetChanges();
       this.emit('diskchange', { identifiers: changed });
     } catch (error: any) {
       this.report('error', error.message);
@@ -533,11 +540,11 @@ export class UsdSession extends EventTarget {
    * Awaits an edit, fails on error, flushes, and tells listeners which prims resynced. Not
    * undoable by itself; `quiet` skips the primschange event (a drag emits one at its end).
    */
-  async edit(call: Promise<Edit>, options: { quiet?: boolean; visibility?: boolean; viewOnly?: boolean } = {}): Promise<Edit> {
+  async edit(call: Promise<Edit>, options: { quiet?: boolean; visibility?: boolean } = {}): Promise<Edit> {
     const result = await call;
     if (!result.ok) throw new Error(result.error ?? 'edit failed');
     this.setDirty(result.dirty ?? []);
-    if (!options.viewOnly) this.markChanged(result.changed ?? []);
+    if (result.changed) this.setChanged(result.changed);
     await this.flush();
     if (!options.quiet) this.emit('primschange', { resynced: result.resynced, visibility: options.visibility });
     return result;
@@ -548,20 +555,19 @@ export class UsdSession extends EventTarget {
     forward: () => Promise<Edit>,
     inverse: (previous: Json | undefined) => Promise<Edit> | null,
     visibility = false,
-    viewOnly = false,
   ): Promise<void> {
     let previous: Json | undefined;
     let first = true;
     return this.commands.run({
       label: 'edit',
       do: async () => {
-        const result = await this.edit(forward(), { visibility, viewOnly });
+        const result = await this.edit(forward(), { visibility });
         if (first) previous = result.previous;
         first = false;
       },
       undo: async () => {
         const call = inverse(previous);
-        if (call) await this.edit(call, { visibility, viewOnly });
+        if (call) await this.edit(call, { visibility });
       },
     });
   }
@@ -571,7 +577,6 @@ export class UsdSession extends EventTarget {
       () => this.core.call('sessionVisibility', mode, JSON.stringify(paths)),
       (previous) => this.core.call('sessionVisibility', 'set', JSON.stringify(previous ?? {})),
       true,
-      true,
     );
   }
 
@@ -580,21 +585,23 @@ export class UsdSession extends EventTarget {
     return this.changed.has(path) ? 'self' : this.changedBelow.has(path) ? 'below' : null;
   }
 
-  private markChanged(paths: readonly Path[]): void {
-    const added = paths.filter((p) => p !== '/' && !this.changed.has(p));
-    if (!added.length) return;
-    for (const path of added) {
+  /** The core reports the full list after every edit: prims that differ from the stage as opened. */
+  private setChanged(paths: readonly Path[]): void {
+    const next = paths.filter((p) => p !== '/');
+    if (next.length === this.changed.size && next.every((p) => this.changed.has(p))) return;
+    this.changed.clear();
+    this.changedBelow.clear();
+    for (const path of next) {
       this.changed.add(path);
       for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) this.changedBelow.add(path.slice(0, i));
     }
     this.dispatchEvent(new Event('changedprims'));
   }
 
-  private clearChanged(): void {
-    if (!this.changed.size) return;
-    this.changed.clear();
-    this.changedBelow.clear();
-    this.dispatchEvent(new Event('changedprims'));
+  /** After a reload: what is loaded now is the new "as opened" state. */
+  private resetChanges(): void {
+    this.core.call('resetChanges');
+    this.setChanged([]);
   }
 
   /** Puts an attribute back to an earlier opinion, or removes the opinion when there was none. */
@@ -642,7 +649,8 @@ export class UsdSession extends EventTarget {
   }
 }
 
-export type SelectMode = 'replace' | 'add' | 'remove';
+/** add: Shift; remove: Ctrl; up: Shift+Ctrl adds the nearest ancestor that is not selected yet. */
+export type SelectMode = 'replace' | 'add' | 'remove' | 'up';
 
 /**
  * Shift (add) and Ctrl (remove) selection. Adding makes the last given path active, so Shift-click
@@ -650,7 +658,16 @@ export type SelectMode = 'replace' | 'add' | 'remove';
  */
 export function modifySelect(session: UsdSession, paths: readonly Path[], mode: SelectMode, source: SelectionSource): void {
   const current = session.selection;
-  if (mode === 'replace') session.select(paths, source);
+  if (mode === 'up') {
+    const path = paths.at(-1);
+    if (!path) return;
+    const selected = new Set([...current, path]);
+    let up: Path | undefined;
+    for (let i = path.lastIndexOf('/'); i > 0 && !up; i = path.lastIndexOf('/', i - 1)) {
+      if (!selected.has(path.slice(0, i))) up = path.slice(0, i);
+    }
+    modifySelect(session, up ? [path, up] : [path], 'add', source);
+  } else if (mode === 'replace') session.select(paths, source);
   else if (mode === 'add') session.select([...current, ...paths.filter((p) => !current.includes(p))], source, paths.at(-1) ?? session.active ?? undefined);
   else {
     const kept = current.filter((p) => !paths.includes(p));

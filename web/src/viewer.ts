@@ -14,12 +14,13 @@ import { SelectTool, type TransformMode, TransformTool } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
 import type { DisplayMode, SceneStats } from './scene.ts';
-import { type CameraSettings, type ToneMapping, Viewport } from './viewport.ts';
+import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode;
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event };
+export { DEFAULT_BACKGROUND };
 export type { CameraSettings };
 /** Which panels around the viewport are shown. */
 export interface PanelState {
@@ -45,6 +46,7 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Click', 'Select a prim (empty space clears)'],
       ['Shift+click', 'Add to the selection (on a selected prim: make it active)'],
       ['Ctrl+click', 'Remove from the selection'],
+      ['Shift+Ctrl+click', "Add the prim's parent; again: the next level up"],
       ['Shift+drag up', 'Add everything the rectangle touches'],
       ['Shift+drag down', 'Add everything fully inside the rectangle'],
       ['Ctrl+drag up / down', 'Remove, the same way'],
@@ -83,6 +85,7 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Ctrl+Shift+Z, Ctrl+Y', 'Redo'],
       ['Ctrl+S', 'Save'],
       ['Click a value', 'Copy it (right click: more ways to copy)'],
+      ['Right click a prim', 'Prim menu (hierarchy or viewport): copy its USD, lock, Clear edits'],
     ],
   ],
   ['Help', [['F1 or ?', 'This window']]],
@@ -108,7 +111,7 @@ export class UsdViewerElement extends HTMLElement {
   private readonly skyTextures: TextureCache;
   private skyName: string | null = null;
   /** Panel widths and visibility, kept per browser. */
-  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true }; // widths: share of the element
+  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true, background: DEFAULT_BACKGROUND }; // widths: share of the element
   /** Tabs on the viewport's borders that show and hide the panels. */
   private readonly toggles = {
     left: h('button', { className: 'toggle side' }),
@@ -141,6 +144,7 @@ export class UsdViewerElement extends HTMLElement {
       for (const side of ['left', 'right'] as const) if (!(saved[side] > 0 && saved[side] < 1)) delete saved[side]; // older pixel widths
       Object.assign(this.layout, saved);
     } catch {} // storage blocked or corrupt: defaults
+    this.viewport.background = this.layout.background;
     root.append(this.build());
     this.wire();
     this.ready = this.start();
@@ -301,14 +305,19 @@ export class UsdViewerElement extends HTMLElement {
   set toneMapping(mode: ToneMapping) {
     this.viewport.toneMapping = mode;
   }
-  /** A viewer sky (key of SKIES) lighting the stage and filling the background in place of its dome; null: the stage's own lighting. */
+  /**
+   * A viewer sky (key of SKIES) lighting the stage and filling the background in place of its dome;
+   * 'colour': the stage's lighting in front of the plain background colour; null: the stage as authored.
+   */
   get sky(): string | null {
     return this.skyName;
   }
   set sky(name: string | null) {
-    this.skyName = name && SKIES[name] ? name : null;
+    this.skyName = name === 'colour' || (name && SKIES[name]) ? name : null;
     this.dispatchEvent(new Event('skychange'));
-    if (!this.skyName) {
+    // 'colour': the background colour behind the stage, even where its dome light has a texture.
+    this.viewport.sync.solidBackground = this.skyName === 'colour';
+    if (!this.skyName || this.skyName === 'colour') {
       this.viewport.sync.setSky(null);
       return;
     }
@@ -317,6 +326,17 @@ export class UsdViewerElement extends HTMLElement {
     this.skyTextures.get(url, '').then((texture) => {
       if (this.skyName === wanted) this.viewport.sync.setSky(texture);
     });
+  }
+
+  /** Background colour (#rrggbb) wherever no sky or dome texture fills the background. Remembered per browser. */
+  get backgroundColor(): string {
+    return this.viewport.background;
+  }
+  set backgroundColor(color: string) {
+    this.viewport.background = color;
+    this.layout.background = this.viewport.background;
+    this.applyLayout();
+    this.dispatchEvent(new Event('backgroundchange'));
   }
 
   /** Panels around the viewport; hidden ones give their space to it. Remembered per browser. */
@@ -600,9 +620,15 @@ export class UsdViewerElement extends HTMLElement {
     this.tree.isLocked = (path) => session.isLocked(path);
     this.tree.changeState = (path) => session.changeState(path);
     this.tree.onlock = (path, locked) => session.setLocked(path, locked);
-    this.tree.oncontext = (path, x, y) => {
+    // The prim menu: right click in the hierarchy or on the prim in the viewport.
+    this.tree.oncontext = this.viewport.oncontext = (path, x, y) => {
       const locked = session.isLocked(path);
       const items: MenuItem[] = [
+        {
+          label: 'Clear edits',
+          action: () => this.usd.clearPrimEdits(path).catch(() => {}),
+          disabled: !session.changeState(path),
+        },
         { label: 'Copy composed USD', action: () => this.usd.exportPrim(path, 'composed').then(copyText) },
         { label: 'Copy authored USD', action: () => this.usd.exportPrim(path, 'authored').then(copyText) },
         { label: 'Copy path', action: () => copyText(path) },

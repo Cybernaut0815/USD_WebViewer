@@ -54,6 +54,12 @@ public:
     /// "set" (JSON object path -> "invisible" | null, for undo). `previous` maps each touched
     /// path to its earlier session-layer opinion, in the shape "set" takes.
     std::string SessionVisibility(const std::string& mode, const std::string& json);
+    /// "Clear edits": the prim and its subtree as they were when the stage was opened (local layer
+    /// stack, session layer untouched); `previous` is a stash id for RestorePrim.
+    std::string RevertPrim(const std::string& path);
+    std::string RestorePrim(int stash);
+    /// Takes the current layers as the state change markers compare against (after a reload).
+    void ResetChanges();
     std::string SetLoaded(const std::string& path, bool loaded);
     std::string SetAttribute(const std::string& path, const std::string& name, const std::string& json, double time);
     std::string ClearSessionEdits();

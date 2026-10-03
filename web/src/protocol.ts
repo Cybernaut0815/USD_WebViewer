@@ -59,6 +59,11 @@ export interface CoreApi {
    */
   sessionVisibility(mode: 'hide' | 'isolate' | 'showAll' | 'set', json: string): Edit;
   setLoaded(path: Path, loaded: boolean): Edit;
+  /** The prim and its subtree as when the stage was opened (local layer stack); `previous` is a stash id. */
+  revertPrim(path: Path): Edit;
+  restorePrim(stash: number): Edit;
+  /** Takes the current layers as the baseline of the change markers (after a reload). */
+  resetChanges(): void;
   setAttribute(path: Path, name: string, jsonValue: string, time: number): Edit;
   /** Removes the edit target's opinion: the default value (NaN time) or the sample at `time`. */
   clearAttribute(path: Path, name: string, time: number): Edit;

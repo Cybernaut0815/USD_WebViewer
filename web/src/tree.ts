@@ -248,7 +248,10 @@ export class Tree {
       this.draw();
     } else if (target.classList.contains('lock')) {
       this.onlock(node.summary.path, !this.isLocked(node.summary.path));
-    } else this.onselect(node.summary.path, event.shiftKey ? 'add' : event.ctrlKey || event.metaKey ? 'remove' : 'replace');
+    } else {
+      const e = event;
+      this.onselect(node.summary.path, (e.shiftKey && (e.ctrlKey || e.metaKey) ? 'up' : e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace'));
+    }
   }
 
   private async key(event: KeyboardEvent): Promise<void> {

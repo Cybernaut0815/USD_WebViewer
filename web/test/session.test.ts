@@ -72,18 +72,33 @@ test('edit rejects a failed edit and reports resynced prims otherwise', async ()
   assert.deepEqual(seen, [{ resynced: ['/a'], visibility: true }]);
 });
 
-test('edited prims and their ancestors are marked; viewer hiding is not', async () => {
+test('the change markers follow the list the core reports after each edit', async () => {
   const { worker, s } = session();
   let events = 0;
   s.addEventListener('changedprims', () => events++);
-  worker.replies.set('setAttribute', { ok: true, resynced: [], changed: ['/a/b'], dirty: ['root.usda'] });
+  worker.replies.set('setAttribute', { ok: true, resynced: [], changed: ['/a/b'], previous: 2, dirty: ['root.usda'] });
   await s.usd.setAttribute('/a/b', 'size', 3);
   assert.deepEqual([s.changeState('/a/b'), s.changeState('/a'), s.changeState('/c')], ['self', 'below', null]);
-  worker.replies.set('sessionVisibility', { ok: true, resynced: [], changed: ['/c'], previous: {}, dirty: [] });
-  await s.usd.hide(['/c']);
-  assert.equal(s.changeState('/c'), null);
-  await s.usd.setAttribute('/a/b', 'size', 4); // already marked: no new event
+  await s.usd.setAttribute('/a/b', 'size', 4); // same list: no new event
   assert.equal(events, 1);
+  worker.replies.set('setAttribute', { ok: true, resynced: [], changed: [], dirty: [] }); // undo restored the original
+  await s.commands.undo();
+  assert.deepEqual([s.changeState('/a/b'), s.changeState('/a')], [null, null]);
+  assert.equal(events, 2);
+});
+
+test('shift+ctrl adds the nearest unselected ancestor, one level per click', () => {
+  const { s } = session();
+  s.select(['/a/b/c']);
+  modifySelect(s, ['/a/b/c'], 'up', 'hierarchy');
+  assert.deepEqual([s.selection, s.active], [['/a/b/c', '/a/b'], '/a/b']);
+  modifySelect(s, ['/a/b/c'], 'up', 'hierarchy');
+  assert.deepEqual([s.selection, s.active], [['/a/b/c', '/a/b', '/a'], '/a']);
+  modifySelect(s, ['/a/b/c'], 'up', 'hierarchy');
+  assert.deepEqual(s.selection, ['/a/b/c', '/a/b', '/a']);
+  s.select([]);
+  modifySelect(s, ['/x/y'], 'up', 'viewport'); // an unselected prim: it and its parent
+  assert.deepEqual([s.selection, s.active], [['/x/y', '/x'], '/x']);
 });
 
 test('hiding is one command whose undo sets the session layer back to what it held', async () => {

@@ -383,9 +383,102 @@ UsdPrim EditablePrim(const UsdStageRefPtr& stage, const std::string& path)
     return prim;
 }
 
-/// Runs `edit` against the stage's edit target (the root layer unless changed) and reports it as an Edit.
+/* ---------- change tracking: prims that differ from the stage as opened ---------- */
+
+using Fields = std::map<TfToken, VtValue>;
+
+/// A spec's fields without the child lists (children are compared as specs of their own).
+Fields FieldsOf(const SdfLayerHandle& layer, const SdfPath& path)
+{
+    static const std::set<TfToken> children = { SdfChildrenKeys->PrimChildren, SdfChildrenKeys->PropertyChildren,
+        SdfChildrenKeys->VariantSetChildren, SdfChildrenKeys->VariantChildren, SdfChildrenKeys->ConnectionChildren,
+        SdfChildrenKeys->RelationshipTargetChildren, SdfChildrenKeys->MapperChildren, SdfChildrenKeys->MapperArgChildren,
+        SdfChildrenKeys->ExpressionChildren };
+    Fields fields;
+    if (!layer || !layer->HasSpec(path)) return fields;
+    for (const TfToken& key : layer->ListFields(path)) {
+        if (!children.count(key)) fields[key] = layer->GetField(path, key);
+    }
+    return fields;
+}
+
+/// The local layer stack as opened (session layer excluded), the prims edits have touched since,
+/// and what "Clear edits" replaced (for its undo).
+struct ChangeTracker {
+    std::vector<std::pair<SdfLayerHandle, SdfLayerRefPtr>> snapshot;
+    std::set<SdfPath> touched;
+    struct Stash {
+        SdfPath path;
+        std::vector<std::pair<SdfLayerHandle, SdfLayerRefPtr>> layers; // null: the layer had no spec there
+    };
+    std::map<int, Stash> stashes;
+    int nextStash = 1;
+
+    void Take(const UsdStageRefPtr& stage)
+    {
+        snapshot.clear();
+        touched.clear();
+        stashes.clear();
+        if (!stage) return;
+        for (const SdfLayerHandle& layer : stage->GetLayerStack(/*includeSessionLayers=*/false)) {
+            SdfLayerRefPtr copy = SdfLayer::CreateAnonymous("snapshot");
+            copy->TransferContent(layer);
+            snapshot.emplace_back(layer, copy);
+        }
+    }
+
+    /// True while the prim's own specs (not its children) differ from the snapshot in some layer.
+    /// ponytail: specs left behind by undo (an over with no fields, an attribute with only
+    /// typeName / custom / variability) count as absent; extend if other leftovers show up.
+    bool Differs(const SdfPath& path) const
+    {
+        static const std::set<TfToken> bookkeeping = { SdfFieldKeys->TypeName, SdfFieldKeys->Custom, SdfFieldKeys->Variability };
+        const auto prim = [&](const SdfLayerHandle& layer) {
+            Fields fields = FieldsOf(layer, path);
+            if (fields.empty()) fields[SdfFieldKeys->Specifier] = VtValue(SdfSpecifierOver);
+            return fields;
+        };
+        const auto properties = [&](const SdfLayerHandle& layer, std::set<TfToken>* names) {
+            if (const SdfPrimSpecHandle spec = layer->GetPrimAtPath(path)) {
+                for (const SdfPropertySpecHandle& property : spec->GetProperties()) names->insert(property->GetNameToken());
+            }
+        };
+        for (const auto& [layer, copy] : snapshot) {
+            if (!layer) continue;
+            if (prim(layer) != prim(copy)) return true;
+            std::set<TfToken> names;
+            properties(layer, &names);
+            properties(copy, &names);
+            for (const TfToken& name : names) {
+                Fields now = FieldsOf(layer, path.AppendProperty(name)), then = FieldsOf(copy, path.AppendProperty(name));
+                const auto strip = [&](Fields& fields) {
+                    for (const TfToken& key : bookkeeping) fields.erase(key);
+                };
+                if (then.empty()) strip(now);
+                if (now.empty()) strip(then);
+                if (now != then) return true;
+            }
+        }
+        return false;
+    }
+} gTracker;
+
+/// Makes `path` in `layer` what it is in `from` (subtree included), or removes it when `from` has none.
+void ReplacePrimSpec(const SdfLayerHandle& from, const SdfLayerHandle& layer, const SdfPath& path)
+{
+    if (from && from->GetPrimAtPath(path)) {
+        SdfCreatePrimInLayer(layer, path);
+        SdfCopySpec(from, path, layer, path);
+    } else if (const SdfPrimSpecHandle spec = layer->GetPrimAtPath(path)) {
+        const SdfPrimSpecHandle parent = path.GetParentPath().IsAbsoluteRootPath() ? layer->GetPseudoRoot() : layer->GetPrimAtPath(path.GetParentPath());
+        if (parent) parent->RemoveNameChild(spec);
+    }
+}
+
+/// Runs `edit` against the stage's edit target (the root layer unless changed) and reports it as an
+/// Edit. `track`: the prims it touches become candidates for the change markers (not for viewer hiding).
 template <class Fn>
-std::string Edit(const UsdStageRefPtr& stage, Fn&& edit)
+std::string Edit(const UsdStageRefPtr& stage, Fn&& edit, bool track = true)
 {
     std::string error = "no stage is open";
     ChangeListener listener;
@@ -394,6 +487,7 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit)
         TfNotice::Key key = TfNotice::Register(TfCreateWeakPtr(&listener), &ChangeListener::Changed, UsdStageWeakPtr(stage));
         error = edit();
         TfNotice::Revoke(key);
+        if (track) gTracker.touched.insert(listener.changed.begin(), listener.changed.end());
     }
     std::ostringstream stream;
     JsWriter w(stream);
@@ -406,8 +500,13 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit)
     }
     w.WriteKey("resynced");
     WritePaths(w, listener.resynced);
+    // The full current list: prims touched so far that still differ from the stage as opened.
     w.WriteKey("changed");
-    WritePaths(w, SdfPathVector(listener.changed.begin(), listener.changed.end()));
+    SdfPathVector changed;
+    for (const SdfPath& path : gTracker.touched) {
+        if (gTracker.Differs(path)) changed.push_back(path);
+    }
+    WritePaths(w, changed);
     if (!gPrevious.IsEmpty()) {
         w.WriteKey("previous");
         WriteJsonValue(w, gPrevious, std::numeric_limits<size_t>::max());
@@ -547,6 +646,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
     Close();
     _stage = UsdStage::Open(url, loadPayloads ? UsdStage::LoadAll : UsdStage::LoadNone);
     _url = url;
+    gTracker.Take(_stage);
     std::ostringstream stream;
     JsWriter w(stream);
     w.BeginObject();
@@ -586,6 +686,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
 
 void Stage::Close()
 {
+    gTracker.Take(nullptr);
     _stage.Reset();
     _url.clear();
 }
@@ -1002,7 +1103,45 @@ std::string Stage::SessionVisibility(const std::string& mode, const std::string&
         }
         gPrevious = VtValue(previous);
         return "";
+    }, /*track=*/false);
+}
+
+std::string Stage::RevertPrim(const std::string& path)
+{
+    return Edit(_stage, [&]() -> std::string {
+        if (!SdfPath::IsValidPathString(path) || !SdfPath(path).IsPrimPath()) return "invalid prim path " + path;
+        ChangeTracker::Stash stash { SdfPath(path), {} };
+        SdfChangeBlock block;
+        for (const auto& [layer, copy] : gTracker.snapshot) {
+            SdfLayerRefPtr saved;
+            if (layer->GetPrimAtPath(stash.path)) {
+                saved = SdfLayer::CreateAnonymous("stash");
+                ReplacePrimSpec(layer, saved, stash.path);
+            }
+            stash.layers.emplace_back(layer, saved);
+            ReplacePrimSpec(copy, layer, stash.path);
+        }
+        const int id = gTracker.nextStash++;
+        gTracker.stashes[id] = std::move(stash);
+        gPrevious = VtValue(id);
+        return "";
     });
+}
+
+std::string Stage::RestorePrim(int stash)
+{
+    return Edit(_stage, [&]() -> std::string {
+        const auto found = gTracker.stashes.find(stash);
+        if (found == gTracker.stashes.end()) return "nothing to restore";
+        SdfChangeBlock block;
+        for (const auto& [layer, saved] : found->second.layers) ReplacePrimSpec(saved, layer, found->second.path);
+        return "";
+    });
+}
+
+void Stage::ResetChanges()
+{
+    gTracker.Take(_stage);
 }
 
 std::string Stage::SetLoaded(const std::string& path, bool loaded)

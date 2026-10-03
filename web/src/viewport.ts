@@ -9,6 +9,8 @@ import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
 export type ToneMapping = 'none' | 'neutral' | 'aces' | 'agx';
+/** The view's background where no sky or dome texture fills it. */
+export const DEFAULT_BACKGROUND = '#26282b';
 
 /** The free camera's lens. Focal length is 35 mm equivalent on a 24 mm high gate, so it fixes the vertical field of view. */
 export interface CameraSettings {
@@ -55,11 +57,13 @@ export class Viewport {
   frameMs = 0;
   /** Called before each frame is drawn, with the camera of that frame in place (gizmos, overlays). */
   readonly beforeRender = new Set<() => void>();
+  /** Right click on a prim in the view (set by the element: its prim menu). */
+  oncontext: (path: Path, x: number, y: number) => void = () => {};
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL });
-    this.renderer.setClearColor(0x26282b);
+    this.renderer.setClearColor(DEFAULT_BACKGROUND);
     this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.shadowMap.enabled = true;
     this.sync = new SceneSync(this.scene, {
@@ -133,6 +137,14 @@ export class Viewport {
       this.presented.push(resolve);
       this.invalidate();
     });
+  }
+
+  get background(): string {
+    return `#${this.renderer.getClearColor(new THREE.Color()).getHexString()}`;
+  }
+  set background(color: string) {
+    this.renderer.setClearColor(/^#[0-9a-f]{6}$/i.test(color) ? color : DEFAULT_BACKGROUND);
+    this.invalidate();
   }
 
   set exposure(ev: number) {

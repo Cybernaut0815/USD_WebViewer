@@ -141,6 +141,10 @@ const api = {
     return { ok: true, resynced: [], previous, dirty: dirty ? [rootLayer] : [] };
   },
   setLoaded: () => ({ ok: true, resynced: [], dirty: [] }),
+  // The mock has no snapshot: Clear edits just reports the cube as unchanged again.
+  revertPrim: () => ({ ok: true, resynced: [], changed: [], previous: 1, dirty: dirty ? [rootLayer] : [] }),
+  restorePrim: () => edited(),
+  resetChanges() {},
   setAttribute: () => edited(),
   clearAttribute: () => edited(),
   clearSessionEdits: () => ({ ok: true, resynced: [], dirty: [] }),

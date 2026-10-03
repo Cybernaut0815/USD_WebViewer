@@ -1,7 +1,7 @@
 // Toolbar: file opening, framing, camera, refinement, purposes, display settings, messages.
 import { collectDrop, download, fromInput } from './files.ts';
 import { h } from './props.ts';
-import { type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
+import { DEFAULT_BACKGROUND, type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
 import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 
@@ -68,8 +68,8 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   );
   viewer.addEventListener('displaymodechange', () => (display.value = viewer.displayMode));
   const sky = select(
-    'Sky: an HDRI lighting the stage and filling the background, in place of the stage\'s dome light',
-    [['', 'No sky'], ...Object.entries(SKIES)],
+    'Sky. Stage: as authored (its dome light, else the background colour). Colour: the background colour behind the stage. The others: an HDRI lighting the stage and filling the background',
+    [['', 'Stage'], ['colour', 'Colour'], ...Object.entries(SKIES)],
     (v) => (viewer.sky = v || null),
   );
   viewer.addEventListener('skychange', () => (sky.value = viewer.sky ?? ''));
@@ -80,6 +80,9 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     return h('label', {}, box, ` ${panel[0].toUpperCase()}${panel.slice(1)}`);
   });
   const help = button('?', 'Keys and mouse (F1)', () => viewer.showHelp());
+  const background = h('input', { type: 'color', value: viewer.backgroundColor, title: 'Background colour' }) as HTMLInputElement;
+  background.addEventListener('input', () => (viewer.backgroundColor = background.value));
+  viewer.addEventListener('backgroundchange', () => (background.value = viewer.backgroundColor));
 
   const purposeBoxes = ['default', 'proxy', 'render', 'guide'].map((purpose) => {
     const box = h('input', { type: 'checkbox', checked: purpose === 'default' || purpose === 'proxy', value: purpose }) as HTMLInputElement;
@@ -240,6 +243,12 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     'View',
     ['Panels', ...panelBoxes, item('Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection))],
     ['Purposes', ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value}`))],
+    [
+      'Background',
+      h('label', {}, background, ' Colour'),
+      button('Reset', `Back to ${DEFAULT_BACKGROUND}`, () => (viewer.backgroundColor = DEFAULT_BACKGROUND)),
+      button('Show the colour', 'Sky: Colour (also hides a textured dome light behind the stage)', () => (viewer.sky = 'colour')),
+    ],
     [
       'Shading',
       h('label', { title: 'Hide the back of single-sided meshes' }, cull, ' Cull backfaces'),

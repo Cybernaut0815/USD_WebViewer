@@ -120,6 +120,18 @@ def Xform "World" (kind = "component")
   const edit = JSON.parse(core.setAttribute('/World/Cube', 'size', '4', NaN));
   assert.ok(edit.ok, edit.error);
   assert.deepEqual(edit.changed, ['/World/Cube'], 'the edited prim is reported for the change markers');
+  const attr = (v) => JSON.parse(core.setAttribute('/World/Cube', 'size', String(v), NaN));
+  assert.deepEqual(attr(2).changed, [], 'back to the value as opened: no longer changed');
+  attr(5);
+  const reverted = JSON.parse(core.revertPrim('/World/Cube'));
+  assert.ok(reverted.ok, reverted.error);
+  assert.equal(JSON.parse(core.attributeValue('/World/Cube', 'size', NaN)), 2, 'Clear edits restores the value as opened');
+  assert.deepEqual(reverted.changed, []);
+  const restored = JSON.parse(core.restorePrim(reverted.previous));
+  assert.equal(JSON.parse(core.attributeValue('/World/Cube', 'size', NaN)), 5, 'undoing Clear edits brings the edit back');
+  assert.deepEqual(restored.changed, ['/World/Cube']);
+  core.revertPrim('/World/Cube');
+  assert.equal(attr(4).changed.length, 1);
   assert.equal(JSON.parse(core.attributeValue('/World/Cube', 'size', NaN)), 4);
   assert.equal(flush().meshes.length, 1, 'the edit reaches the renderer');
 
@@ -275,6 +287,30 @@ def Mesh "Shape"
   noErrors();
 }
 
+/* ---------- undoing a transform clears its change marker; Clear edits removes added specs ---------- */
+{
+  open('xf.usda', `#usda 1.0
+def Xform "T"
+{
+    double3 xformOp:translate = (1, 2, 3)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    def Cube "Child" {}
+}`);
+  flush();
+  const m = (x, y, z) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+  const moved = JSON.parse(core.setXform('/T', m(5, 0, 0), NaN));
+  assert.deepEqual(moved.changed, ['/T']);
+  assert.deepEqual(JSON.parse(core.setXform('/T', moved.previous, NaN)).changed, [], 'the undo path leaves nothing marked');
+  // A new attribute on the child, then Clear edits on the parent: the subtree goes back, the spec is gone.
+  core.setAttribute('/T/Child', 'size', '3', NaN);
+  core.setXform('/T', m(7, 0, 0), NaN);
+  const cleared = JSON.parse(core.revertPrim('/T'));
+  assert.deepEqual(cleared.changed, []);
+  assert.deepEqual(JSON.parse(core.attributeValue('/T', 'xformOp:translate', NaN)), [1, 2, 3]);
+  assert.ok(!core.exportPrim('/T', 'authored').includes('size'), 'the added attribute is gone');
+  noErrors();
+}
+
 /* ---------- isolating a large selection stays linear ---------- */
 {
   const groups = Array.from({ length: 40 }, (_, g) => `    def Xform "G${g}"\n    {\n${Array.from({ length: 50 }, (_, c) => `        def Cube "C${c}" {}`).join('\n')}\n    }`);
@@ -313,6 +349,7 @@ def Xform "World"
     const edit = JSON.parse(core.sessionVisibility(mode, JSON.stringify(value)));
     assert.ok(edit.ok, edit.error);
     assert.deepEqual(edit.dirty, [], 'the session layer is never saved');
+    assert.deepEqual(edit.changed, [], 'viewer hiding is not a change');
     return edit.previous;
   };
   assert.deepEqual(run('hide', ['/World/A']), { '/World/A': null });

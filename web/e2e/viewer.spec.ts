@@ -331,6 +331,43 @@ test.describe('mock core', () => {
     await expect(cube.locator('.changed')).toHaveAttribute('title', 'Changed in this session');
   });
 
+  test('shift+ctrl click climbs the hierarchy; the prim menu clears edits', async ({ page }) => {
+    await open(page, MOCK);
+    const viewer = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { selection: v.selection, active: v.active };
+    });
+    const cube = page.locator('usd-viewer .row', { hasText: 'Cube' });
+    await cube.locator('.name').click({ modifiers: ['Shift', 'Control'] });
+    expect(await viewer()).toEqual({ selection: ['/World/Cube', '/World'], active: '/World' });
+    // Edit, then Clear edits from the right-click menu: the marker goes, and Ctrl+Z brings the edit back.
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).usd.setAttribute('/World/Cube', 'size', 2));
+    await expect(cube.locator('.changed')).toHaveText('◆');
+    await cube.click({ button: 'right' });
+    await page.locator('usd-viewer .popup button', { hasText: 'Clear edits' }).click();
+    await expect(cube.locator('.changed')).toHaveText('');
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('Control+z');
+    await expect(cube.locator('.changed')).toHaveText('◆');
+  });
+
+  test('the background colour can be set and reset; the Colour sky uses it', async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    await open(page, MOCK);
+    const result = await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const before = v.backgroundColor;
+      v.backgroundColor = '#336699';
+      const set = v.backgroundColor;
+      v.sky = 'colour';
+      return { before, set, sky: v.sky };
+    });
+    expect(result).toEqual({ before: '#26282b', set: '#336699', sky: 'colour' });
+    await page.locator('usd-viewer details.menu summary', { hasText: 'View' }).click();
+    await page.locator('usd-viewer .dropdown button', { hasText: 'Reset' }).click();
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).backgroundColor)).toBe('#26282b');
+  });
+
   test('the stats show the frame rate and the Help window explains the hierarchy symbols', async ({ page }) => {
     await open(page, MOCK);
     await expect(page.locator('usd-viewer .stats')).toContainText('FPS');
@@ -564,6 +601,22 @@ test.describe('wasm core', () => {
     expect(errors).toEqual([]);
     expect(logged).toEqual([]);
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('showcase.png', shot(page));
+  });
+
+  test('the Colour sky shows the background colour in front of the stage dome', async ({ page }) => {
+    await open(page, SHOWCASE);
+    const backgrounds = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const has = () => !!viewer.three.scene.background;
+      const stage = has(); // the showcase's textured dome light
+      viewer.sky = 'colour';
+      await new Promise((r) => setTimeout(r, 100));
+      const colour = has();
+      viewer.sky = null;
+      await new Promise((r) => setTimeout(r, 100)); // the dome texture comes back from the cache
+      return { stage, colour, back: has(), lit: !!viewer.three.scene.environment };
+    });
+    expect(backgrounds).toEqual({ stage: true, colour: false, back: true, lit: true });
   });
 
   test('MaterialX networks render through three.js', async ({ page }) => {

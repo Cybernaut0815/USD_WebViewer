@@ -111,6 +111,7 @@ export class SceneSync {
   private domeRid: Rid = 0;
   private studio: THREE.Texture | null = null;
   private sky: THREE.Texture | null = null;
+  private plainBackground = false;
   private readonly building = new Set<Promise<unknown>>(); // materials and textures still loading
   private readonly scene: THREE.Scene;
   private readonly host: SceneHost;
@@ -712,6 +713,16 @@ export class SceneSync {
     holder.matrix.compose(position, rotation, new THREE.Vector3(1, 1, 1));
   }
 
+  /** Keeps the background colour even where a sky or the dome's texture would fill it (lighting unchanged). */
+  get solidBackground(): boolean {
+    return this.plainBackground;
+  }
+  set solidBackground(solid: boolean) {
+    this.plainBackground = solid;
+    if (solid) this.scene.background = null; // at once: a dome's texture is re-applied asynchronously
+    this.updateEnvironment();
+  }
+
   /** A viewer sky (equirectangular) that lights the stage and fills the background instead of its dome; null: the stage's own. */
   setSky(texture: THREE.Texture | null): void {
     this.sky = texture;
@@ -725,7 +736,7 @@ export class SceneSync {
     const set = (texture: THREE.Texture | null, intensity: number, background: boolean) => {
       this.scene.environment = texture;
       this.scene.environmentIntensity = intensity;
-      this.scene.background = background ? texture : null;
+      this.scene.background = background && !this.plainBackground ? texture : null;
       this.scene.backgroundIntensity = intensity;
       this.scene.environmentRotation.set(0, 0, 0);
       this.scene.backgroundRotation.set(0, 0, 0);

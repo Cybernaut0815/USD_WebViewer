@@ -14,12 +14,13 @@ import { SelectTool, type TransformMode, TransformTool } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
 import type { DisplayMode, SceneStats } from './scene.ts';
-import { type ToneMapping, Viewport } from './viewport.ts';
+import { type CameraSettings, type ToneMapping, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode;
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event };
+export type { CameraSettings };
 /** Which panels around the viewport are shown. */
 export interface PanelState {
   hierarchy: boolean;
@@ -34,7 +35,7 @@ const MIRRORED: (keyof UsdSessionEventMap)[] = [
 ];
 const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'rotate', r: 'scale' };
 /** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
-export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', park: 'Park', studio: 'Studio' };
+export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', forest: 'Forest', industrial: 'Industrial', studio: 'Studio' };
 /** The Help window's contents; the key handler in build() implements the keyboard rows. */
 const SHORTCUTS: [string, [string, string][]][] = [
   ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale']]],
@@ -315,6 +316,15 @@ export class UsdViewerElement extends HTMLElement {
     this.dispatchEvent(new Event('panelschange'));
   }
 
+  /** The free camera's projection, focal length and clipping (stage cameras keep their own). */
+  get cameraSettings(): CameraSettings {
+    return this.viewport.cameraSettings;
+  }
+  set cameraSettings(settings: Partial<CameraSettings>) {
+    this.viewport.cameraSettings = settings;
+    this.dispatchEvent(new Event('camerachange'));
+  }
+
   /** Opens the window listing keys and mouse gestures. */
   showHelp(): void {
     if (!this.help.open) this.help.showModal();
@@ -381,8 +391,19 @@ export class UsdViewerElement extends HTMLElement {
 
   private build(): HTMLElement {
     const search = h('input', { type: 'search', placeholder: 'Search prims (type:Mesh name)' }) as HTMLInputElement;
+    const clear = h('button', { className: 'clear', title: 'Clear search', hidden: true }, '✕') as HTMLButtonElement;
     let searchTimer = 0;
+    const reset = () => {
+      clearTimeout(searchTimer);
+      search.value = '';
+      clear.hidden = true;
+      this.tree.showResults(null);
+      search.focus();
+    };
+    clear.addEventListener('click', reset);
+    search.addEventListener('keydown', (e) => e.key === 'Escape' && reset());
     search.addEventListener('input', () => {
+      clear.hidden = !search.value;
       clearTimeout(searchTimer);
       searchTimer = window.setTimeout(async () => {
         const type = /(?:^|\s)type:(\S+)/.exec(search.value)?.[1] ?? '';
@@ -405,7 +426,7 @@ export class UsdViewerElement extends HTMLElement {
       'div',
       { className: 'app' },
       toolbar(this, this.viewport),
-      h('aside', { className: 'left' }, search, this.tree.element, h('slot', { name: 'left' })),
+      h('aside', { className: 'left' }, h('div', { className: 'search' }, search, clear), this.tree.element, h('slot', { name: 'left' })),
       this.splitter('left'),
       h('main', {}, this.canvas, this.status, this.statsBox, this.toggles.time),
       this.splitter('right'),
@@ -432,6 +453,17 @@ export class UsdViewerElement extends HTMLElement {
       else return;
       e.preventDefault();
     });
+    // The panel tabs show only while the pointer is near their border of the viewport.
+    const main = app.querySelector('main')!;
+    app.addEventListener('pointermove', (e) => {
+      const r = main.getBoundingClientRect();
+      const near = 32;
+      const inside = e.clientY > r.top && e.clientY < r.bottom;
+      app.classList.toggle('near-left', inside && Math.abs(e.clientX - r.left) < near);
+      app.classList.toggle('near-right', inside && Math.abs(e.clientX - r.right) < near);
+      app.classList.toggle('near-time', e.clientX > r.left && e.clientX < r.right && Math.abs(e.clientY - r.bottom) < near);
+    });
+    app.addEventListener('pointerleave', () => app.classList.remove('near-left', 'near-right', 'near-time'));
     queueMicrotask(() => this.applyLayout()); // once the element is in the shadow root
     return app;
   }

@@ -289,11 +289,19 @@ test.describe('mock core', () => {
     await page.setViewportSize({ width: 1536, height: 800 });
     await expect.poll(async () => (await left.boundingBox())!.width).toBeCloseTo(widened * 1.5, -1);
     expect((await page.locator('usd-viewer .timeline').boundingBox())!.height).toBe(timebar);
-    // The tabs on the viewport's borders hide and show the panels.
-    await page.locator('usd-viewer .left-split .toggle').click();
+    // The tabs on the viewport's borders show up only near the border, and hide and show the panels.
+    const tab = page.locator('usd-viewer .left-split .toggle');
+    const canvas = (await page.locator('usd-viewer canvas').boundingBox())!;
+    await page.mouse.move(canvas.x + canvas.width / 2, canvas.y + canvas.height / 2);
+    await expect(tab).toHaveCSS('opacity', '0');
+    await page.mouse.move(canvas.x + 10, canvas.y + canvas.height / 2);
+    await expect(tab).toHaveCSS('opacity', '1');
+    await tab.click();
     await expect(left).toBeHidden();
     await page.locator('usd-viewer .left-split .toggle').click();
     await expect(left).toBeVisible();
+    const view = (await page.locator('usd-viewer canvas').boundingBox())!;
+    await page.mouse.move(view.x + view.width / 2, view.y + view.height - 6); // near the bottom border
     await page.locator('usd-viewer .toggle.time').click();
     await expect(page.locator('usd-viewer .timeline')).toBeHidden();
     await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).panels = { hierarchy: false, timeline: false }));
@@ -303,6 +311,53 @@ test.describe('mock core', () => {
     await page.keyboard.press('F1');
     await expect(page.locator('usd-viewer dialog.help')).toBeVisible();
     await expect(page.locator('usd-viewer dialog.help')).toContainText('Shift+drag up');
+  });
+
+  test('menus drop down without moving the toolbar, one at a time', async ({ page }) => {
+    await open(page, MOCK);
+    const summary = (name: string) => page.locator('usd-viewer details.menu summary', { hasText: name });
+    const places = async () => Promise.all(['File', 'Edit', 'View', 'Save'].map(async (n) => (await page.locator('usd-viewer .toolbar > *', { hasText: n }).first().boundingBox())!));
+    const before = await places();
+    await summary('View').click();
+    await expect(page.locator('usd-viewer details.menu[open] .dropdown')).toBeVisible();
+    expect(await places()).toEqual(before);
+    await summary('Edit').click();
+    await expect(page.locator('usd-viewer details.menu[open]')).toHaveCount(1);
+    await expect(page.locator('usd-viewer details.menu[open] summary')).toHaveText('Edit');
+    const box = (await page.locator('usd-viewer canvas').boundingBox())!;
+    await page.mouse.click(box.x + 20, box.y + box.height - 20);
+    await expect(page.locator('usd-viewer details.menu[open]')).toHaveCount(0);
+  });
+
+  test('the search clear button empties the field and restores the tree', async ({ page }) => {
+    await open(page, MOCK);
+    const search = page.locator('usd-viewer .search input');
+    const clear = page.locator('usd-viewer .search .clear');
+    await expect(clear).toBeHidden();
+    await search.fill('Cube');
+    await expect(page.locator('usd-viewer .row', { hasText: 'Light' })).toHaveCount(0);
+    await clear.click();
+    await expect(search).toHaveValue('');
+    await expect(clear).toBeHidden();
+    await expect(page.locator('usd-viewer .row', { hasText: 'Light' })).toHaveCount(1);
+  });
+
+  test('the free camera switches to orthographic and takes a focal length', async ({ page }) => {
+    await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.cameraSettings = { focalLength: 85 };
+      const fov = (viewer.three.camera as any).fov;
+      viewer.cameraSettings = { projection: 'orthographic' };
+      await viewer.idle();
+      const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const cube = viewer.three.objectsFor('/World/Cube')[0];
+      const p = cube.getWorldPosition(cube.position.clone()).project(viewer.three.camera);
+      const hit = await viewer.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      return { fov, type: viewer.three.camera.type, hit: hit?.path, settings: viewer.cameraSettings.projection };
+    });
+    expect(result.fov).toBeCloseTo(16.07, 1);
+    expect(result).toMatchObject({ type: 'OrthographicCamera', hit: '/World/Cube', settings: 'orthographic' });
   });
 
   test('the timebar steps frames and a sky replaces the background', async ({ page }) => {
@@ -315,7 +370,7 @@ test.describe('mock core', () => {
     await expect(page.locator('usd-viewer .timeline input[type=number]')).toHaveValue('2');
     const background = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
-      viewer.sky = 'studio';
+      viewer.sky = 'industrial';
       for (let i = 0; i < 100 && !viewer.three.scene.background; i++) await new Promise((r) => setTimeout(r, 50));
       const withSky = !!viewer.three.scene.background;
       viewer.sky = null;

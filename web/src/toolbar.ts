@@ -136,54 +136,128 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   session.addEventListener('stageopen', refreshDirty);
   session.addEventListener('stageclose', refreshDirty);
   refreshDirty();
-  const menu = (name: string) => h('details', { className: 'menu' }, h('summary', {}, name));
-  const fileMenu = menu('File');
-  const editMenu = menu('Edit');
-  const menuItem = (owner: HTMLElement, label: string, title: string, action: () => void) => {
-    const b = button(label, title, () => {
-      owner.removeAttribute('open');
+  // Menus drop down below their button with their groups side by side; one is open at a time.
+  const menus: HTMLDetailsElement[] = [];
+  const menu = (name: string, ...groups: [string, ...Node[]][]) => {
+    const details = h(
+      'details',
+      { className: 'menu' },
+      h('summary', {}, name),
+      h('div', { className: 'dropdown' }, ...groups.map(([title, ...items]) => h('section', {}, h('h5', {}, title), ...items))),
+    ) as HTMLDetailsElement;
+    details.addEventListener('toggle', () => details.open && menus.forEach((other) => other !== details && (other.open = false)));
+    menus.push(details);
+    return details;
+  };
+  const closeMenus = () => menus.forEach((m) => (m.open = false));
+  document.addEventListener('pointerdown', (e) => menus.forEach((m) => m.open && !e.composedPath().includes(m) && (m.open = false)), true);
+  document.addEventListener('keydown', (e) => e.key === 'Escape' && closeMenus());
+  /** A menu command: runs and closes its menu. */
+  const item = (label: string, title: string, action: () => void) =>
+    button(label, title, () => {
+      closeMenus();
       action();
     });
-    return h('label', {}, b);
+
+  // View ▸ Camera: the free camera's lens; stage cameras keep their own.
+  const projection = select('Projection', [['perspective', 'Perspective'], ['orthographic', 'Orthographic']], (v) => (viewer.cameraSettings = { projection: v as 'perspective' }));
+  const focal = h('input', { type: 'range', min: '10', max: '300', step: '1', title: 'Focal length (mm, 35 mm equivalent)' }) as HTMLInputElement;
+  const focalNumber = h('input', { type: 'number', min: '10', max: '300', step: '1', className: 'short' }) as HTMLInputElement;
+  const fov = h('span', { className: 'dim' });
+  for (const input of [focal, focalNumber]) input.addEventListener('input', () => input.value && (viewer.cameraSettings = { focalLength: Number(input.value) }));
+  const presets = h('div', { className: 'presets' }, ...[24, 35, 50, 85, 135].map((mm) => button(`${mm}`, `${mm} mm`, () => (viewer.cameraSettings = { focalLength: mm }))));
+  const autoClip = h('input', { type: 'checkbox' }) as HTMLInputElement;
+  const near = h('input', { type: 'number', min: '0.001', max: '1000', step: 'any', className: 'short', title: 'Near clipping plane' }) as HTMLInputElement;
+  const far = h('input', { type: 'number', min: '0.1', max: '1000000', step: 'any', className: 'short', title: 'Far clipping plane' }) as HTMLInputElement;
+  const clipNumber = (v: number) => String(+v.toPrecision(4));
+  autoClip.addEventListener('change', () => {
+    const { near: n, far: f } = viewer.cameraSettings; // switching auto off starts from the fitted planes
+    viewer.cameraSettings = autoClip.checked ? { autoClip: true } : { autoClip: false, near: Number(clipNumber(n)), far: Number(clipNumber(f)) };
+  });
+  near.addEventListener('change', () => (viewer.cameraSettings = { near: Number(near.value) }));
+  far.addEventListener('change', () => (viewer.cameraSettings = { far: Number(far.value) }));
+  const stageNote = h('span', { className: 'dim', hidden: true }, 'Looking through a stage camera');
+  const syncCamera = () => {
+    const c = viewer.cameraSettings;
+    const stage = viewer.camera !== null;
+    projection.value = c.projection;
+    focal.value = focalNumber.value = String(Math.round(c.focalLength));
+    fov.textContent = `${((2 * Math.atan(12 / c.focalLength) * 180) / Math.PI).toFixed(1)}° vertical`;
+    autoClip.checked = c.autoClip;
+    if (!c.autoClip) {
+      near.value = clipNumber(c.near);
+      far.value = clipNumber(c.far);
+    }
+    for (const control of [projection, autoClip]) control.disabled = stage;
+    for (const control of [focal, focalNumber, ...presets.children]) (control as HTMLInputElement).disabled = stage || c.projection === 'orthographic';
+    for (const control of [near, far]) control.disabled = stage || c.autoClip;
+    stageNote.hidden = !stage;
   };
-  const item = (label: string, title: string, action: () => void) => menuItem(fileMenu, label, title, action);
-  const viewMenu = menu('View');
-  viewMenu.append(
-    menuItem(viewMenu, 'Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection)),
-    ...panelBoxes,
-    ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value} purpose`)),
-    h('label', { title: 'Hide the back of single-sided meshes' }, cull, ' Cull backfaces'),
-    h('label', {}, 'Tone mapping ', select('Tone mapping', [['neutral', 'Neutral'], ['aces', 'ACES'], ['agx', 'AgX'], ['none', 'None']], (v) => (viewer.toneMapping = v as ToneMapping))),
-    h('label', {}, 'Exposure ', exposure),
+  viewer.addEventListener('camerachange', syncCamera);
+  cameras.addEventListener('change', syncCamera);
+  syncCamera();
+
+  const fileMenu = menu(
+    'File',
+    [
+      'Open',
+      item('Open…', 'Open USD files', () => file.click()),
+      item('Folder…', 'Open a folder (with write access where the browser allows it)', async () => {
+        // The File System Access API gives write-back; the input element is the fallback.
+        const picker = (window as any).showDirectoryPicker as ((options: object) => Promise<FileSystemDirectoryHandle>) | undefined;
+        if (!picker) return folder.click();
+        const handle = await picker({ mode: 'readwrite' }).catch(() => null);
+        if (handle) viewer.open(handle).catch(() => {});
+      }),
+      item('URL…', 'Open a URL', () => {
+        const url = prompt('USD file URL');
+        if (url) viewer.open(url).catch(() => {});
+      }),
+    ],
+    [
+      'Layers',
+      h('label', {}, 'Edit target ', target),
+      item('Download flattened', 'The whole stage composed into one usda file', async () => {
+        const bytes = await session.usd.exportLayer('', 'flat');
+        if (bytes) download(`${(session.stage?.url.split('/').pop() ?? 'stage').replace(/\.[^.]+$/, '')}.flat.usda`, bytes);
+      }),
+      item('Reload from disk', 'Re-read every layer, discarding unsaved edits', () => {
+        if (!session.dirty.size || confirm('Discard unsaved edits and reload?')) session.usd.reload().catch(() => {});
+      }),
+    ],
   );
-  editMenu.append(
-    menuItem(editMenu, 'Undo', 'Ctrl+Z', () => viewer.undo()),
-    menuItem(editMenu, 'Redo', 'Ctrl+Shift+Z', () => viewer.redo()),
-    menuItem(editMenu, 'Clear all refinement overrides', 'Remove refinementEnableOverride / refinementLevel from every prim', () =>
-      session.usd.clearRefinementOverrides().catch(() => {}),
-    ),
+  const editMenu = menu(
+    'Edit',
+    ['History', item('Undo', 'Ctrl+Z', () => viewer.undo()), item('Redo', 'Ctrl+Shift+Z', () => viewer.redo())],
+    [
+      'Refinement',
+      item('Clear all overrides', 'Remove refinementEnableOverride / refinementLevel from every prim', () =>
+        session.usd.clearRefinementOverrides().catch(() => {}),
+      ),
+    ],
   );
-  fileMenu.append(
-    item('Open…', 'Open USD files', () => file.click()),
-    item('Folder…', 'Open a folder (with write access where the browser allows it)', async () => {
-      // The File System Access API gives write-back; the input element is the fallback.
-      const picker = (window as any).showDirectoryPicker as ((options: object) => Promise<FileSystemDirectoryHandle>) | undefined;
-      if (!picker) return folder.click();
-      const handle = await picker({ mode: 'readwrite' }).catch(() => null);
-      if (handle) viewer.open(handle).catch(() => {});
-    }),
-    item('URL…', 'Open a URL', () => {
-      const url = prompt('USD file URL');
-      if (url) viewer.open(url).catch(() => {});
-    }),
-    h('label', {}, 'Edit target ', target),
-    item('Download flattened', 'The whole stage composed into one usda file', async () => {
-      const bytes = await session.usd.exportLayer('', 'flat');
-      if (bytes) download(`${(session.stage?.url.split('/').pop() ?? 'stage').replace(/\.[^.]+$/, '')}.flat.usda`, bytes);
-    }),
-    item('Reload from disk', 'Re-read every layer, discarding unsaved edits', () => {
-      if (!session.dirty.size || confirm('Discard unsaved edits and reload?')) session.usd.reload().catch(() => {});
-    }),
+  const viewMenu = menu(
+    'View',
+    ['Panels', ...panelBoxes, item('Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection))],
+    ['Purposes', ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value}`))],
+    [
+      'Shading',
+      h('label', { title: 'Hide the back of single-sided meshes' }, cull, ' Cull backfaces'),
+      h('label', {}, 'Tone mapping ', select('Tone mapping', [['neutral', 'Neutral'], ['aces', 'ACES'], ['agx', 'AgX'], ['none', 'None']], (v) => (viewer.toneMapping = v as ToneMapping))),
+      h('label', {}, 'Exposure ', exposure),
+    ],
+    [
+      'Camera',
+      stageNote,
+      h('label', {}, 'Projection ', projection),
+      h('label', {}, 'Focal length ', focalNumber, ' mm'),
+      focal,
+      fov,
+      presets,
+      h('label', {}, autoClip, ' Auto clipping'),
+      h('label', {}, 'Near ', near),
+      h('label', {}, 'Far ', far),
+    ],
   );
 
   const element = h(

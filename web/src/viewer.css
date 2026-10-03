@@ -43,11 +43,35 @@ button, select, input[type='search'] {
 button:hover { border-color: var(--dim); }
 button.alert { border-color: #e5484d; }
 .backend { color: var(--dim); }
+/* Menus: the button keeps its place; the open one is highlighted and drops a panel of side-by-side groups. */
 .menu { position: relative; }
-.menu summary { cursor: pointer; list-style: none; border: 1px solid var(--line); border-radius: 3px; padding: 2px 8px; }
-.menu[open] label { display: block; }
-.menu[open] { z-index: 2; }
-.menu label { background: var(--panel); padding: 2px 8px; white-space: nowrap; }
+.menu summary { cursor: pointer; list-style: none; border: 1px solid var(--line); border-radius: 3px; padding: 2px 8px; user-select: none; }
+.menu summary::-webkit-details-marker { display: none; }
+.menu summary:hover { border-color: var(--dim); }
+.menu[open] summary { border-color: var(--accent); background: #ffc40026; color: var(--accent); }
+.dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 3;
+  display: flex;
+  gap: 18px;
+  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  box-shadow: 0 4px 16px #0008;
+}
+.dropdown section { display: flex; flex-direction: column; gap: 4px; min-width: 130px; }
+.dropdown h5 { margin: 0 0 2px; font-size: 10px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--dim); }
+.dropdown section > button { text-align: left; }
+.dropdown label { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dropdown input[type='number'] { width: 7em; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; }
+.dropdown input:disabled, .dropdown select:disabled, .dropdown button:disabled { opacity: 0.45; }
+.dropdown .presets { display: flex; gap: 3px; }
+.dropdown .presets button { padding: 1px 5px; }
+.dropdown .dim { color: var(--dim); }
+.dropdown .dim[hidden] { display: none; }
 
 aside {
   display: flex;
@@ -59,7 +83,12 @@ aside {
 }
 .left { grid-area: left; }
 .right { grid-area: right; }
-.left input[type='search'] { margin: 4px; }
+.search { position: relative; margin: 4px; }
+.search input { width: 100%; box-sizing: border-box; padding-right: 22px; }
+.search input::-webkit-search-cancel-button { display: none; }
+.search .clear { position: absolute; right: 2px; top: 50%; transform: translateY(-50%); border: none; background: none; padding: 0 5px; color: var(--dim); }
+.search .clear:hover { color: var(--text); }
+.search .clear[hidden] { display: none; }
 .split { position: relative; width: 4px; cursor: col-resize; background: var(--line); touch-action: none; }
 .no-left .left-split, .no-right .right-split { cursor: default; }
 /* Tabs in the middle of the viewport's borders: show / hide the panel behind them. */
@@ -75,6 +104,14 @@ aside {
   background: var(--panel);
   border: 1px solid var(--line);
   cursor: pointer;
+  /* Shown only while the pointer is near the border (viewer.ts toggles .near-*). */
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+.near-left .left-split .toggle, .near-right .right-split .toggle, .near-time .toggle.time, .split:hover .toggle, .toggle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 .toggle:hover { color: var(--text); border-color: var(--accent); }
 .toggle.side { top: 50%; left: 50%; width: 14px; height: 40px; transform: translate(-50%, -50%); border-radius: 4px; }

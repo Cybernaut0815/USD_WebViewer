@@ -9,6 +9,19 @@ import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
 export type ToneMapping = 'none' | 'neutral' | 'aces' | 'agx';
+
+/** The free camera's lens. Focal length is 35 mm equivalent on a 24 mm high gate, so it fixes the vertical field of view. */
+export interface CameraSettings {
+  projection: 'perspective' | 'orthographic';
+  focalLength: number; // mm
+  /** Near and far follow the stage's bounds; off: the values below. */
+  autoClip: boolean;
+  near: number;
+  far: number;
+}
+const GATE = 24; // mm, vertical
+const focalToFov = (focal: number) => (2 * Math.atan(GATE / 2 / focal) * 180) / Math.PI;
+const fovToFocal = (fov: number) => GATE / 2 / Math.tan((fov * Math.PI) / 360);
 const TONE_MAPPING: Record<ToneMapping, THREE.ToneMapping> = {
   none: THREE.LinearToneMapping, // keeps exposure working
   neutral: THREE.NeutralToneMapping,
@@ -21,7 +34,10 @@ export class Viewport {
   readonly scene = new THREE.Scene();
   readonly sync: SceneSync;
   readonly freeCamera = new THREE.PerspectiveCamera(45, 1, 0.01, 1000);
+  /** The free camera in orthographic projection; shares position and orbit with the perspective one. */
+  readonly orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.01, 1000);
   camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = this.freeCamera;
+  private autoClip = true;
   backend: 'webgpu' | 'webgl2' | null = null;
   readonly canvas: HTMLCanvasElement;
   readonly controls: OrbitControls;
@@ -113,6 +129,62 @@ export class Viewport {
     this.invalidate();
   }
 
+  /** The free camera in its current projection (what the orbit controls move). */
+  get view(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
+    return this.controls.object as THREE.PerspectiveCamera | THREE.OrthographicCamera;
+  }
+
+  get cameraSettings(): CameraSettings {
+    const view = this.view;
+    return {
+      projection: view === this.orthoCamera ? 'orthographic' : 'perspective',
+      focalLength: fovToFocal(this.freeCamera.fov),
+      autoClip: this.autoClip,
+      near: view.near,
+      far: view.far,
+    };
+  }
+  set cameraSettings(settings: Partial<CameraSettings>) {
+    if (settings.focalLength !== undefined) {
+      this.freeCamera.fov = focalToFov(Math.min(Math.max(settings.focalLength, 1), 2000));
+      this.freeCamera.updateProjectionMatrix();
+    }
+    if (settings.projection && settings.projection !== this.cameraSettings.projection) this.switchProjection(settings.projection);
+    if (settings.autoClip !== undefined) this.autoClip = settings.autoClip;
+    for (const camera of [this.freeCamera, this.orthoCamera]) {
+      if (settings.near !== undefined) camera.near = settings.near;
+      if (settings.far !== undefined) camera.far = settings.far;
+      camera.updateProjectionMatrix();
+    }
+    this.invalidate();
+  }
+
+  /** Swaps the free camera's projection, keeping what is in view around the orbit target the same size. */
+  private switchProjection(projection: CameraSettings['projection']): void {
+    const persp = this.freeCamera;
+    const ortho = this.orthoCamera;
+    const target = this.controls.target;
+    const tanHalf = Math.tan((persp.fov * Math.PI) / 360);
+    if (projection === 'orthographic') {
+      const half = Math.max(persp.position.distanceTo(target) * tanHalf, 1e-6);
+      ortho.position.copy(persp.position);
+      ortho.quaternion.copy(persp.quaternion);
+      ortho.top = half;
+      ortho.bottom = -half;
+      ortho.zoom = 1;
+      this.controls.object = ortho;
+    } else {
+      const half = ortho.top / ortho.zoom;
+      const direction = ortho.position.clone().sub(target).normalize();
+      persp.position.copy(target).addScaledVector(direction, half / tanHalf);
+      persp.quaternion.copy(ortho.quaternion);
+      this.controls.object = persp;
+    }
+    if (this.cameraPath === null) this.camera = this.view;
+    this.resize();
+    this.controls.update();
+  }
+
   /** World-space bounds of the given objects, or of the whole stage. */
   bounds(objects: THREE.Object3D[] = [this.sync.root]): THREE.Box3 {
     const box = new THREE.Box3();
@@ -126,11 +198,16 @@ export class Viewport {
     if (box.isEmpty()) return;
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 1e-6);
+    const view = this.view;
     const distance = (radius / Math.sin((this.freeCamera.fov * Math.PI) / 360)) * 1.15;
-    const direction = this.freeCamera.position.clone().sub(this.controls.target);
+    const direction = view.position.clone().sub(this.controls.target);
     if (direction.lengthSq() === 0) direction.set(1, 0.6, 1);
     this.controls.target.copy(sphere.center);
-    this.freeCamera.position.copy(sphere.center).addScaledVector(direction.normalize(), distance);
+    view.position.copy(sphere.center).addScaledVector(direction.normalize(), distance);
+    if (view === this.orthoCamera) {
+      view.zoom = view.top / (radius * 1.15);
+      view.updateProjectionMatrix();
+    }
     this.controls.update();
     this.invalidate();
   }
@@ -139,7 +216,7 @@ export class Viewport {
   lookThrough(path: Path | null): void {
     this.cameraPath = path;
     this.controls.enabled = path === null;
-    if (path === null) this.camera = this.freeCamera;
+    if (path === null) this.camera = this.view;
     this.resize();
   }
 
@@ -245,6 +322,9 @@ export class Viewport {
     this.renderer.setSize(width, height, false);
     this.freeCamera.aspect = width / height;
     this.freeCamera.updateProjectionMatrix();
+    this.orthoCamera.left = this.orthoCamera.bottom * (width / height);
+    this.orthoCamera.right = this.orthoCamera.top * (width / height);
+    this.orthoCamera.updateProjectionMatrix();
     this.invalidate();
   }
 
@@ -258,11 +338,13 @@ export class Viewport {
 
   private fitClipPlanes(): void {
     const sphere = this.stageSphere;
-    if (!(sphere.radius > 0)) return;
-    const distance = this.freeCamera.position.distanceTo(sphere.center);
-    this.freeCamera.near = Math.max((distance - sphere.radius) * 0.5, sphere.radius * 1e-3);
-    this.freeCamera.far = distance + sphere.radius * 2;
-    this.freeCamera.updateProjectionMatrix();
+    if (!this.autoClip || !(sphere.radius > 0)) return;
+    const view = this.view;
+    const distance = view.position.distanceTo(sphere.center);
+    // Orthographic depth has no precision falloff, so its near plane may sit behind the camera.
+    view.near = view === this.orthoCamera ? distance - sphere.radius * 2 : Math.max((distance - sphere.radius) * 0.5, sphere.radius * 1e-3);
+    view.far = distance + sphere.radius * 2;
+    view.updateProjectionMatrix();
   }
 
   private followStageCamera(): void {

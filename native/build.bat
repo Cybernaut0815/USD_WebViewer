@@ -1,10 +1,12 @@
 @echo off
 rem Builds the wasm core against the SDK. Usage: native\build.bat [emsdk dir] [work dir] [Release|Debug]
+rem Defaults: emsdk from %EMSDK%, work dir <repo>\build.
 setlocal
 set "EMSDK_DIR=%~1"
-if "%EMSDK_DIR%"=="" set "EMSDK_DIR=F:\emsdk"
+if "%EMSDK_DIR%"=="" set "EMSDK_DIR=%EMSDK%"
+if "%EMSDK_DIR%"=="" (echo Pass the emsdk directory or run emsdk_env.bat first. & exit /b 1)
 set "WORK=%~2"
-if "%WORK%"=="" set "WORK=F:\uw"
+if "%WORK%"=="" for %%I in ("%~dp0..\build") do set "WORK=%%~fI"
 set "CONFIG=%~3"
 if "%CONFIG%"=="" set "CONFIG=Release"
 rem emsdk_env sets EMSDK (forward slashes) and puts the compiler drivers on PATH.

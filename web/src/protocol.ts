@@ -50,6 +50,12 @@ export interface CoreApi {
   resolvePick(rid: Rid, instanceIndex: number): PickResult | null;
   setVariant(path: Path, variantSet: string, variant: string): Edit;
   setVisible(path: Path, visible: boolean): Edit;
+  /**
+   * Viewer hiding through `visibility` opinions in the session layer (never saved).
+   * hide / isolate: JSON array of paths; showAll: clears every such opinion; set: JSON object
+   * path -> "invisible" | null. `previous` is the earlier state in the shape `set` takes.
+   */
+  sessionVisibility(mode: 'hide' | 'isolate' | 'showAll' | 'set', json: string): Edit;
   setLoaded(path: Path, loaded: boolean): Edit;
   setAttribute(path: Path, name: string, jsonValue: string, time: number): Edit;
   /** Removes the edit target's opinion: the default value (NaN time) or the sample at `time`. */
@@ -223,8 +229,17 @@ export interface Subset {
   count: number;
   material: Rid;
 }
+export interface MeshCounts {
+  points: number;
+  faces: number; // drawn faces: holes and degenerate faces left out
+  edges: number; // distinct edges of those faces
+}
 export interface MeshEntry extends Item {
   indices?: Uint32Array; // triangle list
+  /** Line pairs along the authored faces (no triangulation diagonals), same layout as indices; sent with them. */
+  edges?: Uint32Array;
+  /** The authored mesh's counts; sent with indices. */
+  counts?: MeshCounts;
   positions?: Float32Array;
   normals?: Float32Array | null; // null: none available, shade flat
   primvars?: Primvar[]; // uv sets and vertex-rate displayColor, same layout as positions
@@ -304,4 +319,5 @@ export interface MaterialEntry {
   path: Path;
   network?: MaterialNetwork; // universal render context
   mtlx?: string; // MaterialX document when an mtlx terminal exists
+  textures?: string[]; // resolved paths of every asset parameter
 }

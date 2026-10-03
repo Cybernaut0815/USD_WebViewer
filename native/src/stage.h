@@ -47,6 +47,11 @@ public:
     std::string ClearAttribute(const std::string& path, const std::string& name, double time);
     std::string SetVariant(const std::string& path, const std::string& variantSet, const std::string& variant);
     std::string SetVisible(const std::string& path, bool visible);
+    /// Viewer hiding, authored as `visibility` opinions in the session layer (never saved).
+    /// mode: "hide" / "isolate" (JSON array of paths), "showAll" (clears every such opinion),
+    /// "set" (JSON object path -> "invisible" | null, for undo). `previous` maps each touched
+    /// path to its earlier session-layer opinion, in the shape "set" takes.
+    std::string SessionVisibility(const std::string& mode, const std::string& json);
     std::string SetLoaded(const std::string& path, bool loaded);
     std::string SetAttribute(const std::string& path, const std::string& name, const std::string& json, double time);
     std::string ClearSessionEdits();

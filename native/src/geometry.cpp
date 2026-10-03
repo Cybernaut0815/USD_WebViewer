@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace {
@@ -172,6 +173,11 @@ bool Refine(const MeshIn& in, Poly* poly)
     return true;
 }
 
+uint64_t EdgeKey(int a, int b)
+{
+    return (uint64_t(uint32_t(std::min(a, b))) << 32) | uint32_t(std::max(a, b));
+}
+
 void Normalize(std::vector<float>& normals)
 {
     for (size_t i = 0; i + 2 < normals.size(); i += 3) {
@@ -212,6 +218,15 @@ MeshOut BuildMesh(const MeshIn& in)
     // Fan triangulation. `source` remembers which mesh vertex each output index refers to.
     std::vector<int> cornerFace(corners, 0);
     std::vector<uint32_t> sourceTriangles; // mesh vertex indices, for smooth normals
+    // Face edges by welded vertex pair. An edge met twice from the same authored
+    // face lies inside it (refinement) and is not drawn.
+    struct Edge {
+        uint32_t a, b;
+        int base;
+        bool drawn;
+    };
+    std::vector<Edge> edges;
+    std::unordered_map<uint64_t, size_t> edgeSlots;
     size_t offset = 0;
     for (size_t f = 0; f < poly.counts.size(); f++) {
         const int n = poly.counts[f];
@@ -231,7 +246,22 @@ MeshOut BuildMesh(const MeshIn& in)
             }
             out.triangleFace.push_back(poly.baseFace[f]);
         }
+        for (int i = 0; valid && i < n; i++) {
+            const size_t c0 = offset + i, c1 = offset + (i + 1) % n;
+            const auto [slot, added] = edgeSlots.try_emplace(EdgeKey(poly.indices[c0], poly.indices[c1]), edges.size());
+            if (added) {
+                edges.push_back({ expand ? uint32_t(c0) : uint32_t(poly.indices[c0]),
+                    expand ? uint32_t(c1) : uint32_t(poly.indices[c1]), poly.baseFace[f], true });
+            } else if (edges[slot->second].base == poly.baseFace[f]) {
+                edges[slot->second].drawn = false;
+            }
+        }
         offset += n;
+    }
+    for (const Edge& e : edges) {
+        if (!e.drawn) continue;
+        out.edges.push_back(e.a);
+        out.edges.push_back(e.b);
     }
 
     // Lays per-vertex data out the way the output positions are laid out.
@@ -294,6 +324,26 @@ MeshOut BuildMesh(const MeshIn& in)
         out.normals = layout(smooth, 3);
     }
     return out;
+}
+
+MeshCounts CountMesh(const MeshIn& in)
+{
+    MeshCounts counts;
+    counts.points = in.points.size();
+    const std::unordered_set<int> holes(in.holeIndices.cbegin(), in.holeIndices.cend());
+    std::unordered_set<uint64_t> edges;
+    size_t offset = 0;
+    for (size_t f = 0; f < in.faceVertexCounts.size(); f++) {
+        const int n = in.faceVertexCounts[f];
+        if (n < 0 || offset + n > in.faceVertexIndices.size()) break; // malformed topology
+        if (n >= 3 && !holes.count(int(f))) {
+            counts.faces++;
+            for (int i = 0; i < n; i++) edges.insert(EdgeKey(in.faceVertexIndices[offset + i], in.faceVertexIndices[offset + (i + 1) % n]));
+        }
+        offset += n;
+    }
+    counts.edges = edges.size();
+    return counts;
 }
 
 /* ---------- curves ---------- */

@@ -54,6 +54,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include <sstream>
 
 using emscripten::val;
@@ -386,6 +387,20 @@ std::string NetworkJson(HdMaterialNetworkInterface& network)
     writer.EndObject();
     writer.EndObject();
     return stream.str();
+}
+
+/// Resolved paths of the asset parameters in a material network (its textures).
+void CollectTextures(HdMaterialNetworkInterface& network, std::set<std::string>* textures)
+{
+    for (const TfToken& name : network.GetNodeNames()) {
+        for (const TfToken& parameter : network.GetAuthoredNodeParameterNames(name)) {
+            const VtValue value = network.GetNodeParameterValue(name, parameter);
+            if (!value.IsHolding<SdfAssetPath>()) continue;
+            const SdfAssetPath& asset = value.UncheckedGet<SdfAssetPath>();
+            const std::string& path = asset.GetResolvedPath().empty() ? asset.GetAssetPath() : asset.GetResolvedPath();
+            if (!path.empty()) textures->insert(path);
+        }
+    }
 }
 
 /// MaterialX document for a network whose surface terminal is a MaterialX node, else empty.
@@ -899,19 +914,25 @@ void SceneBridge::ConvertMaterial(Rec& rec, val& delta)
     val entry = val::object();
     entry.set("rid", rec.rid);
     entry.set("path", rec.path.GetString());
+    std::set<std::string> textures;
     if (material) {
         if (const HdMaterialNetworkSchema universal = material.GetMaterialNetwork()) {
             HdDataSourceMaterialNetworkInterface network(rec.path, universal.GetContainer(), prim.dataSource);
             const std::string json = NetworkJson(network);
             if (!json.empty()) entry.set("network", ParseJson(json));
+            CollectTextures(network, &textures);
         }
         static const TfToken mtlx("mtlx");
         if (const HdContainerDataSourceHandle container = HdContainerDataSource::Cast(material.GetContainer()->Get(mtlx))) {
             HdDataSourceMaterialNetworkInterface network(rec.path, container, prim.dataSource);
             const std::string xml = MaterialXDocument(network);
             if (!xml.empty()) entry.set("mtlx", xml);
+            CollectTextures(network, &textures);
         }
     }
+    val list = val::array();
+    for (const std::string& texture : textures) list.call<void>("push", texture);
+    entry.set("textures", list);
     Push(delta, "materials", entry);
 }
 
@@ -1021,7 +1042,14 @@ void SceneBridge::ConvertMesh(Rec& rec, bool created, val& entry)
             entry.set("subsets", list);
         }
         entry.set("indices", Typed("Uint32Array", out.indices.data(), out.indices.size()));
+        entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
         entry.set("doubleSided", Value(mesh.GetDoubleSided(), false));
+        const MeshCounts counts = CountMesh(in);
+        val usd = val::object();
+        usd.set("points", double(counts.points));
+        usd.set("faces", double(counts.faces));
+        usd.set("edges", double(counts.edges));
+        entry.set("counts", usd);
     }
     entry.set("positions", Floats(out.positions));
     entry.set("normals", out.normals.empty() ? val::null() : Floats(out.normals));

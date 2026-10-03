@@ -85,6 +85,8 @@ def Xform "World" (kind = "component")
   const cube = first.meshes[0];
   assert.equal(cube.path, '/World/Cube');
   assert.equal(cube.indices.length, 36, 'a cube is 12 triangles');
+  assert.equal(cube.edges.length, 24, 'a cube is drawn with its 12 face edges, no diagonals');
+  assert.deepEqual(cube.counts, { points: 8, faces: 6, edges: 12 });
   assert.deepEqual(cube.displayColor, [1, 0, 0]);
   assert.equal(cube.instances, null);
   assert.equal(first.lights.length, 1);
@@ -201,6 +203,9 @@ def Xform "World"
   assert.equal(first.refineLevel, 0);
   const box = first.meshes.find((m) => m.path === '/World/Box');
   assert.equal(box.indices.length, 36);
+  assert.equal(box.edges.length, 24, 'face corners (faceVarying st) still give 12 edges, each once');
+  assert.ok([...box.edges].every((i) => i < box.positions.length / 3), 'edges index the corner layout');
+  assert.deepEqual(box.counts, { points: 8, faces: 6, edges: 12 });
   assert.equal(box.normals.length, box.positions.length, 'subdivision cages get smooth normals');
   assert.equal(box.primvars.find((p) => p.name === 'st').size, 2);
 
@@ -234,6 +239,8 @@ def Xform "World"
   assert.equal(textured.nodes[link.node].type, 'UsdUVTexture');
   assert.equal(link.output, 'rgb');
   assert.equal(textured.nodes[link.node].params.file.asset, './missing.png');
+  assert.deepEqual(materials['/World/Looks/Red'].textures, []);
+  assert.deepEqual(materials['/World/Looks/Textured'].textures, ['./missing.png'], 'unresolved assets count by their authored path');
 
   assert.equal(box.subsets.length, 2, 'one subset plus the remaining faces');
   const top = box.subsets.find((s) => s.material === materials['/World/Looks/Textured'].rid);
@@ -244,7 +251,65 @@ def Xform "World"
   const refined = flush().meshes.find((m) => m.path === '/World/Box');
   assert.equal(refined.indices.length, 576, '6 quads -> 96 quads at level 2');
   assert.equal(refined.subsets.find((s) => s.material === top.material).count, 96, '16 refined quads');
+  assert.equal(refined.edges.length, 12 * 4 * 2, 'only the cage edges, each split in 4, none inside a cage face');
+  assert.deepEqual(refined.counts, box.counts, 'counts are the authored mesh');
   core.setRefineLevel(0);
+  noErrors();
+}
+
+/* ---------- face edges of n-gons and holes ---------- */
+{
+  open('ngon.usda', `#usda 1.0
+def Mesh "Shape"
+{
+    int[] faceVertexCounts = [5, 4]
+    int[] faceVertexIndices = [0, 1, 2, 3, 4, 1, 5, 6, 2]
+    int[] holeIndices = [1]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0.5, 1.5, 0), (0, 1, 0), (2, 0, 0), (2, 1, 0)]
+}`);
+  const shape = flush().meshes[0];
+  assert.equal(shape.indices.length, 9, 'a pentagon is 3 triangles; the hole is not drawn');
+  assert.deepEqual([...shape.edges].sort(), [0, 1, 1, 2, 2, 3, 3, 4, 4, 0].sort(), 'the pentagon outline, no fan diagonals');
+  assert.deepEqual(shape.counts, { points: 7, faces: 1, edges: 5 });
+  noErrors();
+}
+
+/* ---------- viewer hiding in the session layer ---------- */
+{
+  open('hide.usda', `#usda 1.0
+def Xform "World"
+{
+    def Cube "A" {}
+    def Cube "B" {}
+    def Xform "G"
+    {
+        def Cube "C" {}
+        def Cube "D" {}
+    }
+    def Material "M" {}
+}`);
+  flush();
+  const visible = (parent) => Object.fromEntries(JSON.parse(core.primChildren(parent)).map((p) => [p.name, p.visible]));
+  const run = (mode, value) => {
+    const edit = JSON.parse(core.sessionVisibility(mode, JSON.stringify(value)));
+    assert.ok(edit.ok, edit.error);
+    assert.deepEqual(edit.dirty, [], 'the session layer is never saved');
+    return edit.previous;
+  };
+  assert.deepEqual(run('hide', ['/World/A']), { '/World/A': null });
+  assert.deepEqual(visible('/World'), { A: false, B: true, G: true, M: true });
+  const isolated = run('isolate', ['/World/G/C']);
+  assert.deepEqual(isolated, { '/World/A': 'invisible', '/World/B': null, '/World/G/D': null }, 'imageable siblings along the chain only');
+  assert.deepEqual(visible('/World'), { A: false, B: false, G: true, M: true });
+  assert.deepEqual(visible('/World/G'), { C: true, D: false });
+  run('set', isolated); // undo
+  assert.deepEqual(visible('/World'), { A: false, B: true, G: true, M: true });
+  assert.deepEqual(visible('/World/G'), { C: true, D: true });
+  assert.deepEqual(run('showAll', null), { '/World/A': 'invisible' });
+  assert.deepEqual(visible('/World'), { A: true, B: true, G: true, M: true });
+  run('hide', ['/World/B']);
+  const rootText = new TextDecoder().decode(core.exportLayer('/tmp/hide.usda', 'usda'));
+  assert.ok(rootText.includes('def Cube "B"') && !rootText.includes('visibility'), 'the root layer stays untouched');
   noErrors();
 }
 

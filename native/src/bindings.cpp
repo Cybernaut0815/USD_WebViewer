@@ -163,6 +163,7 @@ std::string setVariant(const std::string& path, const std::string& variantSet, c
     return gStage.SetVariant(path, variantSet, variant);
 }
 std::string setVisible(const std::string& path, bool visible) { return gStage.SetVisible(path, visible); }
+std::string sessionVisibility(const std::string& mode, const std::string& json) { return gStage.SessionVisibility(mode, json); }
 std::string setLoaded(const std::string& path, bool loaded) { return gStage.SetLoaded(path, loaded); }
 std::string setAttribute(const std::string& path, const std::string& name, const std::string& json, double time)
 {
@@ -227,6 +228,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("resolvePick", &resolvePick);
     function("setVariant", &setVariant);
     function("setVisible", &setVisible);
+    function("sessionVisibility", &sessionVisibility);
     function("setLoaded", &setLoaded);
     function("setAttribute", &setAttribute);
     function("clearSessionEdits", &clearSessionEdits);

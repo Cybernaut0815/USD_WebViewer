@@ -31,6 +31,10 @@ export interface UsdStageApi {
   resolvePick(rid: number, instance: number): Promise<PickResult | null>;
   setVariant(path: Path, variantSet: string, variant: string): Promise<void>;
   setVisible(path: Path, visible: boolean): Promise<void>;
+  /** Viewer hiding, written to the session layer (never saved): hide prims, hide everything else, undo both. */
+  hide(paths: readonly Path[]): Promise<void>;
+  isolate(paths: readonly Path[]): Promise<void>;
+  showAll(): Promise<void>;
   setPayloadLoaded(path: Path, loaded: boolean): Promise<void>;
   /** Writes to the stage's edit target; `time` omitted writes the default value. */
   setAttribute(path: Path, name: string, value: Json, time?: number): Promise<void>;
@@ -117,7 +121,8 @@ export interface UsdSessionEventMap {
   selectionchange: CustomEvent<{ paths: Path[]; source: SelectionSource; active: Path | null }>;
   timechange: CustomEvent<{ time: number }>;
   playchange: Event;
-  primschange: CustomEvent<{ resynced: Path[] }>;
+  /** `visibility`: the edit changed visibility, which no resync reports. */
+  primschange: CustomEvent<{ resynced: Path[]; visibility?: boolean }>;
   /** Every render delta the core produced, in order; the viewport applies them. */
   delta: CustomEvent<RenderDelta>;
   lockchange: CustomEvent<{ path: Path; locked: boolean }>;
@@ -160,7 +165,11 @@ export class UsdSession extends EventTarget {
       this.recorded(
         () => this.core.call('setVisible', path, visible),
         (previous) => this.restore(path, 'visibility', previous, NaN),
+        true,
       ),
+    hide: (paths) => this.sessionVisibility('hide', paths),
+    isolate: (paths) => this.sessionVisibility('isolate', paths),
+    showAll: () => this.sessionVisibility('showAll', []),
     setPayloadLoaded: (path, loaded) =>
       this.recorded(
         () => this.core.call('setLoaded', path, loaded),
@@ -444,6 +453,9 @@ export class UsdSession extends EventTarget {
     this.emit('timechange', { time: value });
   }
 
+  /** Playback wraps around at the end; off: it stops on the last frame. */
+  loop = true;
+
   get playing(): boolean {
     return this.playRequest !== 0;
   }
@@ -451,12 +463,18 @@ export class UsdSession extends EventTarget {
     const stage = this.stage;
     if (!stage?.hasTimeRange || this.playing) return;
     this.playStart = performance.now();
-    this.playFrom = Number.isNaN(this.currentTime) ? stage.startTimeCode : this.currentTime;
+    this.playFrom = Number.isNaN(this.currentTime) || this.currentTime >= stage.endTimeCode ? stage.startTimeCode : this.currentTime;
     const tick = () => {
       // Time follows the wall clock, so slow frames are dropped instead of queued.
       const span = stage.endTimeCode - stage.startTimeCode;
       const elapsed = ((performance.now() - this.playStart) / 1000) * stage.timeCodesPerSecond;
-      this.time = stage.startTimeCode + ((this.playFrom - stage.startTimeCode + elapsed) % (span || 1));
+      const offset = this.playFrom - stage.startTimeCode + elapsed;
+      if (!this.loop && offset >= span) {
+        this.time = stage.endTimeCode;
+        this.pause();
+        return;
+      }
+      this.time = stage.startTimeCode + (offset % (span || 1));
       this.playRequest = requestAnimationFrame(tick);
     };
     this.playRequest = requestAnimationFrame(tick);
@@ -507,31 +525,43 @@ export class UsdSession extends EventTarget {
    * Awaits an edit, fails on error, flushes, and tells listeners which prims resynced. Not
    * undoable by itself; `quiet` skips the primschange event (a drag emits one at its end).
    */
-  async edit(call: Promise<Edit>, options: { quiet?: boolean } = {}): Promise<Edit> {
+  async edit(call: Promise<Edit>, options: { quiet?: boolean; visibility?: boolean } = {}): Promise<Edit> {
     const result = await call;
     if (!result.ok) throw new Error(result.error ?? 'edit failed');
     this.setDirty(result.dirty ?? []);
     await this.flush();
-    if (!options.quiet) this.emit('primschange', { resynced: result.resynced });
+    if (!options.quiet) this.emit('primschange', { resynced: result.resynced, visibility: options.visibility });
     return result;
   }
 
   /** Runs an edit as an undoable command; `inverse` builds the undo call from what the edit replaced. */
-  private recorded(forward: () => Promise<Edit>, inverse: (previous: Json | undefined) => Promise<Edit> | null): Promise<void> {
+  private recorded(
+    forward: () => Promise<Edit>,
+    inverse: (previous: Json | undefined) => Promise<Edit> | null,
+    visibility = false,
+  ): Promise<void> {
     let previous: Json | undefined;
     let first = true;
     return this.commands.run({
       label: 'edit',
       do: async () => {
-        const result = await this.edit(forward());
+        const result = await this.edit(forward(), { visibility });
         if (first) previous = result.previous;
         first = false;
       },
       undo: async () => {
         const call = inverse(previous);
-        if (call) await this.edit(call);
+        if (call) await this.edit(call, { visibility });
       },
     });
+  }
+
+  private sessionVisibility(mode: 'hide' | 'isolate' | 'showAll', paths: readonly Path[]): Promise<void> {
+    return this.recorded(
+      () => this.core.call('sessionVisibility', mode, JSON.stringify(paths)),
+      (previous) => this.core.call('sessionVisibility', 'set', JSON.stringify(previous ?? {})),
+      true,
+    );
   }
 
   /** Puts an attribute back to an earlier opinion, or removes the opinion when there was none. */
@@ -579,10 +609,18 @@ export class UsdSession extends EventTarget {
   }
 }
 
-/** Ctrl-click: adds a prim and makes it active; on another selected prim it only activates it; on the active one it deselects. */
-export function ctrlSelect(session: UsdSession, path: Path, source: SelectionSource): void {
-  const paths = session.selection;
-  if (!paths.includes(path)) session.select([...paths, path], source);
-  else if (session.active !== path) session.select(paths, source, path);
-  else session.select(paths.filter((p) => p !== path), source);
+export type SelectMode = 'replace' | 'add' | 'remove';
+
+/**
+ * Shift (add) and Ctrl (remove) selection. Adding makes the last given path active, so Shift-click
+ * on an already selected prim only activates it; removing keeps the active prim when it stays.
+ */
+export function modifySelect(session: UsdSession, paths: readonly Path[], mode: SelectMode, source: SelectionSource): void {
+  const current = session.selection;
+  if (mode === 'replace') session.select(paths, source);
+  else if (mode === 'add') session.select([...current, ...paths.filter((p) => !current.includes(p))], source, paths.at(-1) ?? session.active ?? undefined);
+  else {
+    const kept = current.filter((p) => !paths.includes(p));
+    session.select(kept, source, session.active && kept.includes(session.active) ? session.active : undefined);
+  }
 }

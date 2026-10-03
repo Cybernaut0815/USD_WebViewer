@@ -1,6 +1,7 @@
 // Hierarchy panel: lazily loaded prim tree drawn as a window of fixed-height
 // rows, so the DOM stays small however many prims the stage has.
 import type { Path, PrimSummary } from './protocol.ts';
+import type { SelectMode } from './session.ts';
 
 const ROW = 22; // px, must match .row in viewer.css
 
@@ -29,7 +30,8 @@ export function rowWindow(scrollTop: number, viewHeight: number, total: number):
 
 export class Tree {
   readonly element = document.createElement('div');
-  onselect: (path: Path, toggle: boolean) => void = () => {};
+  /** Shift-click adds, Ctrl-click removes. */
+  onselect: (path: Path, mode: SelectMode) => void = () => {};
   onvisible: (path: Path, visible: boolean) => void = () => {};
   onframe: (path: Path) => void = () => {};
   onlock: (path: Path, locked: boolean) => void = () => {};
@@ -225,7 +227,7 @@ export class Tree {
       this.draw();
     } else if (target.classList.contains('lock')) {
       this.onlock(node.summary.path, !this.isLocked(node.summary.path));
-    } else this.onselect(node.summary.path, event.ctrlKey || event.metaKey);
+    } else this.onselect(node.summary.path, event.shiftKey ? 'add' : event.ctrlKey || event.metaKey ? 'remove' : 'replace');
   }
 
   private async key(event: KeyboardEvent): Promise<void> {
@@ -240,10 +242,9 @@ export class Tree {
     } else if (event.key === 'ArrowLeft' && node?.expanded) {
       node.expanded = false;
       this.refresh();
-    } else if (event.key.toLowerCase() === 'f' && node) this.onframe(node.summary.path);
-    else return;
+    } else return; // other keys (F, tools, hiding) are the viewer's
     event.preventDefault();
-    if (next !== current && this.rows[next]) this.onselect(this.rows[next].summary.path, false);
+    if (next !== current && this.rows[next]) this.onselect(this.rows[next].summary.path, 'replace');
   }
 }
 

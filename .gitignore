@@ -7,3 +7,4 @@ web/test-results/
 web/playwright-report/
 web/e2e/assets/
 web/public/test-assets/
+build/

@@ -2,15 +2,20 @@
 import * as THREE from 'three/webgpu';
 import {
   ACTIVE,
+  ACTIVE_LINE,
   buildMaterial,
   displayMaterial,
   hairlineMaterial,
+  HIDDEN,
   HIGHLIGHT,
+  instancedLines,
+  LINE,
+  LINE_ALONE,
   PLAIN,
-  WIRE,
   type MaterialHost,
   pointsMaterial,
   ribbonMaterial,
+  SELECTED_LINE,
   TextureCache,
 } from './materials.ts';
 import type {
@@ -19,6 +24,7 @@ import type {
   LightEntry,
   LightParams,
   MaterialEntry,
+  MeshCounts,
   MeshEntry,
   Path,
   PointsEntry,
@@ -39,6 +45,8 @@ interface Item {
   matrix: THREE.Matrix4; // world matrix in stage space
   object: THREE.Object3D | null;
   geometry: THREE.BufferGeometry | null;
+  edges: THREE.BufferGeometry | null; // authored face edges as line pairs, sharing the mesh positions
+  counts: MeshCounts | null;
   own: THREE.Material | null; // fallback material owned by this item
   material: Rid;
   subsets: Subset[] | null;
@@ -63,8 +71,22 @@ export interface SceneHost extends MaterialHost {
   invalidate(): void;
 }
 
-/** shaded: materials; shaded-wire: materials + edges; plain-wire: grey + edges; wire: edges only. */
-export type DisplayMode = 'shaded' | 'shaded-wire' | 'plain-wire' | 'wire';
+/**
+ * shaded: materials; plain: one grey material; -wire: plus the edges of every mesh; -selwire: plus
+ * red edges on the selection instead of the highlight fill; wire: edges only. Edges are the
+ * authored faces' outlines, never the triangulation.
+ */
+export type DisplayMode = 'shaded' | 'shaded-wire' | 'shaded-selwire' | 'plain' | 'plain-wire' | 'plain-selwire' | 'wire';
+
+/** USD counts of what is drawn; instances count once each. */
+export interface SceneStats {
+  meshes: number;
+  points: number;
+  faces: number;
+  edges: number;
+  materials: number;
+  textures: number;
+}
 
 export class SceneSync {
   /** Everything from the stage lives under this group; it carries the up-axis rotation. */
@@ -88,6 +110,7 @@ export class SceneSync {
   private lastBoundsBump = 0;
   private domeRid: Rid = 0;
   private studio: THREE.Texture | null = null;
+  private sky: THREE.Texture | null = null;
   private readonly building = new Set<Promise<unknown>>(); // materials and textures still loading
   private readonly scene: THREE.Scene;
   private readonly host: SceneHost;
@@ -140,10 +163,12 @@ export class SceneSync {
         this.updateVisible(item);
       });
     }
-    // Rebuilt meshes are new objects, so the overlays are redone with them.
+    // Rebuilt meshes are new objects, so the overlays are redone with them; instanced overlays
+    // live outside their mesh and take its visibility when built.
+    const rebuilt = delta.meshes || delta.removed || delta.visibility;
     if (delta.selected) this.selected = delta.selected;
-    if (delta.selected || (this.selected.length && (delta.meshes || delta.removed))) this.highlight(this.selected);
-    if (this.displayMode.endsWith('wire') && (delta.meshes || delta.removed)) this.wireframes();
+    if (delta.selected || (this.selected.length && rebuilt)) this.highlight(this.selected);
+    if (rebuilt) this.wireframes();
     if (delta.lights || delta.removed) this.updateEnvironment();
     // The version drives a walk over every object (bounds, shadow fit): structural changes bump
     // it at once, moving objects at most twice a second.
@@ -236,6 +261,8 @@ export class SceneSync {
   setPurposes(purposes: Iterable<string>): void {
     this.purposes = new Set(purposes);
     for (const item of this.items.values()) this.updateVisible(item);
+    this.highlight(this.selected);
+    this.wireframes();
     this.host.invalidate();
   }
 
@@ -243,19 +270,42 @@ export class SceneSync {
     if (mode === this.displayMode) return;
     this.displayMode = mode;
     for (const item of this.items.values()) if (item.kind === 'mesh') this.assign(item);
+    this.highlight(this.selected);
     this.wireframes();
     this.host.invalidate();
   }
 
-  /** Wireframe overlays on every mesh, or none, depending on the display mode. */
+  /** Edge overlays on every mesh, or none, depending on the display mode. */
   private wireframes(): void {
     for (const proxy of this.wires) dispose(proxy);
     this.wires = [];
-    if (this.displayMode === 'shaded' || this.displayMode === 'wire') return;
+    if (!['shaded-wire', 'plain-wire', 'wire'].includes(this.displayMode)) return;
+    const material = this.displayMode === 'wire' ? LINE_ALONE : LINE;
     for (const item of this.items.values()) {
-      const proxy = item.kind === 'mesh' ? this.overlay(item, WIRE) : null;
+      const proxy = this.lines(item, material);
       if (proxy) this.wires.push(proxy);
     }
+  }
+
+  /** USD counts of the visible meshes, the materials bound to them and those materials' textures. */
+  stats(): SceneStats {
+    const stats: SceneStats = { meshes: 0, points: 0, faces: 0, edges: 0, materials: 0, textures: 0 };
+    const materials = new Set<Rid>();
+    for (const item of this.items.values()) {
+      if (item.kind !== 'mesh' || !item.object?.visible) continue;
+      const copies = item.instances ? item.instances.length / 16 : 1;
+      stats.meshes += copies;
+      stats.points += (item.counts?.points ?? 0) * copies;
+      stats.faces += (item.counts?.faces ?? 0) * copies;
+      stats.edges += (item.counts?.edges ?? 0) * copies;
+      // With subsets the mesh's own material is listed as the subset of the remaining faces.
+      for (const rid of item.subsets?.length ? item.subsets.map((s) => s.material) : [item.material]) if (rid) materials.add(rid);
+    }
+    const textures = new Set<string>();
+    for (const rid of materials) this.materials.get(rid)?.entry.textures?.forEach((t) => textures.add(t));
+    stats.materials = materials.size;
+    stats.textures = textures.size;
+    return stats;
   }
 
   /** The active prim gets the brighter highlight. */
@@ -311,6 +361,8 @@ export class SceneSync {
         matrix: new THREE.Matrix4(),
         object: null,
         geometry: null,
+        edges: null,
+        counts: null,
         own: null,
         material: 0,
         subsets: null,
@@ -334,6 +386,7 @@ export class SceneSync {
     if (item) {
       this.detach(item);
       item.geometry?.dispose();
+      item.edges?.dispose();
       item.own?.dispose();
       this.items.delete(rid);
       if (rid === this.domeRid) this.domeRid = 0;
@@ -393,9 +446,9 @@ export class SceneSync {
   }
 
   private materialsFor(item: Item, vertexColors: boolean): THREE.Material | THREE.Material[] {
-    if (this.displayMode === 'wire') return WIRE;
+    if (this.displayMode === 'wire') return HIDDEN;
     const single = this.cullBackfaces && !item.doubleSided;
-    if (this.displayMode === 'plain-wire') return single ? PLAIN.single : PLAIN.double;
+    if (this.displayMode.startsWith('plain')) return single ? PLAIN.single : PLAIN.double;
     const style = (material: THREE.Material) => {
       (material as any).flatShading = item.flat;
       material.side = single ? THREE.FrontSide : THREE.DoubleSide;
@@ -466,6 +519,17 @@ export class SceneSync {
       stream(g, 'position', e.positions, 3);
       g.computeBoundingBox();
       g.computeBoundingSphere();
+    }
+    if (e.counts) item.counts = e.counts;
+    if (e.edges) {
+      // Edges come with the indices, so the mesh geometry (and its position attribute) is new too;
+      // later same-size position updates swap that attribute's array, so the lines follow.
+      item.edges?.dispose();
+      item.edges = new THREE.BufferGeometry();
+      item.edges.setAttribute('position', g.attributes.position);
+      item.edges.setIndex(new THREE.BufferAttribute(e.edges, 1));
+      item.edges.boundingBox = g.boundingBox; // updated in place by computeBounding*
+      item.edges.boundingSphere = g.boundingSphere;
     }
     if (e.normals !== undefined) {
       if (e.normals) stream(g, 'normal', e.normals, 3);
@@ -648,6 +712,12 @@ export class SceneSync {
     holder.matrix.compose(position, rotation, new THREE.Vector3(1, 1, 1));
   }
 
+  /** A viewer sky (equirectangular) that lights the stage and fills the background instead of its dome; null: the stage's own. */
+  setSky(texture: THREE.Texture | null): void {
+    this.sky = texture;
+    this.updateEnvironment();
+  }
+
   private updateEnvironment(): void {
     const dome = this.items.get(this.domeRid);
     const p = dome?.lightParams;
@@ -657,8 +727,15 @@ export class SceneSync {
       this.scene.environmentIntensity = intensity;
       this.scene.background = background ? texture : null;
       this.scene.backgroundIntensity = intensity;
+      this.scene.environmentRotation.set(0, 0, 0);
+      this.scene.backgroundRotation.set(0, 0, 0);
       this.host.invalidate();
     };
+    if (this.sky) {
+      this.sky.mapping = THREE.EquirectangularReflectionMapping;
+      set(this.sky, 1, true);
+      return;
+    }
     if (!p || !dome.usdVisible) {
       set(hasLights ? null : this.studio, 1, false);
       return;
@@ -668,7 +745,7 @@ export class SceneSync {
       return;
     }
     this.track(this.textures.get(p.texture, THREE.NoColorSpace)).then((texture) => {
-      if (this.items.get(this.domeRid) !== dome || !texture) return;
+      if (this.items.get(this.domeRid) !== dome || !texture || this.sky) return;
       texture.mapping = THREE.EquirectangularReflectionMapping;
       set(texture, units.luminance(p), true);
       // OpenEXR lat-long puts +Z at the image centre, three puts +X there.
@@ -687,47 +764,72 @@ export class SceneSync {
   private highlight(selected: { rid: Rid; instances?: Uint32Array }[]): void {
     for (const proxy of this.highlights) dispose(proxy);
     this.highlights = [];
+    const wire = this.displayMode.endsWith('selwire');
     // ponytail: one overlay mesh per selected item; switch to an outline pass above a few thousand.
     for (const { rid, instances } of selected.slice(0, 2000)) {
       const item = this.items.get(rid);
-      const active = this.activePath !== null && (item?.path === this.activePath || item?.path.startsWith(`${this.activePath}/`));
-      const proxy = item ? this.overlay(item, active ? ACTIVE : HIGHLIGHT, instances) : null;
+      if (!item) continue;
+      const active = this.activePath !== null && (item.path === this.activePath || item.path.startsWith(`${this.activePath}/`));
+      const proxy = wire
+        ? this.lines(item, active ? ACTIVE_LINE : SELECTED_LINE, instances)
+        : this.overlay(item, active ? ACTIVE : HIGHLIGHT, instances);
       if (proxy) this.highlights.push(proxy);
     }
   }
 
-  /** A mesh drawn on top of an item with another material (highlight, wireframe), sharing its geometry. */
+  /** A mesh drawn on top of an item with another material (highlight), sharing its geometry. */
   private overlay(item: Item, material: THREE.Material, instances?: Uint32Array): THREE.Mesh | null {
     if (item.kind !== 'mesh' || !item.object || !item.geometry) return null;
     let proxy: THREE.Mesh;
     if (item.instances) {
-      const all = item.instances.length / 16;
-      const picked = instances ?? Uint32Array.from({ length: all }, (_, i) => i);
-      const matrices = new Float32Array(picked.length * 16);
-      picked.forEach((index, i) => matrices.set(item.instances!.subarray(index * 16, index * 16 + 16), i * 16));
-      const instanced = new THREE.InstancedMesh(item.geometry, material, picked.length);
+      const matrices = pickInstances(item.instances, instances);
+      const instanced = new THREE.InstancedMesh(item.geometry, material, matrices.length / 16);
       instanced.instanceMatrix = new THREE.InstancedBufferAttribute(matrices, 16);
-      instanced.frustumCulled = false;
-      this.root.add(instanced);
       proxy = instanced;
-    } else {
-      proxy = new THREE.Mesh(item.geometry, material);
-      item.object.add(proxy); // follows the item's transform
-    }
+    } else proxy = new THREE.Mesh(item.geometry, material);
     // With subsets the geometry has groups; a single material ignores them only when unset.
     if (item.geometry.groups.length) proxy.material = item.geometry.groups.map(() => material);
+    return this.place(item, proxy);
+  }
+
+  /** The item's authored face edges drawn as lines (wireframe, selection wire), sharing its positions. */
+  private lines(item: Item, material: THREE.LineBasicNodeMaterial, instances?: Uint32Array): THREE.LineSegments | null {
+    if (item.kind !== 'mesh' || !item.object || !item.edges) return null;
+    if (!item.instances) return this.place(item, new THREE.LineSegments(item.edges, material));
+    const matrices = pickInstances(item.instances, instances);
+    const proxy = new THREE.LineSegments(item.edges, instancedLines(material, matrices));
+    (proxy as any).count = matrices.length / 16; // the renderer draws `count` instances of any object
+    proxy.userData.ownsMaterial = true;
+    return this.place(item, proxy);
+  }
+
+  /** Overlays of plain items are children (they follow the transform); instanced ones sit in root. */
+  private place<T extends THREE.Object3D>(item: Item, proxy: T): T {
+    if (item.instances) {
+      proxy.frustumCulled = false;
+      proxy.visible = item.object!.visible;
+      this.root.add(proxy);
+    } else item.object!.add(proxy);
     proxy.raycast = () => {};
     proxy.renderOrder = 1;
-    proxy.visible = item.object.visible;
     return proxy;
   }
 }
 
 /* ---------- helpers ---------- */
 
+/** 16 floats per chosen instance (all when `picked` is omitted). */
+function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
+  if (!picked) return all.slice();
+  const matrices = new Float32Array(picked.length * 16);
+  picked.forEach((index, i) => matrices.set(all.subarray(index * 16, index * 16 + 16), i * 16));
+  return matrices;
+}
+
 function dispose(proxy: THREE.Object3D): void {
   proxy.removeFromParent();
   if ((proxy as THREE.InstancedMesh).isInstancedMesh) (proxy as THREE.InstancedMesh).dispose();
+  if (proxy.userData.ownsMaterial) ((proxy as THREE.LineSegments).material as THREE.Material).dispose();
 }
 
 function disposeRecord(record: MaterialRecord): void {

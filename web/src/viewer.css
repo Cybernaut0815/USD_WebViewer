@@ -14,8 +14,9 @@
 }
 .app {
   display: grid;
-  grid-template: auto 1fr auto / auto 1fr auto;
-  grid-template-areas: 'bar bar bar' 'left view right' 'time time time';
+  /* Columns are set inline from the panel shares (viewer.ts applyLayout); a hidden panel's is 0. */
+  grid-template: auto 1fr auto / 20% auto minmax(0, 1fr) auto 25%;
+  grid-template-areas: 'bar bar bar bar bar' 'left lsplit view rsplit right' 'time time time time time';
   width: 100%;
   height: 100%;
   background: var(--bg);
@@ -56,14 +57,61 @@ aside {
   overflow: hidden;
   background: var(--panel);
 }
-/* Native resize handles size the side panels; the right one grows leftwards. */
-.left { grid-area: left; width: 280px; resize: horizontal; border-right: 1px solid var(--line); }
-.right { grid-area: right; width: 340px; resize: horizontal; direction: rtl; border-left: 1px solid var(--line); }
-.right > * { direction: ltr; }
+.left { grid-area: left; }
+.right { grid-area: right; }
 .left input[type='search'] { margin: 4px; }
+.split { position: relative; width: 4px; cursor: col-resize; background: var(--line); touch-action: none; }
+.no-left .left-split, .no-right .right-split { cursor: default; }
+/* Tabs in the middle of the viewport's borders: show / hide the panel behind them. */
+.toggle {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--dim);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  cursor: pointer;
+}
+.toggle:hover { color: var(--text); border-color: var(--accent); }
+.toggle.side { top: 50%; left: 50%; width: 14px; height: 40px; transform: translate(-50%, -50%); border-radius: 4px; }
+/* With the panel hidden its border is the window's edge: keep the whole tab on screen. */
+.no-left .left-split .toggle { left: 0; transform: translateY(-50%); }
+.no-right .right-split .toggle { left: auto; right: 0; transform: translateY(-50%); }
+.toggle.time { bottom: 0; left: 50%; width: 40px; height: 14px; transform: translateX(-50%); border-radius: 4px 4px 0 0; border-bottom: none; }
+.split:hover, .split:active { background: var(--accent); }
+.left-split { grid-area: lsplit; }
+.right-split { grid-area: rsplit; }
+.picker { margin: 4px; }
+.picker[hidden] { display: none; }
 main { grid-area: view; position: relative; min-width: 0; min-height: 0; }
 canvas { display: block; width: 100%; height: 100%; outline: none; }
-.bare .toolbar, .bare aside, .bare .bottom { display: none; }
+.bare .toolbar, .bare aside, .bare .split, .bare .bottom, .bare .stats { display: none; }
+.no-left .left, .no-right .right, .no-time .bottom { display: none; }
+.bare .toggle { display: none; }
+
+/* Shift/Ctrl+drag selection: dashed while dragged upward (takes what it touches). */
+.marquee { position: absolute; border: 1px solid var(--accent); background: #ffc4001a; pointer-events: none; }
+.marquee.touch { border-style: dashed; background: #ffc4000d; }
+
+.stats {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0 12px;
+  padding: 6px 10px;
+  background: #000a;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.stats[hidden] { display: none; }
+.stats span { color: var(--dim); }
+.stats output { font-family: ui-monospace, monospace; text-align: right; }
 
 .status {
   position: absolute;
@@ -77,7 +125,7 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 }
 .status.fatal { border: 1px solid #e5484d; }
 
-.tree { flex: 1; overflow: auto; position: relative; outline: none; scrollbar-gutter: stable; }
+.tree { flex: 1; overflow: auto; position: relative; outline: none; scrollbar-gutter: stable; user-select: none; }
 .tree > div { position: relative; }
 .row {
   position: absolute;
@@ -119,9 +167,23 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .props table { width: 100%; border-collapse: collapse; }
 .props td { padding: 1px 6px 1px 0; vertical-align: top; overflow-wrap: anywhere; }
 .props td:first-child { color: var(--dim); white-space: nowrap; overflow-wrap: normal; }
-.props .matrix td { font-family: ui-monospace, monospace; color: var(--text); }
+.props .matrix td { font-family: ui-monospace, monospace; color: var(--text); padding: 0 0 0 8px; text-align: right; }
 .props .fallback { font-style: italic; }
-.props .value { font-family: ui-monospace, monospace; }
+/* Value boxes: click copies, right click offers more. */
+.props .value {
+  display: inline-block;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0 4px;
+  font-family: ui-monospace, monospace;
+  background: #ffffff08;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  cursor: copy;
+  transition: border-color 0.15s, background 0.15s;
+}
+.props .value:hover { border-color: var(--dim); background: #ffffff12; }
+.props .value.copied { border-color: var(--accent); background: #ffc40026; }
 .props a { color: #6cb6ff; display: block; }
 .props summary { cursor: pointer; margin: 8px 0 2px; font-weight: 600; }
 
@@ -134,11 +196,25 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
   background: var(--panel);
   border-top: 1px solid var(--line);
 }
-.timeline[hidden] { display: none; }
-.timeline input { flex: 1; }
-.timeline output { min-width: 5ch; text-align: right; font-family: ui-monospace, monospace; }
+.timeline input[type='range'] { flex: 1; }
+.timeline input[type='number'] { width: 6em; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 3px; }
+.timeline .range { color: var(--dim); white-space: nowrap; font-family: ui-monospace, monospace; }
+.timeline label { white-space: nowrap; }
+.timeline.static { opacity: 0.6; }
+.timeline button:disabled { opacity: 0.5; }
 
 .messages { max-width: 70vw; max-height: 70vh; overflow: auto; color: var(--text); background: var(--panel); border: 1px solid var(--line); }
 .messages p { margin: 2px 0; font-family: ui-monospace, monospace; white-space: pre-wrap; }
 .messages .warn { color: #f5a524; }
 .messages .error { color: #ff6369; }
+
+.help { width: min(620px, 90vw); max-height: 80vh; overflow: auto; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 16px; }
+.help::backdrop, .messages::backdrop { background: #0008; }
+.help .head { display: flex; align-items: center; margin-bottom: 4px; }
+.help .head strong { font-size: 14px; }
+.help .close { margin-left: auto; }
+.help h4 { margin: 10px 0 4px; color: var(--dim); font-weight: 600; }
+.help table { width: 100%; border-collapse: collapse; }
+.help td { padding: 2px 8px 2px 0; vertical-align: top; }
+.help td:first-child { width: 40%; white-space: nowrap; }
+.help kbd { font-family: ui-monospace, monospace; padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; background: var(--bg); }

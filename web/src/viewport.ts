@@ -166,6 +166,60 @@ export class Viewport {
     return null;
   }
 
+  /**
+   * Render items (and instances) in a client-space rectangle: those whose screen bounds lie fully
+   * inside it, or with `touching` those whose screen bounds overlap it.
+   * ponytail: bounding boxes, not silhouettes, so touching over-selects near corners; test vertices if that bites.
+   */
+  boxPick(r: { left: number; top: number; right: number; bottom: number }, contained: boolean): { rid: Rid; instance: number }[] {
+    const canvas = this.canvas.getBoundingClientRect();
+    this.sync.root.updateMatrixWorld(true);
+    this.camera.updateMatrixWorld();
+    const corner = new THREE.Vector3();
+    const inRect = (box: THREE.Box3, world: THREE.Matrix4): boolean => {
+      let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+      for (let i = 0; i < 8; i++) {
+        corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+        corner.applyMatrix4(world).project(this.camera);
+        if (corner.z > 1) return false; // behind the camera
+        const x = canvas.left + ((corner.x + 1) / 2) * canvas.width;
+        const y = canvas.top + ((1 - corner.y) / 2) * canvas.height;
+        left = Math.min(left, x);
+        right = Math.max(right, x);
+        top = Math.min(top, y);
+        bottom = Math.max(bottom, y);
+      }
+      return contained
+        ? left >= r.left && right <= r.right && top >= r.top && bottom <= r.bottom
+        : left <= r.right && right >= r.left && top <= r.bottom && bottom >= r.top;
+    };
+    const hits: { rid: Rid; instance: number }[] = [];
+    const world = new THREE.Matrix4();
+    const instance = new THREE.Matrix4();
+    for (const item of this.sync.items.values()) {
+      const object = item.object;
+      if (!object || item.kind === 'light' || item.kind === 'camera') continue;
+      let shown = true;
+      for (let o: THREE.Object3D | null = object; o; o = o.parent) shown &&= o.visible;
+      if (!shown) continue;
+      if (item.kind === 'mesh' && item.geometry?.boundingBox) {
+        if (!item.instances) {
+          if (inRect(item.geometry.boundingBox, object.matrixWorld)) hits.push({ rid: item.rid, instance: -1 });
+          continue;
+        }
+        for (let i = 0; i * 16 < item.instances.length && hits.length < 5000; i++) {
+          world.multiplyMatrices(object.matrixWorld, instance.fromArray(item.instances, i * 16));
+          if (inRect(item.geometry.boundingBox, world)) hits.push({ rid: item.rid, instance: i });
+        }
+      } else {
+        // Curves and points: their world bounds as a whole.
+        const box = new THREE.Box3().setFromObject(object);
+        if (!box.isEmpty() && inRect(box, world.identity())) hits.push({ rid: item.rid, instance: -1 });
+      }
+    }
+    return hits;
+  }
+
   async screenshot(type = 'image/png', quality?: number): Promise<Blob> {
     await this.nextFrame();
     // Read back in the same task as a render, before the drawing buffer is cleared.

@@ -51,10 +51,21 @@ struct MeshOut {
     std::vector<float> normals; // empty: none available, shade flat
     std::vector<PrimvarOut> primvars;
     std::vector<int> triangleFace; // authored face each triangle came from
-    bool expanded = false;         // one vertex per face corner (see MeshIn::expand)
+    /// Line pairs along authored face boundaries (no triangulation diagonals, and on
+    /// refined meshes no edges inside an authored face), in the layout of `indices`.
+    std::vector<uint32_t> edges;
+    bool expanded = false; // one vertex per face corner (see MeshIn::expand)
 };
 
 MeshOut BuildMesh(const MeshIn& in);
+
+/// Counts of the authored mesh: points, faces drawn (holes and degenerate faces
+/// left out) and the distinct edges of those faces.
+struct MeshCounts {
+    size_t points = 0, faces = 0, edges = 0;
+};
+
+MeshCounts CountMesh(const MeshIn& in);
 
 struct CurvesIn {
     TfToken type, basis, wrap; // linear|cubic, bezier|bspline|catmullRom, nonperiodic|periodic

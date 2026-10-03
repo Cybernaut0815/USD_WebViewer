@@ -1,7 +1,7 @@
 // Toolbar: file opening, framing, camera, refinement, purposes, display settings, messages.
 import { collectDrop, download, fromInput } from './files.ts';
 import { h } from './props.ts';
-import type { ToolName, UsdViewerElement } from './viewer.ts';
+import { type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
 import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 
@@ -55,14 +55,35 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   });
   const display = select(
     'Display mode',
-    [['shaded', 'Shaded'], ['shaded-wire', 'Shaded + wire'], ['plain-wire', 'Plain + wire'], ['wire', 'Wireframe']],
+    [
+      ['shaded', 'Shaded'],
+      ['shaded-wire', 'Shaded + wire'],
+      ['shaded-selwire', 'Shaded + selection wire'],
+      ['plain', 'Plain'],
+      ['plain-wire', 'Plain + wire'],
+      ['plain-selwire', 'Plain + selection wire'],
+      ['wire', 'Wireframe'],
+    ],
     (v) => (viewer.displayMode = v as DisplayMode),
   );
   viewer.addEventListener('displaymodechange', () => (display.value = viewer.displayMode));
+  const sky = select(
+    'Sky: an HDRI lighting the stage and filling the background, in place of the stage\'s dome light',
+    [['', 'No sky'], ...Object.entries(SKIES)],
+    (v) => (viewer.sky = v || null),
+  );
+  viewer.addEventListener('skychange', () => (sky.value = viewer.sky ?? ''));
+  const panelBoxes = (['hierarchy', 'details', 'timeline'] as (keyof PanelState)[]).map((panel) => {
+    const box = h('input', { type: 'checkbox', checked: viewer.panels[panel] }) as HTMLInputElement;
+    box.addEventListener('change', () => (viewer.panels = { [panel]: box.checked }));
+    viewer.addEventListener('panelschange', () => (box.checked = viewer.panels[panel]));
+    return h('label', {}, box, ` ${panel[0].toUpperCase()}${panel.slice(1)}`);
+  });
+  const help = button('?', 'Keys and mouse (F1)', () => viewer.showHelp());
 
   const purposeBoxes = ['default', 'proxy', 'render', 'guide'].map((purpose) => {
     const box = h('input', { type: 'checkbox', checked: purpose === 'default' || purpose === 'proxy', value: purpose }) as HTMLInputElement;
-    box.addEventListener('change', () => viewport.sync.setPurposes(purposeBoxes.filter((b) => b.checked).map((b) => b.value)));
+    box.addEventListener('change', () => (viewer.purposes = purposeBoxes.filter((b) => b.checked).map((b) => b.value)));
     return box;
   });
   const cull = h('input', { type: 'checkbox' }) as HTMLInputElement;
@@ -129,6 +150,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   const viewMenu = menu('View');
   viewMenu.append(
     menuItem(viewMenu, 'Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection)),
+    ...panelBoxes,
     ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value} purpose`)),
     h('label', { title: 'Hide the back of single-sided meshes' }, cull, ' Cull backfaces'),
     h('label', {}, 'Tone mapping ', select('Tone mapping', [['neutral', 'Neutral'], ['aces', 'ACES'], ['agx', 'AgX'], ['none', 'None']], (v) => (viewer.toneMapping = v as ToneMapping))),
@@ -175,8 +197,10 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     cameras,
     refine,
     display,
+    sky,
     h('slot', { name: 'toolbar' }),
     h('span', { className: 'grow' }),
+    help,
     messagesButton,
     badge,
     file,

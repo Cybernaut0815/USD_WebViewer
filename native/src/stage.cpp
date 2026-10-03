@@ -27,6 +27,8 @@
 #include "pxr/usd/kind/registry.h"
 #include "pxr/usd/pcp/layerStack.h"
 #include "pxr/usd/pcp/node.h"
+#include "pxr/usd/sdf/attributeSpec.h"
+#include "pxr/usd/sdf/changeBlock.h"
 #include "pxr/usd/sdf/copyUtils.h"
 #include "pxr/usd/sdf/listOp.h"
 #include "pxr/usd/sdf/primSpec.h"
@@ -63,6 +65,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -900,6 +903,76 @@ std::string Stage::SetVisible(const std::string& path, bool visible)
         gPrevious = LayerOpinion(_stage, imageable.GetVisibilityAttr(), UsdTimeCode::Default());
         if (visible) imageable.MakeVisible();
         else imageable.MakeInvisible();
+        return "";
+    });
+}
+
+std::string Stage::SessionVisibility(const std::string& mode, const std::string& json)
+{
+    return Edit(_stage, [&]() -> std::string {
+        JsParseError parseError;
+        const JsValue js = JsParseString(json.empty() ? "null" : json, &parseError);
+        if (!parseError.reason.empty()) return "invalid JSON: " + parseError.reason;
+        const SdfLayerHandle layer = _stage->GetSessionLayer();
+
+        // Target opinion per prim: "invisible" to hide, empty to clear.
+        std::map<SdfPath, TfToken> targets;
+        const auto selected = [&]() {
+            std::vector<SdfPath> paths;
+            if (!js.IsArray()) return paths;
+            for (const JsValue& item : js.GetJsArray()) {
+                if (!item.IsString()) continue;
+                if (const UsdPrim prim = EditablePrim(_stage, item.GetString())) paths.push_back(prim.GetPath());
+            }
+            return paths;
+        };
+        if (mode == "hide") {
+            for (const SdfPath& path : selected()) targets[path] = UsdGeomTokens->invisible;
+        } else if (mode == "isolate") {
+            // Hide the siblings along each selected prim's ancestor chain.
+            const std::vector<SdfPath> keep = selected();
+            for (const SdfPath& path : keep) {
+                for (SdfPath parent = path.GetParentPath(); !parent.IsEmpty(); parent = parent.GetParentPath()) {
+                    for (const UsdPrim& child : _stage->GetPrimAtPath(parent).GetChildren()) {
+                        const SdfPath& c = child.GetPath();
+                        if (!child.IsA<UsdGeomImageable>()) continue;
+                        if (std::any_of(keep.begin(), keep.end(), [&](const SdfPath& k) { return k.HasPrefix(c); })) continue;
+                        targets[c] = UsdGeomTokens->invisible;
+                    }
+                }
+            }
+        } else if (mode == "showAll") {
+            layer->Traverse(SdfPath::AbsoluteRootPath(), [&](const SdfPath& path) {
+                if (path.IsPropertyPath() && path.GetNameToken() == UsdGeomTokens->visibility) targets[path.GetPrimPath()] = TfToken();
+            });
+        } else if (mode == "set") {
+            if (!js.IsObject()) return "set needs an object of path -> \"invisible\" | null";
+            for (const auto& [path, value] : js.GetJsObject()) {
+                if (!SdfPath::IsValidPathString(path)) return "invalid path " + path;
+                targets[SdfPath(path)] = value.IsString() ? TfToken(value.GetString()) : TfToken();
+            }
+        } else return "unknown mode " + mode;
+
+        // Plain Sdf edits on the session layer: the edit target stays as it is.
+        VtDictionary previous;
+        SdfChangeBlock block;
+        for (const auto& [path, token] : targets) {
+            const SdfPath property = path.AppendProperty(UsdGeomTokens->visibility);
+            SdfAttributeSpecHandle attribute = layer->GetAttributeAtPath(property);
+            previous[path.GetString()] = attribute && attribute->HasDefaultValue() ? attribute->GetDefaultValue() : VtValue();
+            if (token.IsEmpty()) {
+                if (attribute) layer->GetPrimAtPath(path)->RemoveProperty(attribute);
+                continue;
+            }
+            if (!attribute) {
+                const SdfPrimSpecHandle prim = SdfCreatePrimInLayer(layer, path);
+                if (!prim) return "could not author visibility on " + path.GetString();
+                attribute = SdfAttributeSpec::New(prim, UsdGeomTokens->visibility, SdfValueTypeNames->Token);
+                if (!attribute) return "could not author visibility on " + path.GetString();
+            }
+            attribute->SetDefaultValue(VtValue(token));
+        }
+        gPrevious = VtValue(previous);
         return "";
     });
 }

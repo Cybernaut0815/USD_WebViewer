@@ -3,7 +3,7 @@ import * as THREE from 'three/webgpu';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { Path, XformInfo } from './protocol.ts';
 import type { UsdSession, XformEntry } from './session.ts';
-import { ctrlSelect } from './session.ts';
+import { modifySelect, type SelectMode } from './session.ts';
 import type { Viewport } from './viewport.ts';
 
 export interface Tool {
@@ -11,7 +11,11 @@ export interface Tool {
   deactivate(): void;
 }
 
-/** A click that did not drag selects what is under the pointer (ctrl toggles). */
+/**
+ * A click that did not drag selects what is under the pointer; Shift adds, Ctrl removes. With
+ * Shift or Ctrl a drag draws a rectangle instead of orbiting: dragged upward it takes what it
+ * touches, dragged downward only what lies fully inside.
+ */
 export class SelectTool implements Tool {
   protected readonly session: UsdSession;
   private abort: AbortController | null = null;
@@ -23,17 +27,66 @@ export class SelectTool implements Tool {
   activate(viewport: Viewport): void {
     this.abort = new AbortController();
     const { signal } = this.abort;
-    let down: [number, number] | null = null;
-    viewport.canvas.addEventListener('pointerdown', (e) => (down = this.grabbed() ? null : [e.clientX, e.clientY]), { signal });
-    viewport.canvas.addEventListener(
+    const canvas = viewport.canvas;
+    let down: { x: number; y: number; mode: SelectMode; orbit: boolean } | null = null;
+    let box: HTMLElement | null = null;
+    const rect = (from: { x: number; y: number }, e: PointerEvent) => ({
+      left: Math.min(from.x, e.clientX),
+      top: Math.min(from.y, e.clientY),
+      right: Math.max(from.x, e.clientX),
+      bottom: Math.max(from.y, e.clientY),
+    });
+    // Capture phase: runs before OrbitControls' own pointerdown on the canvas, so it can stop the pan.
+    canvas.addEventListener(
+      'pointerdown',
+      (e) => {
+        down = null;
+        if (e.button !== 0 || this.grabbed()) return;
+        const mode: SelectMode = e.shiftKey ? 'add' : e.ctrlKey || e.metaKey ? 'remove' : 'replace';
+        down = { x: e.clientX, y: e.clientY, mode, orbit: viewport.controls.enabled };
+        if (mode !== 'replace') {
+          viewport.controls.enabled = false;
+          canvas.setPointerCapture(e.pointerId);
+        }
+      },
+      { signal, capture: true },
+    );
+    canvas.addEventListener(
+      'pointermove',
+      (e) => {
+        if (!down || down.mode === 'replace' || (!box && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= 4)) return;
+        box ??= canvas.parentElement!.appendChild(Object.assign(document.createElement('div'), { className: 'marquee' }));
+        const r = rect(down, e);
+        const origin = canvas.getBoundingClientRect();
+        Object.assign(box.style, {
+          left: `${r.left - origin.left}px`,
+          top: `${r.top - origin.top}px`,
+          width: `${r.right - r.left}px`,
+          height: `${r.bottom - r.top}px`,
+        });
+        box.classList.toggle('touch', e.clientY < down.y);
+      },
+      { signal },
+    );
+    canvas.addEventListener(
       'pointerup',
       async (e) => {
-        if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4 || e.button !== 0) return;
-        const hit = viewport.pick(e.clientX, e.clientY);
-        const result = hit ? await this.session.usd.resolvePick(hit.rid, hit.instance) : null;
-        const path = result && !this.session.isLocked(result.path) ? result.path : null;
-        if (path && (e.ctrlKey || e.metaKey)) ctrlSelect(this.session, path, 'viewport');
-        else this.session.select(path ? [path] : [], 'viewport');
+        const start = down;
+        down = null;
+        if (!start || e.button !== 0) return;
+        if (start.mode !== 'replace') viewport.controls.enabled = start.orbit;
+        const marquee = box !== null;
+        box?.remove();
+        box = null;
+        let hits: { rid: number; instance: number }[];
+        if (marquee) hits = viewport.boxPick(rect(start, e), e.clientY > start.y);
+        else if (Math.hypot(e.clientX - start.x, e.clientY - start.y) <= 4) {
+          const hit = viewport.pick(e.clientX, e.clientY);
+          hits = hit ? [hit] : [];
+        } else return; // an orbit drag
+        const results = await Promise.all(hits.map((hit) => this.session.usd.resolvePick(hit.rid, hit.instance)));
+        const paths = [...new Set(results.flatMap((r) => (r && !this.session.isLocked(r.path) ? [r.path] : [])))];
+        modifySelect(this.session, paths, start.mode, 'viewport');
       },
       { signal },
     );
@@ -138,7 +191,8 @@ export class TransformTool extends SelectTool {
   }
 
   protected override grabbed(): boolean {
-    return !!this.controls?.dragging;
+    // The selection listener runs before the gizmo's own pointerdown, so a hovered handle counts too.
+    return !!this.controls?.dragging || this.controls?.axis != null;
   }
 
   /** Re-reads the selected prims that can move and puts the gizmo on the active one. */

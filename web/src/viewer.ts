@@ -4,21 +4,28 @@
 import type * as THREE from 'three/webgpu';
 import type { LocalFile } from './files.ts';
 import { copyText, type MenuItem, showMenu } from './menu.ts';
-import { h, Props, usdaText } from './props.ts';
+import { TextureCache } from './materials.ts';
+import { h, Props } from './props.ts';
 import type { Path, PickResult, StageInfo } from './protocol.ts';
-import { ctrlSelect, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
+import { modifySelect, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
 import { SelectTool, type TransformMode, TransformTool } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
-import type { DisplayMode } from './scene.ts';
+import type { DisplayMode, SceneStats } from './scene.ts';
 import { type ToneMapping, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode;
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event };
+/** Which panels around the viewport are shown. */
+export interface PanelState {
+  hierarchy: boolean;
+  details: boolean;
+  timeline: boolean;
+}
 
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(css);
@@ -26,6 +33,48 @@ const MIRRORED: (keyof UsdSessionEventMap)[] = [
   'stageopen', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'log', 'error',
 ];
 const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'rotate', r: 'scale' };
+/** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
+export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', park: 'Park', studio: 'Studio' };
+/** The Help window's contents; the key handler in build() implements the keyboard rows. */
+const SHORTCUTS: [string, [string, string][]][] = [
+  ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale']]],
+  [
+    'Selection',
+    [
+      ['Click', 'Select a prim (empty space clears)'],
+      ['Shift+click', 'Add to the selection (on a selected prim: make it active)'],
+      ['Ctrl+click', 'Remove from the selection'],
+      ['Shift+drag up', 'Add everything the rectangle touches'],
+      ['Shift+drag down', 'Add everything fully inside the rectangle'],
+      ['Ctrl+drag up / down', 'Remove, the same way'],
+      ['↑ ↓ ← →', 'Hierarchy: move the selection, expand, collapse'],
+    ],
+  ],
+  [
+    'View',
+    [
+      ['Left drag', 'Orbit'],
+      ['Right drag', 'Pan'],
+      ['Wheel / middle drag', 'Zoom (towards the cursor)'],
+      ['F', 'Frame the selection, or everything'],
+      ['H', 'Hide the selection (session layer, not saved)'],
+      ['Shift+H', 'Hide everything but the selection'],
+      ['Alt+H', 'Show what H and Shift+H hid'],
+    ],
+  ],
+  ['Time', [['Space', 'Play / pause'], [', and .', 'Previous / next frame']]],
+  [
+    'Editing',
+    [
+      ['Ctrl+Z', 'Undo'],
+      ['Ctrl+Shift+Z, Ctrl+Y', 'Redo'],
+      ['Ctrl+S', 'Save'],
+      ['Click a value', 'Copy it (right click: more ways to copy)'],
+    ],
+  ],
+  ['Help', [['F1 or ?', 'This window']]],
+];
+const LAYOUT_KEY = 'usd-viewer:layout';
 
 export class UsdViewerElement extends HTMLElement {
   static readonly observedAttributes = ['src', 'panels'];
@@ -40,6 +89,20 @@ export class UsdViewerElement extends HTMLElement {
   private readonly props = new Props();
   private readonly canvas = h('canvas') as HTMLCanvasElement;
   private readonly status = h('div', { className: 'status' });
+  private readonly statsBox = h('div', { className: 'stats' });
+  private readonly picker = h('select', { className: 'picker', title: 'Prim shown below (of the selection)', hidden: true }) as HTMLSelectElement;
+  private readonly help = h('dialog', { className: 'help' }) as HTMLDialogElement;
+  private readonly skyTextures: TextureCache;
+  private skyName: string | null = null;
+  /** Panel widths and visibility, kept per browser. */
+  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true }; // widths: share of the element
+  /** Tabs on the viewport's borders that show and hide the panels. */
+  private readonly toggles = {
+    left: h('button', { className: 'toggle side' }),
+    right: h('button', { className: 'toggle side' }),
+    time: h('button', { className: 'toggle time' }),
+  };
+  private statsFrame = 0;
   private disposed = false;
   private toolName: ToolName = 'select';
   private readonly unload = (event: BeforeUnloadEvent) => {
@@ -57,7 +120,13 @@ export class UsdViewerElement extends HTMLElement {
       this.hasAttribute('force-webgl'),
     );
     this.viewport.tool = new SelectTool(this.session);
+    this.skyTextures = new TextureCache({ readBytes: (path) => this.session.readBytes(path), warn: (message) => this.session.report('warn', message) });
     this.tree = new Tree((path) => this.session.usd.children(path));
+    try {
+      const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? '{}');
+      for (const side of ['left', 'right'] as const) if (!(saved[side] > 0 && saved[side] < 1)) delete saved[side]; // older pixel widths
+      Object.assign(this.layout, saved);
+    } catch {} // storage blocked or corrupt: defaults
     root.append(this.build());
     this.wire();
     this.ready = this.start();
@@ -217,12 +286,71 @@ export class UsdViewerElement extends HTMLElement {
   set toneMapping(mode: ToneMapping) {
     this.viewport.toneMapping = mode;
   }
+  /** A viewer sky (key of SKIES) lighting the stage and filling the background in place of its dome; null: the stage's own lighting. */
+  get sky(): string | null {
+    return this.skyName;
+  }
+  set sky(name: string | null) {
+    this.skyName = name && SKIES[name] ? name : null;
+    this.dispatchEvent(new Event('skychange'));
+    if (!this.skyName) {
+      this.viewport.sync.setSky(null);
+      return;
+    }
+    const wanted = this.skyName;
+    const url = new URL(`${wanted}.hdr`, new URL(this.getAttribute('skies-url') ?? 'skies/', document.baseURI)).href;
+    this.skyTextures.get(url, '').then((texture) => {
+      if (this.skyName === wanted) this.viewport.sync.setSky(texture);
+    });
+  }
+
+  /** Panels around the viewport; hidden ones give their space to it. Remembered per browser. */
+  get panels(): PanelState {
+    const { hierarchy, details, timeline } = this.layout;
+    return { hierarchy, details, timeline };
+  }
+  set panels(state: Partial<PanelState>) {
+    Object.assign(this.layout, state);
+    this.applyLayout();
+    this.dispatchEvent(new Event('panelschange'));
+  }
+
+  /** Opens the window listing keys and mouse gestures. */
+  showHelp(): void {
+    if (!this.help.open) this.help.showModal();
+  }
+
   get displayMode(): DisplayMode {
     return this.viewport.sync.displayMode;
   }
   set displayMode(mode: DisplayMode) {
     this.viewport.sync.setDisplayMode(mode);
     this.dispatchEvent(new Event('displaymodechange'));
+  }
+  /** Purposes drawn besides visibility (default and proxy unless changed). */
+  get purposes(): string[] {
+    return [...this.viewport.sync.purposes];
+  }
+  set purposes(purposes: Iterable<string>) {
+    this.viewport.sync.setPurposes(purposes);
+    this.updateStats();
+  }
+  /** USD counts of what the viewport draws (the overlay at its top right). */
+  get stats(): SceneStats {
+    return this.viewport.sync.stats();
+  }
+
+  /** H: hides the selection (session layer, never saved; undoable). */
+  async hide(): Promise<void> {
+    if (this.selection.length) await this.usd.hide(this.selection);
+  }
+  /** Shift+H: hides everything but the selection. */
+  async isolate(): Promise<void> {
+    if (this.selection.length) await this.usd.isolate(this.selection);
+  }
+  /** Alt+H: shows what hide and isolate hid. */
+  showAll(): Promise<void> {
+    return this.usd.showAll();
   }
   screenshot(type?: string, quality?: number): Promise<Blob> {
     return this.viewport.screenshot(type, quality);
@@ -264,25 +392,100 @@ export class UsdViewerElement extends HTMLElement {
     });
     this.props.show(null);
     this.canvas.tabIndex = 0;
-    this.canvas.addEventListener('keydown', (e) => {
-      const key = e.key.toLowerCase();
-      if (key === 'f' && !e.ctrlKey) this.frame(this.selection);
-      else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
-      else if (e.ctrlKey && key === 'y') this.redo();
-      else if (e.ctrlKey && key === 's') this.save().catch(() => {});
-      else if (!e.ctrlKey && TOOL_KEYS[key]) this.tool = TOOL_KEYS[key];
-      else return;
-      e.preventDefault();
-    });
-    return h(
+    const close = h('button', { className: 'close', title: 'Close' }, '✕');
+    close.addEventListener('click', () => this.help.close());
+    this.help.addEventListener('click', (event) => event.target === this.help && this.help.close());
+    this.help.append(
+      h('div', { className: 'head' }, h('strong', {}, 'Keys and mouse'), close),
+      ...SHORTCUTS.map(([group, rows]) => h('section', {}, h('h4', {}, group), h('table', {}, ...rows.map(([keys, what]) => h('tr', {}, h('td', {}, h('kbd', {}, keys)), h('td', {}, what)))))),
+    );
+    this.picker.addEventListener('change', () => this.session.select(this.selection, 'api', this.picker.value));
+    this.toggles.time.addEventListener('click', () => (this.panels = { timeline: !this.layout.timeline }));
+    const app = h(
       'div',
       { className: 'app' },
       toolbar(this, this.viewport),
       h('aside', { className: 'left' }, search, this.tree.element, h('slot', { name: 'left' })),
-      h('main', {}, this.canvas, this.status),
-      h('aside', { className: 'right' }, this.props.element, h('slot', { name: 'right' })),
+      this.splitter('left'),
+      h('main', {}, this.canvas, this.status, this.statsBox, this.toggles.time),
+      this.splitter('right'),
+      h('aside', { className: 'right' }, this.picker, this.props.element, h('slot', { name: 'right' })),
       h('footer', { className: 'bottom' }, timeline(this.session), h('slot', { name: 'bottom' })),
+      this.help,
     );
+    // Keys work from the viewport and the panels, not while typing.
+    app.addEventListener('keydown', (e) => {
+      const target = e.composedPath()[0] as HTMLElement;
+      if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
+      const key = e.key.toLowerCase();
+      const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      if (key === 'f' && plain) this.frame(this.selection);
+      else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
+      else if (e.ctrlKey && key === 'y') this.redo();
+      else if (e.ctrlKey && key === 's') this.save().catch(() => {});
+      else if (plain && TOOL_KEYS[key]) this.tool = TOOL_KEYS[key];
+      else if (e.code === 'KeyH' && !e.ctrlKey && !e.metaKey) {
+        (e.altKey ? this.showAll() : e.shiftKey ? this.isolate() : this.hide()).catch(() => {});
+      } else if (e.key === ' ' && plain && target.tagName !== 'BUTTON') this.session.playing ? this.session.pause() : this.session.play();
+      else if ((e.key === ',' || e.key === '.') && !e.ctrlKey && !e.metaKey && this.stage?.hasTimeRange) this.step(e.key === '.' ? 1 : -1);
+      else if (e.key === 'F1' || e.key === '?') this.showHelp();
+      else return;
+      e.preventDefault();
+    });
+    queueMicrotask(() => this.applyLayout()); // once the element is in the shadow root
+    return app;
+  }
+
+  /** One frame forward or back, clamped to the stage's range. */
+  private step(direction: 1 | -1): void {
+    const stage = this.stage!;
+    const now = Number.isNaN(this.time) ? stage.startTimeCode : this.time;
+    this.pause();
+    this.time = Math.min(Math.max(direction > 0 ? Math.floor(now) + 1 : Math.ceil(now) - 1, stage.startTimeCode), stage.endTimeCode);
+  }
+
+  /** A draggable border between a side panel and the viewport, with a tab in its middle that shows or hides the panel. */
+  private splitter(side: 'left' | 'right'): HTMLElement {
+    const panel = side === 'left' ? 'hierarchy' : 'details';
+    const element = h('div', { className: `split ${side}-split`, title: 'Drag to resize' });
+    element.append(this.toggles[side]);
+    this.toggles[side].addEventListener('pointerdown', (e) => e.stopPropagation()); // a click, not a drag
+    this.toggles[side].addEventListener('click', () => (this.panels = { [panel]: !this.layout[panel] }));
+    element.addEventListener('pointerdown', (down) => {
+      if (!this.layout[panel]) return;
+      element.setPointerCapture(down.pointerId);
+      const start = this.layout[side];
+      const width = element.parentElement!.clientWidth;
+      const move = (e: PointerEvent) => {
+        const delta = side === 'left' ? e.clientX - down.clientX : down.clientX - e.clientX;
+        this.layout[side] = Math.min(Math.max(start + delta / width, 0.05), 0.6);
+        this.applyLayout();
+      };
+      element.addEventListener('pointermove', move);
+      element.addEventListener('lostpointercapture', () => element.removeEventListener('pointermove', move), { once: true });
+    });
+    return element;
+  }
+
+  private applyLayout(): void {
+    const app = this.shadowRoot!.querySelector('.app') as HTMLElement | null;
+    if (!app) return;
+    const { left, right, hierarchy, details, timeline } = this.layout;
+    // Side panels are a share of the window, so they scale with it; the timebar keeps its own height.
+    const column = (shown: boolean, share: number) => (shown ? `max(120px, ${(share * 100).toFixed(2)}%)` : '0');
+    app.style.gridTemplateColumns = `${column(hierarchy, left)} auto minmax(0, 1fr) auto ${column(details, right)}`;
+    app.classList.toggle('no-left', !hierarchy);
+    app.classList.toggle('no-right', !details);
+    app.classList.toggle('no-time', !timeline);
+    this.toggles.left.textContent = hierarchy ? '‹' : '›';
+    this.toggles.left.title = hierarchy ? 'Hide the hierarchy' : 'Show the hierarchy';
+    this.toggles.right.textContent = details ? '›' : '‹';
+    this.toggles.right.title = details ? 'Hide the details' : 'Show the details';
+    this.toggles.time.textContent = timeline ? '▾' : '▴';
+    this.toggles.time.title = timeline ? 'Hide the timebar' : 'Show the timebar';
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(this.layout));
+    } catch {} // a per-browser convenience only
   }
 
   /** Connects the panels to the session and mirrors its events on the element. */
@@ -293,12 +496,16 @@ export class UsdViewerElement extends HTMLElement {
     for (const type of MIRRORED) {
       on(type, (e) => this.dispatchEvent(new CustomEvent(type, { detail: (e as CustomEvent).detail })));
     }
-    on('delta', (e) => this.viewport.sync.apply(e.detail));
+    on('delta', (e) => {
+      this.viewport.sync.apply(e.detail);
+      this.updateStats();
+    });
     on('stageopen', (e) => {
       this.viewport.sync.setUpAxis(e.detail.upAxis);
       this.tree.reset().then(() => this.viewport.frame());
     });
     on('stageclose', () => {
+      this.updateStats();
       this.viewport.sync.clear();
       this.viewport.lookThrough(null);
       this.tree.clear();
@@ -308,11 +515,16 @@ export class UsdViewerElement extends HTMLElement {
       const { paths, source, active } = e.detail;
       this.tree.setSelection(paths, active);
       this.viewport.sync.setActive(active);
+      this.picker.hidden = paths.length < 2;
+      if (paths.length > 1) {
+        this.picker.replaceChildren(...paths.map((path) => h('option', { value: path, selected: path === active, title: path }, path)));
+      }
       if (source === 'viewport' && active) await this.tree.reveal(active);
       this.showProps(active);
     });
     on('primschange', async (e) => {
-      await this.tree.invalidate(e.detail.resynced);
+      // Visibility is computed down the tree, so every loaded row may have changed.
+      await this.tree.invalidate(e.detail.visibility ? ['/'] : e.detail.resynced);
       this.showProps(this.active);
     });
     on('lockchange', () => this.tree.redraw());
@@ -320,7 +532,7 @@ export class UsdViewerElement extends HTMLElement {
       this.props.globalRefine = { setting: session.refineLevel, effective: session.effectiveRefineLevel };
     });
 
-    this.tree.onselect = (path, toggle) => (toggle ? ctrlSelect(session, path, 'hierarchy') : session.select([path], 'hierarchy'));
+    this.tree.onselect = (path, mode) => modifySelect(session, [path], mode, 'hierarchy');
     this.tree.onvisible = (path, visible) => this.usd.setVisible(path, visible).catch(() => {});
     this.tree.onframe = (path) => this.frame([path]);
     this.props.onvariant = (path, set, variant) => this.usd.setVariant(path, set, variant).catch(() => {});
@@ -328,18 +540,11 @@ export class UsdViewerElement extends HTMLElement {
     this.props.onnavigate = (path) => this.select(path, { reveal: true });
     this.props.onframe = (path) => this.frame([path]);
     this.props.onrefinement = (path, enabled, level) => this.usd.setRefinement(path, enabled, level).catch(() => {});
-    this.props.oncontext = (path, attribute, x, y) => {
-      // Values in the panel are truncated; the clipboard gets the whole thing.
-      const text = async (form: 'value' | 'name' | 'typed') => {
-        const value = usdaText(await this.usd.attribute(path, attribute.name), attribute.typeName);
-        return form === 'value' ? value : form === 'name' ? `${attribute.name} = ${value}` : `${attribute.typeName} ${attribute.name} = ${value}`;
-      };
-      showMenu(this.shadowRoot!, x, y, [
-        { label: 'Copy value', action: () => text('value').then(copyText) },
-        { label: 'Copy name = value', action: () => text('name').then(copyText) },
-        { label: 'Copy type name = value', action: () => text('typed').then(copyText) },
-      ]);
-    };
+    // Values in the panel are truncated; the clipboard gets the whole thing.
+    this.props.attributeValue = (path, name) => this.usd.attribute(path, name);
+    this.props.oncopy = (text) => text.then(copyText).catch(() => {});
+    this.props.oncontext = (x, y, choices) =>
+      showMenu(this.shadowRoot!, x, y, choices.map((choice) => ({ label: choice.label, action: () => choice.text().then(copyText).catch(() => {}) })));
     this.tree.isLocked = (path) => session.isLocked(path);
     this.tree.onlock = (path, locked) => session.setLocked(path, locked);
     this.tree.oncontext = (path, x, y) => {
@@ -359,6 +564,25 @@ export class UsdViewerElement extends HTMLElement {
   private async showProps(path: Path | null): Promise<void> {
     const info = path ? await this.usd.prim(path).catch(() => null) : null;
     if (this.active === path) this.props.show(info);
+  }
+
+  /** Redraws the stats overlay once per frame at most. */
+  private updateStats(): void {
+    if (this.statsFrame) return;
+    this.statsFrame = requestAnimationFrame(() => {
+      this.statsFrame = 0;
+      const s = this.stats;
+      const rows: [string, number][] = [
+        ['Meshes', s.meshes],
+        ['Vertices', s.points],
+        ['Faces', s.faces],
+        ['Edges', s.edges],
+        ['Materials', s.materials],
+        ['Textures', s.textures],
+      ];
+      this.statsBox.replaceChildren(...rows.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value.toLocaleString())]));
+      this.statsBox.hidden = !this.session.stage;
+    });
   }
 
   private setStatus(text: string): void {

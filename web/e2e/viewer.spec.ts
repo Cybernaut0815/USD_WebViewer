@@ -5,6 +5,9 @@ import type { UsdViewerElement } from '../src/viewer.ts';
 
 const MOCK = '/?core=mock-core/&forceWebGL=1&src=mock.usda';
 
+/** Goldens are of the 3D view; the stats overlay on top of it is checked as text. */
+const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats')] });
+
 /** Opens the app and waits until the stage is drawn. */
 async function open(page: Page, url: string) {
   const errors: string[] = [];
@@ -51,7 +54,7 @@ test.describe('mock core', () => {
   test('renders the stage', async ({ page }) => {
     const errors = await open(page, MOCK);
     expect(errors).toEqual([]);
-    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-stage.png');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-stage.png', shot(page));
   });
 
   test('tree click selects and fills the properties', async ({ page }) => {
@@ -67,20 +70,69 @@ test.describe('mock core', () => {
     await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Cube');
   });
 
-  test('ctrl-click builds a multi-selection with one active prim shown in the panel', async ({ page }) => {
+  test('shift-click adds, ctrl-click removes, and the picker chooses the prim shown', async ({ page }) => {
     await open(page, MOCK);
+    const picker = page.locator('usd-viewer .picker');
     await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
-    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click({ modifiers: ['Control'] });
+    await expect(picker).toBeHidden();
+    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click({ modifiers: ['Shift'] });
     await expect(page.locator('usd-viewer .row.selected')).toHaveCount(2);
     await expect(page.locator('usd-viewer .row.active')).toHaveText(/Light/);
     await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Light');
-    // Ctrl-click on a selected prim only makes it active; on the active one it deselects.
-    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click({ modifiers: ['Control'] });
+    // With several prims selected the dropdown picks the one shown.
+    await expect(picker).toBeVisible();
+    await picker.selectOption('/World/Cube');
     await expect(page.locator('usd-viewer .row.active')).toHaveText(/Cube/);
     await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Cube');
-    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click({ modifiers: ['Control'] });
-    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).selection)).toEqual(['/World/Light']);
+    // Shift-click on a selected prim only makes it active; Ctrl-click removes.
+    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click({ modifiers: ['Shift'] });
     await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Light');
+    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click({ modifiers: ['Control'] });
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).selection)).toEqual(['/World/Cube']);
+    await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Cube');
+    await expect(picker).toBeHidden();
+  });
+
+  test('shift-drag up takes what the rectangle touches, down only what it covers; ctrl-drag removes', async ({ page }) => {
+    await open(page, MOCK);
+    const box = await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
+      const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const b = cube.geometry.boundingBox.clone().applyMatrix4(cube.matrixWorld);
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (let i = 0; i < 8; i++) {
+        const p = b.min.clone();
+        if (i & 1) p.x = b.max.x;
+        if (i & 2) p.y = b.max.y;
+        if (i & 4) p.z = b.max.z;
+        p.project(viewer.three.camera);
+        xs.push(rect.left + ((p.x + 1) / 2) * rect.width);
+        ys.push(rect.top + ((1 - p.y) / 2) * rect.height);
+      }
+      return { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
+    });
+    const selection = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).selection);
+    const midX = (box.left + box.right) / 2;
+    const drag = async (modifier: 'Shift' | 'Control', from: [number, number], to: [number, number]) => {
+      await page.keyboard.down(modifier);
+      await page.mouse.move(...from);
+      await page.mouse.down();
+      for (let i = 1; i <= 5; i++) await page.mouse.move(from[0] + ((to[0] - from[0]) * i) / 5, from[1] + ((to[1] - from[1]) * i) / 5);
+      await page.mouse.up();
+      await page.keyboard.up(modifier);
+    };
+    // Downward over the left half only: the cube is not fully inside, so nothing is taken.
+    await drag('Shift', [box.left - 4, box.top - 4], [midX, box.bottom + 4]);
+    await page.waitForTimeout(300);
+    expect(await selection()).toEqual([]);
+    // Upward over the same half: touching is enough (an instance overlapping on screen may come along).
+    await drag('Shift', [midX, box.bottom + 4], [box.left - 4, box.top - 4]);
+    await expect.poll(selection).toContain('/World/Cube');
+    // Ctrl with the same upward rectangle removes what it touches again.
+    await drag('Control', [midX, box.bottom + 4], [box.left - 4, box.top - 4]);
+    await expect.poll(selection).toEqual([]);
   });
 
   test('folded property sections stay folded when another prim is selected', async ({ page }) => {
@@ -149,7 +201,7 @@ test.describe('mock core', () => {
     const copied = () => page.evaluate(() => (window as any).copied); // written after an async value fetch
     const value = page.locator('usd-viewer .props tr', { hasText: 'faceVertexCounts' }).locator('.value');
     await value.click({ button: 'right' });
-    await page.locator('usd-viewer .popup button', { hasText: 'Copy type name = value' }).click();
+    await page.locator('usd-viewer .popup button', { hasText: 'Copy typed declaration' }).click();
     await expect.poll(copied).toBe('int[] faceVertexCounts = [4, 4, 4]');
     await value.click({ button: 'right' });
     await page.locator('usd-viewer .popup button', { hasText: 'Copy value' }).click();
@@ -186,16 +238,138 @@ test.describe('mock core', () => {
       viewer.displayMode = 'plain-wire';
       await viewer.idle();
     });
-    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-plain-wire.png');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-plain-wire.png', shot(page));
     await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       viewer.displayMode = 'wire';
       await viewer.idle();
+    });
+    // Face outlines only: no triangle diagonals, back edges seen through the hidden surface.
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-wire.png', shot(page));
+    await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       viewer.displayMode = 'shaded';
       await viewer.idle();
     });
-    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-stage.png');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-stage.png', shot(page));
     expect(errors).toEqual([]);
+  });
+
+  test('value boxes copy on click; the menu copies a whole section', async ({ page }) => {
+    await open(page, MOCK);
+    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
+    const copied = () => page.evaluate(() => (window as any).copied);
+    await page.locator('usd-viewer .props tr', { hasText: 'Path' }).first().locator('.value').click();
+    await expect.poll(copied).toBe('/World/Cube');
+    const transform = page.locator('usd-viewer .props details', { has: page.locator('summary', { hasText: 'World transform' }) });
+    await transform.locator('summary').click();
+    await transform.locator('.value').first().click({ button: 'right' });
+    await page.locator('usd-viewer .popup button', { hasText: 'Copy section as text' }).click();
+    await expect.poll(copied).toBe('matrix4d worldTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )');
+    // Primvars copy too, fetching the full value.
+    await page.locator('usd-viewer .props tr', { hasText: 'displayColor' }).locator('.value').click({ button: 'right' });
+    await page.locator('usd-viewer .popup button', { hasText: 'Copy typed declaration' }).click();
+    await expect.poll(copied).toBe('color3f[] primvars:displayColor = [(0.8, 0.2, 0.2)]');
+  });
+
+  test('panels hide, the splitter resizes, and the Help window lists the keys', async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    await open(page, MOCK);
+    const left = page.locator('usd-viewer aside.left');
+    const before = (await left.boundingBox())!.width;
+    const split = (await page.locator('usd-viewer .left-split').boundingBox())!;
+    await page.mouse.move(split.x + 2, split.y + 100);
+    await page.mouse.down();
+    await page.mouse.move(split.x + 62, split.y + 100, { steps: 4 });
+    await page.mouse.up();
+    const widened = (await left.boundingBox())!.width;
+    expect(widened).toBeCloseTo(before + 60, -1);
+    // Side panels keep their share of the window when it is resized; the timebar keeps its height.
+    const timebar = (await page.locator('usd-viewer .timeline').boundingBox())!.height;
+    await page.setViewportSize({ width: 1536, height: 800 });
+    await expect.poll(async () => (await left.boundingBox())!.width).toBeCloseTo(widened * 1.5, -1);
+    expect((await page.locator('usd-viewer .timeline').boundingBox())!.height).toBe(timebar);
+    // The tabs on the viewport's borders hide and show the panels.
+    await page.locator('usd-viewer .left-split .toggle').click();
+    await expect(left).toBeHidden();
+    await page.locator('usd-viewer .left-split .toggle').click();
+    await expect(left).toBeVisible();
+    await page.locator('usd-viewer .toggle.time').click();
+    await expect(page.locator('usd-viewer .timeline')).toBeHidden();
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).panels = { hierarchy: false, timeline: false }));
+    await expect(left).toBeHidden();
+    await expect(page.locator('usd-viewer aside.right')).toBeVisible();
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('F1');
+    await expect(page.locator('usd-viewer dialog.help')).toBeVisible();
+    await expect(page.locator('usd-viewer dialog.help')).toContainText('Shift+drag up');
+  });
+
+  test('the timebar steps frames and a sky replaces the background', async ({ page }) => {
+    await open(page, MOCK);
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('.');
+    await page.keyboard.press('.');
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).time)).toBe(3);
+    await page.locator('usd-viewer .timeline button[title^="Previous"]').click();
+    await expect(page.locator('usd-viewer .timeline input[type=number]')).toHaveValue('2');
+    const background = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.sky = 'studio';
+      for (let i = 0; i < 100 && !viewer.three.scene.background; i++) await new Promise((r) => setTimeout(r, 50));
+      const withSky = !!viewer.three.scene.background;
+      viewer.sky = null;
+      return { withSky, without: !!viewer.three.scene.background };
+    });
+    expect(background).toEqual({ withSky: true, without: false });
+  });
+
+  test('selection-wire modes outline only the selection in red', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    for (const mode of ['plain-selwire', 'shaded-selwire'] as const) {
+      await page.evaluate(async (mode) => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        viewer.select('/World/Cube');
+        viewer.displayMode = mode;
+        await viewer.idle();
+      }, mode);
+      await expect(page.locator('usd-viewer canvas')).toHaveScreenshot(`mock-${mode}.png`, shot(page));
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test('stats count the USD meshes, instances included', async ({ page }) => {
+    await open(page, MOCK);
+    const stats = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).stats);
+    // The cube plus three instances of it: 8 points, 6 quads, 12 edges each, not 12 triangles.
+    expect(await stats()).toEqual({ meshes: 4, points: 32, faces: 24, edges: 48, materials: 0, textures: 0 });
+    await expect(page.locator('usd-viewer .stats')).toContainText('Faces24');
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).purposes = ['render']));
+    expect((await stats()).meshes).toBe(0);
+  });
+
+  test('H hides the selection in the session layer, Shift+H the rest, Alt+H shows all', async ({ page }) => {
+    await open(page, MOCK);
+    const state = () =>
+      page.evaluate(async () => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        await viewer.idle();
+        return { meshes: viewer.stats.meshes, dirty: viewer.dirty };
+      });
+    const cubeRow = page.locator('usd-viewer .row', { hasText: 'Cube' });
+    await cubeRow.locator('.name').click(); // keys work with the tree focused
+    // The key handlers start an RPC, so poll until its flush has landed.
+    await page.keyboard.press('h');
+    await expect.poll(state).toEqual({ meshes: 3, dirty: false });
+    await expect(cubeRow).toHaveClass(/dim/);
+    await page.keyboard.press('Alt+h');
+    await expect.poll(state).toEqual({ meshes: 4, dirty: false });
+    await expect(cubeRow).not.toHaveClass(/dim/);
+    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click();
+    await page.keyboard.press('Shift+h');
+    await expect.poll(state).toEqual({ meshes: 3, dirty: false });
+    await page.keyboard.press('Control+z');
+    await expect.poll(state).toEqual({ meshes: 4, dirty: false });
   });
 
   test('transform edits move objects, mark the layer dirty, and undo', async ({ page }) => {
@@ -305,13 +479,13 @@ test.describe('wasm core', () => {
     );
     expect(errors).toEqual([]);
     expect(logged).toEqual([]);
-    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('showcase.png');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('showcase.png', shot(page));
   });
 
   test('MaterialX networks render through three.js', async ({ page }) => {
     const errors = await open(page, '/?forceWebGL=1&src=samples/materialx.usda');
     expect(errors).toEqual([]);
-    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('materialx.png');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('materialx.png', shot(page));
   });
 
   test('hierarchy and properties show the selected prim', async ({ page }) => {

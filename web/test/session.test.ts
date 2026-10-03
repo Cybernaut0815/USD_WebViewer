@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ctrlSelect, History, UsdSession } from '../src/session.ts';
+import { History, modifySelect, UsdSession } from '../src/session.ts';
 
 class FakeWorker {
   onmessage: ((event: any) => void) | null = null;
@@ -33,14 +33,20 @@ test('select posts setSelection then flush and tells listeners', async () => {
   assert.deepEqual(s.selection, ['/a']);
 });
 
-test('ctrl-click adds and activates, activates a selected prim, and deselects the active one', () => {
+test('shift adds and activates (or only activates a selected prim), ctrl removes and keeps the active prim', () => {
   const { s } = session();
   s.select(['/a']);
-  ctrlSelect(s, '/b', 'hierarchy');
+  modifySelect(s, ['/b'], 'add', 'hierarchy');
   assert.deepEqual([s.selection, s.active], [['/a', '/b'], '/b']);
-  ctrlSelect(s, '/a', 'hierarchy');
+  modifySelect(s, ['/a'], 'add', 'hierarchy');
   assert.deepEqual([s.selection, s.active], [['/a', '/b'], '/a']);
-  ctrlSelect(s, '/a', 'hierarchy');
+  modifySelect(s, ['/c', '/d'], 'add', 'viewport');
+  assert.deepEqual([s.selection, s.active], [['/a', '/b', '/c', '/d'], '/d']);
+  modifySelect(s, ['/b', '/c'], 'remove', 'viewport');
+  assert.deepEqual([s.selection, s.active], [['/a', '/d'], '/d']);
+  modifySelect(s, ['/d'], 'remove', 'hierarchy');
+  assert.deepEqual([s.selection, s.active], [['/a'], '/a']);
+  modifySelect(s, ['/b'], 'replace', 'hierarchy');
   assert.deepEqual([s.selection, s.active], [['/b'], '/b']);
   s.select(['/c', '/d'], 'api', '/c');
   assert.equal(s.active, '/c');
@@ -63,7 +69,16 @@ test('edit rejects a failed edit and reports resynced prims otherwise', async ()
   const seen: unknown[] = [];
   s.addEventListener('primschange', (e) => seen.push((e as CustomEvent).detail));
   await s.usd.setVisible('/a', true);
-  assert.deepEqual(seen, [{ resynced: ['/a'] }]);
+  assert.deepEqual(seen, [{ resynced: ['/a'], visibility: true }]);
+});
+
+test('hiding is one command whose undo sets the session layer back to what it held', async () => {
+  const { worker, s } = session();
+  worker.replies.set('sessionVisibility', { ok: true, resynced: [], previous: { '/a': null, '/b': 'invisible' }, dirty: [] });
+  await s.usd.isolate(['/c']);
+  await s.commands.undo();
+  const calls = worker.posted.filter((p) => p.method === 'sessionVisibility').map((p) => p.args);
+  assert.deepEqual(calls, [['isolate', '["/c"]'], ['set', '{"/a":null,"/b":"invisible"}']]);
 });
 
 test('undo re-authors what an edit replaced, or clears the opinion when there was none', async () => {

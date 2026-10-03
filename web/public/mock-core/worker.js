@@ -9,7 +9,7 @@ const CUBE = (() => {
     [[0, 1, 0], [0, 0, 1], [1, 0, 0]], [[0, -1, 0], [1, 0, 0], [0, 0, 1]],
     [[0, 0, 1], [1, 0, 0], [0, 1, 0]], [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
   ];
-  const positions = [], normals = [], uvs = [], indices = [];
+  const positions = [], normals = [], uvs = [], indices = [], edges = []; // edges: face outlines
   faces.forEach(([n, u, v], f) => {
     for (const [a, b] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
       positions.push(...n.map((c, i) => (c + a * u[i] + b * v[i]) * 0.5));
@@ -17,8 +17,9 @@ const CUBE = (() => {
       uvs.push((a + 1) / 2, (b + 1) / 2);
     }
     indices.push(f * 4, f * 4 + 1, f * 4 + 2, f * 4, f * 4 + 2, f * 4 + 3);
+    edges.push(f * 4, f * 4 + 1, f * 4 + 1, f * 4 + 2, f * 4 + 2, f * 4 + 3, f * 4 + 3, f * 4);
   });
-  return { positions, normals, uvs, indices };
+  return { positions, normals, uvs, indices, edges };
 })();
 
 const translate = (x, y, z) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, z, 1];
@@ -30,12 +31,13 @@ const PRIMS = {
 const TYPES = { '/World': 'Xform', '/World/Cube': 'Mesh', '/World/Instances': 'PointInstancer', '/World/Big': 'Scope', '/World/Light': 'DistantLight' };
 
 let open = false, time = 1, sent = false, timeDirty = false, selection = null, visible = true, visDirty = false;
+let sessionHidden = false; // the cube's session-layer visibility opinion
 
 function summary(path) {
   const name = path.split('/').pop();
   return {
     name, path, typeName: TYPES[path] ?? 'Scope', kind: path === '/World' ? 'assembly' : '',
-    hasChildren: !!PRIMS[path], active: true, visible: path === '/World/Cube' ? visible : true,
+    hasChildren: !!PRIMS[path], active: true, visible: path === '/World/Cube' ? visible && !sessionHidden : true,
     isInstance: false, hasPayload: false, loaded: true, hasVariantSets: false,
   };
 }
@@ -70,7 +72,7 @@ const api = {
   setRefinement: () => edited(),
   clearRefinement: () => edited(),
   clearRefinementOverrides: () => edited(),
-  attributeValue: (path, name) => (name === 'faceVertexCounts' ? [4, 4, 4] : 1),
+  attributeValue: (path, name) => (name === 'faceVertexCounts' ? [4, 4, 4] : name === 'primvars:displayColor' ? [[0.8, 0.2, 0.2]] : 1),
   findPrims: (text, type, limit) => Object.keys(TYPES).filter((p) => p.includes(text) && (!type || TYPES[p] === type)).slice(0, limit),
   readAsset: () => null,
   setTime(t) { time = Number.isNaN(t) ? 1 : t; timeDirty = true; },
@@ -83,6 +85,7 @@ const api = {
       const instances = new Float32Array([...translate(-2, 0, 2), ...translate(0, 0, 2), ...translate(2, 0, 2)]);
       const cube = () => ({
         indices: new Uint32Array(CUBE.indices), positions: new Float32Array(CUBE.positions), normals: new Float32Array(CUBE.normals),
+        edges: new Uint32Array(CUBE.edges), counts: { points: 8, faces: 6, edges: 12 },
         primvars: [{ name: 'st', size: 2, data: new Float32Array(CUBE.uvs) }],
       });
       delta.meshes = [
@@ -107,7 +110,7 @@ const api = {
       delta.xforms = { rids: new Uint32Array([1]), matrices: new Float64Array(cubeMatrix()) };
     }
     timeDirty = false;
-    if (visDirty) { delta.visibility = { rids: new Uint32Array([1]), visible: new Uint8Array([visible ? 1 : 0]) }; visDirty = false; }
+    if (visDirty) { delta.visibility = { rids: new Uint32Array([1]), visible: new Uint8Array([visible && !sessionHidden ? 1 : 0]) }; visDirty = false; }
     if (selection) {
       delta.selected = [];
       for (const p of selection) {
@@ -123,6 +126,19 @@ const api = {
   resolvePick: (rid, instance) => (rid === 1 ? { path: '/World/Cube' } : { path: '/World/Instances', instancer: '/World/Instances', instanceIndex: instance }),
   setVariant: () => ({ ok: true, resynced: [], dirty: [] }),
   setVisible(path, v) { if (path === '/World/Cube') { visible = v; visDirty = true; } return edited(); },
+  // Only the cube can be hidden here; the real core handles every imageable prim.
+  sessionVisibility(mode, json) {
+    const value = JSON.parse(json);
+    const previous = { '/World/Cube': sessionHidden ? 'invisible' : null };
+    const keeps = (paths) => paths.some((p) => '/World/Cube'.startsWith(p));
+    if (mode === 'hide' && value.includes('/World/Cube')) sessionHidden = true;
+    else if (mode === 'isolate' && !keeps(value)) sessionHidden = true;
+    else if (mode === 'showAll') sessionHidden = false;
+    else if (mode === 'set' && '/World/Cube' in value) sessionHidden = value['/World/Cube'] === 'invisible';
+    else return { ok: true, resynced: [], previous: {}, dirty: dirty ? [rootLayer] : [] };
+    visDirty = true;
+    return { ok: true, resynced: [], previous, dirty: dirty ? [rootLayer] : [] };
+  },
   setLoaded: () => ({ ok: true, resynced: [], dirty: [] }),
   setAttribute: () => edited(),
   clearAttribute: () => edited(),

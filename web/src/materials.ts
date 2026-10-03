@@ -6,6 +6,7 @@ import {
   cameraPosition,
   float,
   instancedBufferAttribute,
+  mat4,
   modelWorldMatrixInverse,
   normalMap,
   positionGeometry,
@@ -381,15 +382,23 @@ export const PLAIN = {
   single: new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side: THREE.FrontSide }),
 };
 
-/** Edges, drawn alone or over the shaded surface. */
-export const WIRE = new THREE.MeshBasicNodeMaterial({
-  color: 0x1c1c1c,
-  wireframe: true,
-  side: THREE.DoubleSide,
-  polygonOffset: true,
-  polygonOffsetFactor: -1,
-  polygonOffsetUnits: -1,
-});
+/** Edges of the authored faces over the surface, and alone against the dark background. */
+export const LINE = new THREE.LineBasicNodeMaterial({ color: 0x1c1c1c });
+export const LINE_ALONE = new THREE.LineBasicNodeMaterial({ color: 0xa8acb3 });
+/** Selection edges in the selection-wire modes; the active prim is brighter. */
+export const SELECTED_LINE = new THREE.LineBasicNodeMaterial({ color: 0xd01818 });
+export const ACTIVE_LINE = new THREE.LineBasicNodeMaterial({ color: 0xff6a6a });
+/** Wireframe mode: the surface is not drawn but stays pickable. */
+export const HIDDEN = new THREE.MeshBasicNodeMaterial({ visible: false });
+
+/** A copy of a line material that places instance i with matrices[16i..16i+16] (draw with object.count = instances). */
+export function instancedLines(base: THREE.LineBasicNodeMaterial, matrices: Float32Array): THREE.Material {
+  const m = base.clone();
+  const buffer = new THREE.InstancedInterleavedBuffer(matrices, 16, 1);
+  const column = (offset: number): Node => instancedBufferAttribute(buffer as any, 'vec4', 16, offset);
+  m.positionNode = mat4(column(0), column(4), column(8), column(12)).mul(vec4(positionGeometry, 1)).xyz;
+  return m;
+}
 
 const highlight = (color: number, opacity: number) =>
   new THREE.MeshBasicNodeMaterial({

@@ -3,6 +3,7 @@
 // `viewer.session` and the events mirrored from the session.
 import type * as THREE from 'three/webgpu';
 import type { LocalFile } from './files.ts';
+import type { LiveLink } from './live.ts';
 import { copyText, type MenuItem, showMenu } from './menu.ts';
 import { TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
@@ -32,7 +33,7 @@ export interface PanelState {
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(css);
 const MIRRORED: (keyof UsdSessionEventMap)[] = [
-  'stageopen', 'stageloaded', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'log', 'error',
+  'stageopen', 'stageloaded', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'changedprims', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'livechange', 'log', 'error',
 ];
 const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'rotate', r: 'scale' };
 /** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
@@ -111,7 +112,7 @@ export function hardwareRefineBudget(): number {
 }
 
 export class UsdViewerElement extends HTMLElement {
-  static readonly observedAttributes = ['src', 'panels'];
+  static readonly observedAttributes = ['src', 'panels', 'live'];
 
   /** The headless part: stage, selection, time, commands. Modules and host pages work with this. */
   readonly session: UsdSession;
@@ -182,12 +183,18 @@ export class UsdViewerElement extends HTMLElement {
   attributeChangedCallback(name: string, _old: string | null, value: string | null): void {
     if (name === 'src' && value) this.open(value).catch(() => {});
     if (name === 'panels') this.shadowRoot!.firstElementChild!.classList.toggle('bare', value === 'none');
+    // live="" means the relay at live/ next to the page (what the dev server provides).
+    if (name === 'live') value === null ? this.session.live.disconnect() : this.session.live.connect(new URL(value || 'live/', document.baseURI).href);
   }
 
   /* ---------- public API (delegates to the session and the viewport) ---------- */
 
   get usd(): UsdStageApi {
     return this.session.usd;
+  }
+  /** The live link behind the `live` attribute: `connect(url)`, `disconnect()`, `connected`. */
+  get live(): LiveLink {
+    return this.session.live;
   }
   get stage(): StageInfo | null {
     return this.session.stage;

@@ -34,6 +34,7 @@ Build the element with `npm run build:lib` (in `web/`). The output is `web/dist-
 | `core-url`, `skies-url` | Where the core and the skies are served (default: `core/`, `skies/` next to the page) |
 | `panels="none"` | Viewport only: no toolbar, panels or overlays |
 | `force-webgl` | Use the WebGL2 backend even where WebGPU is available |
+| `live` | URL of a [live-link](live.md) relay; empty means `live/` next to the page, which `npm run dev` provides |
 
 ## Structure
 
@@ -43,7 +44,7 @@ The element is a thin layout around two reusable parts:
 
 Host pages extend it in two ways:
 - **Panels:** add your own through the `toolbar`, `left`, `right` and `bottom` slots.
-- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more.
+- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `livechange`, `changedprims`, and more.
 
 The rule for every module: change the stage through `viewer.usd`, then let the core's render delta move the three.js objects. Never edit three.js objects to represent stage state. `web/src/protocol.ts` is the contract between the page and the core.
 
@@ -51,7 +52,8 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 
 | Member | Purpose |
 |---|---|
-| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `bounds` the world bounds. |
+| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `attribute`, `find`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`; `importLayer(name, usdaOrBytes)` replaces a layer's content in place (not undoable) |
+| `live` | The [live link](live.md): `connect(relayUrl)`, `disconnect()`, `connected`, `id` |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |

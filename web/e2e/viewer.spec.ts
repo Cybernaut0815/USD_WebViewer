@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { UsdViewerElement } from '../src/viewer.ts';
 
@@ -654,6 +654,25 @@ test.describe('mock core', () => {
     expect(result.same).toBe(true);
     expect(result.after).not.toBeCloseTo(result.before, 3);
   });
+
+  test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {
+    await request.delete(`${baseURL}/live/layers`);
+    await open(page, `${MOCK}&live=1`);
+    await expect.poll(() => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).live.connected)).toBe(true);
+    const put = await request.put(`${baseURL}/live/layers/mock.usda`, { data: '#usda 1.0\n# cube offset 5\n', headers: { 'content-type': 'text/usda', 'x-live-origin': 'test' } });
+    expect(put.status()).toBe(204);
+    const cubeX = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).three.objectsFor('/World/Cube')[0].matrix.elements[12]);
+    await expect.poll(cubeX).toBeCloseTo(5, 1);
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).dirty)).toBe(true);
+    // An edit in the viewer reaches the relay under the layer's name, marked with the viewer's origin.
+    await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      await viewer.usd.setXform('/World/Cube', [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 0, 0, 1]);
+    });
+    await expect.poll(async () => (await request.get(`${baseURL}/live/layers/mock.usda`)).text()).toBe('#usda 1.0\n# cube offset 2\n');
+    const origin = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).live.id);
+    expect((await (await request.get(`${baseURL}/live/layers`)).json())[0]).toMatchObject({ name: 'mock.usda', version: 2, origin });
+  });
 });
 
 /* ---------- the real wasm core, against the sample stage ---------- */
@@ -671,6 +690,31 @@ test.describe('wasm core', () => {
     expect(errors).toEqual([]);
     expect(logged).toEqual([]);
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('showcase.png', shot(page));
+  });
+
+  test('live link: a pushed usda moves the sphere in place, and a viewer edit comes back as usda', async ({ page, request, baseURL }) => {
+    await request.delete(`${baseURL}/live/layers`);
+    await open(page, `${SHOWCASE}&live=1`);
+    const sphereY = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).three.objectsFor('/World/Shapes/Sphere')[0].matrix.elements[13]);
+    expect(await sphereY()).toBeCloseTo(0.6, 3);
+    // What a Python script would send: the same file with one value changed.
+    const text = readFileSync(new URL('../public/samples/showcase.usda', import.meta.url), 'utf8');
+    expect(text).toContain('double3 xformOp:translate = (-3, 0.6, 0)');
+    const put = await request.put(`${baseURL}/live/layers/showcase.usda`, { data: text.replace('(-3, 0.6, 0)', '(-3, 3, 0)'), headers: { 'content-type': 'text/usda', 'x-live-origin': 'test' } });
+    expect(put.status()).toBe(204);
+    await expect.poll(sphereY).toBeCloseTo(3, 3);
+    const state = await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { dirty: viewer.dirty, changed: viewer.session.changeState('/World/Shapes/Sphere'), canUndo: viewer.session.commands.canUndo };
+    });
+    expect(state).toEqual({ dirty: true, changed: 'self', canUndo: false });
+    // The viewer's edit is published as the layer's usda, under its file name.
+    await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      await viewer.usd.setAttribute('/World/Shapes/Sphere', 'xformOp:translate', [-3, 4, 0]);
+    });
+    await expect.poll(async () => (await request.get(`${baseURL}/live/layers/showcase.usda`)).text()).toContain('xformOp:translate = (-3, 4, 0)');
+    await request.delete(`${baseURL}/live/layers`);
   });
 
   test('the Colour sky shows the background colour in front of the stage dome', async ({ page }) => {

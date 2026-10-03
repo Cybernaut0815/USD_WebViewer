@@ -179,6 +179,12 @@ const api = {
   listLayers: () => [{ identifier: rootLayer, displayName: 'mock.usda', format: 'usda', anonymous: false, dirty, inStack: true, editTarget: true, session: false }],
   setEditTarget: () => ({ ok: true, resynced: [], dirty: [] }),
   exportLayer: () => new TextEncoder().encode(`#usda 1.0\n# cube offset ${cubeOffset}\n`),
+  // Live link: `# cube offset N` in a pushed layer moves the cube (what exportLayer writes); any name is accepted.
+  importLayer(name, bytes) {
+    const offset = /# cube offset (\S+)/.exec(new TextDecoder().decode(bytes));
+    if (offset) { cubeOffset = Number(offset[1]); timeDirty = true; }
+    return edited();
+  },
   reloadLayers() { dirty = false; return { ok: true, resynced: ['/'], dirty: [] }; },
   remount() {},
 };

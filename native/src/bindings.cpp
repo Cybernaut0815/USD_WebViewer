@@ -208,6 +208,17 @@ std::string reloadLayers(const val& identifiers)
     return gStage.ReloadLayers(emscripten::vecFromJSArray<std::string>(identifiers));
 }
 
+/// Live link: replaces a layer's content (or adds an overlay) from bytes the page fetched.
+std::string importLayer(const std::string& name, const val& bytes, const std::string& format, bool create)
+{
+    const ArResolverScopedCache cache;
+    // One typed-array copy into the heap; vecFromJSArray would cross into JS per byte.
+    const std::vector<uint8_t> data = emscripten::convertJSArrayToNumberVector<uint8_t>(bytes);
+    // ponytail: refinementEnableOverride / refinementLevel changed by a push are not MarkMesh'ed (not Hydra
+    // data, see setAttribute); MarkRefinable per push would re-convert every mesh.
+    return gStage.ImportLayer(name, std::string(data.begin(), data.end()), format, create);
+}
+
 } // namespace
 
 EMSCRIPTEN_BINDINGS(usdcore)
@@ -256,4 +267,5 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setEditTarget", &setEditTarget);
     function("exportLayer", &exportLayer);
     function("reloadLayers", &reloadLayers);
+    function("importLayer", &importLayer);
 }

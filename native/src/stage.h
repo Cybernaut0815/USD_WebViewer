@@ -46,6 +46,10 @@ public:
     // Each returns an Edit: {ok, error?, resynced, previous?, dirty}.
     std::string Reload();
     std::string ReloadLayers(const std::vector<std::string>& identifiers);
+    /// Live link: replaces a used layer's content from usda text or usdc bytes. `name`: exact identifier,
+    /// else a unique "/<name>" suffix, else a live overlay's display name; '' = root layer. Unknown names
+    /// become an in-memory overlay above the stage (a sublayer of the session layer) when `create` is set.
+    std::string ImportLayer(const std::string& name, const std::string& bytes, const std::string& format, bool create);
     std::string SetEditTarget(const std::string& identifier);
     /// Authors a local transform: a lone matrix op, a translate/rotate/scale stack (pivot kept),
     /// or a leading xformOp:transform:edit for anything else.
@@ -77,4 +81,5 @@ public:
 private:
     UsdStageRefPtr _stage;
     std::string _url;
+    std::vector<SdfLayerRefPtr> _overlays; // live-link layers without a file: sublayers of the session layer
 };

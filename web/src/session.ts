@@ -2,6 +2,7 @@
 // open stage, selection, time, locks, the command stack and the flush pump.
 // Panels, tools and host pages talk to this; nothing here touches the DOM.
 import { collectHandle, download, isUsdFile, type LocalFile, rootCandidates } from './files.ts';
+import { LiveLink } from './live.ts';
 import type { Edit, Json, LayerInfo, LogEntry, Path, PickResult, PrimInfo, PrimSummary, RenderDelta, StageInfo, XformInfo } from './protocol.ts';
 import { CoreClient } from './rpc.ts';
 
@@ -61,6 +62,12 @@ export interface UsdStageApi {
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Promise<Uint8Array<ArrayBuffer> | null>;
   /** Re-reads layers from their files or URLs (all of them when omitted), discarding unsaved edits and the undo history. */
   reload(identifiers?: string[]): Promise<void>;
+  /**
+   * Live link: replaces a layer's content with usda text or usdc bytes (format sniffed when omitted). `name` is an
+   * identifier, a unique trailing path ("scene/geo.usda"), or '' for the root layer; unknown names become in-memory
+   * overlays composed on top unless `create` is false. Not undoable.
+   */
+  importLayer(name: string, data: Uint8Array | string, format?: 'usda' | 'usdc', create?: boolean): Promise<void>;
   /** Global subdivision refinement level; -1 = automatic. */
   setComplexity(level: number): Promise<void>;
   /** Output triangles the automatic level may produce; the viewer sets it from the hardware. */
@@ -145,6 +152,8 @@ export interface UsdSessionEventMap {
   dirtychange: CustomEvent<{ dirty: string[] }>;
   /** Layers were re-read because their files changed on disk. */
   diskchange: CustomEvent<{ identifiers: string[] }>;
+  /** A live-link push replaced a layer (see `live`). */
+  livechange: CustomEvent<{ name: string }>;
   log: CustomEvent<LogEntry>;
   error: CustomEvent<LogEntry>;
 }
@@ -165,6 +174,8 @@ export class UsdSession extends EventTarget {
   readonly dirty = new Set<string>();
   /** Prims whose specs differ from the stage as opened or reloaded (saving keeps them; undo or Clear edits removes them). Viewer hiding does not count. */
   readonly changed = new Set<Path>();
+  /** Live link to a relay: other programs push layers in, the viewer's edits go out (web/src/live.ts). */
+  readonly live = new LiveLink(this);
   private changedBelow = new Set<Path>(); // ancestors of changed prims
   /** Edits below are undoable: the core reports what each one replaced, and the inverse re-authors it. */
   readonly usd: UsdStageApi = {
@@ -255,6 +266,12 @@ export class UsdSession extends EventTarget {
       await this.edit(this.core.call('reloadLayers', identifiers));
       this.commands.clear();
       this.resetChanges();
+    },
+    importLayer: async (name, data, format, create = true) => {
+      const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+      format ??= new TextDecoder().decode(bytes.subarray(0, 8)) === 'PXR-USDC' ? 'usdc' : 'usda';
+      await this.edit(this.core.call('importLayer', name, bytes, format, create));
+      this.commands.clear(); // ponytail: not undoable, the replaced content is gone (like reload)
     },
     clearEdits: async () => {
       await this.edit(this.core.call('clearSessionEdits'));
@@ -435,6 +452,7 @@ export class UsdSession extends EventTarget {
     if (this.disposed) return;
     this.disposed = true;
     this.pause();
+    this.live.disconnect();
     this.core.dispose();
   }
 

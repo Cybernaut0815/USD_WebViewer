@@ -1,6 +1,7 @@
 import { UsdViewerElement } from './viewer.ts';
 
 export type { LocalFile } from './files.ts';
+export { LiveLink } from './live.ts';
 export type * from './protocol.ts';
 export { type Command, History, type OpenOptions, type SchemeOptions, type SelectionSource, type UsdSessionEventMap, UsdSession, type UsdStageApi } from './session.ts';
 export { SelectTool, type Tool, type TransformMode, TransformTool } from './tools.ts';

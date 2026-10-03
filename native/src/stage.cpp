@@ -745,6 +745,7 @@ void Stage::Close()
 {
     gTracker.Reset(nullptr);
     _stage.Reset();
+    _overlays.clear();
     _url.clear();
 }
 
@@ -1275,6 +1276,7 @@ std::string Stage::ClearSessionEdits()
 {
     return Edit(_stage, [&]() -> std::string {
         _stage->GetSessionLayer()->Clear();
+        _overlays.clear(); // ponytail: Clear() drops their sublayer entries too; the next push recreates them
         return "";
     });
 }
@@ -1508,4 +1510,56 @@ std::string Stage::ReloadLayers(const std::vector<std::string>& identifiers)
         SdfLayer::ReloadLayers(layers, true);
         return "";
     }, /*track=*/false); // the page resets the change baseline after a reload; a save reloads what it wrote
+}
+
+// Both import paths end in SdfLayer::_SetData, which diffs spec by spec and field by field, so only
+// prims that actually changed are resynced and an identical push is a no-op.
+// ponytail: crate-backed (.usdc) target layers stream their data, so they resync as a whole instead.
+std::string Stage::ImportLayer(const std::string& name, const std::string& bytes, const std::string& format, bool create)
+{
+    return Edit(_stage, [&]() -> std::string {
+        // Exact identifier, else the one layer whose identifier ends in /<name>, else a live overlay by name.
+        SdfLayerHandle layer = name.empty() ? _stage->GetRootLayer() : SdfLayerHandle();
+        if (!name.empty()) {
+            for (const SdfLayerHandle& used : _stage->GetUsedLayers()) {
+                if (used->GetIdentifier() == name) {
+                    layer = used;
+                    break;
+                }
+                if (!TfStringEndsWith(used->GetIdentifier(), "/" + name)) continue;
+                if (layer) return "several layers end in /" + name + "; send the full identifier";
+                layer = used;
+            }
+            for (const SdfLayerRefPtr& overlay : _overlays) {
+                if (!layer && overlay->GetDisplayName() == name) layer = overlay;
+            }
+        }
+        if (layer == _stage->GetSessionLayer()) return "the session layer has no file to replace";
+        SdfLayerRefPtr overlay;
+        if (!layer) {
+            if (!create) return "no layer named " + name;
+            overlay = SdfLayer::CreateAnonymous(name); // display name == name; format from its extension, usda otherwise
+            if (!overlay) return "could not create a layer named " + name;
+            layer = overlay;
+        }
+        if (format == "usda") {
+            if (!layer->ImportFromString(bytes)) return "could not parse " + name;
+        } else {
+            // Binary goes through a scratch file in the module's memory filesystem, like ExportLayer.
+            // Crate streams from the file, so the content is copied before the file goes.
+            static const std::string scratch = "/tmp/__import.usdc";
+            std::ofstream(scratch, std::ios::binary).write(bytes.data(), std::streamsize(bytes.size()));
+            const SdfLayerRefPtr temp = SdfLayer::OpenAsAnonymous(scratch, false, "live");
+            if (temp) layer->TransferContent(temp);
+            std::remove(scratch.c_str());
+            if (!temp) return "could not read usdc bytes for " + name;
+        }
+        if (overlay) {
+            // Content first, so a parse failure leaves no trace. A sublayer of the session layer, not of the
+            // root layer: that would dirty the user's file and write an anon: path into it on save.
+            _stage->GetSessionLayer()->InsertSubLayerPath(overlay->GetIdentifier(), 0);
+            _overlays.push_back(overlay);
+        }
+        return "";
+    });
 }

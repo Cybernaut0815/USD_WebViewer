@@ -10,6 +10,7 @@ A browser viewer and light editor for [OpenUSD](https://openusd.org) (Universal 
 - **Inspects** through a hierarchy with search and change markers, a property panel whose values copy with a click, statistics, display modes with true face-edge wireframes, skies and camera settings.
 - **Edits** with a transform gizmo, attributes, visibility, variants and refinement. Everything can be undone, and changes save back to the files.
 - **Embeds** as a `<usd-viewer>` web component with a typed API.
+- **Syncs** with other programs: Python, C++ or curl push layers into the open stage through a small relay and receive the viewer's edits.
 
 ## Dependencies
 
@@ -41,6 +42,7 @@ The page needs the wasm core in `web/public/core/` (see [Building the core](#bui
 | `npm run build:lib` | Build the embeddable `usd-viewer.js` into `web/dist-lib` (three.js stays a peer dependency) |
 | `npm test` | Unit tests |
 | `npm run e2e` | Browser tests (Chromium, WebGL2 backend); `npm run e2e:update` refreshes the golden images |
+| `npm run live` | Standalone live-link relay (port 8765) for pages not served by `npm run dev`; see [Live link](docs/live.md) |
 
 ## Building the core
 
@@ -73,6 +75,7 @@ Tests: `node native/test/smoke.mjs` checks the core under Node, `npm test` the p
 |---|---|
 | [Using the viewer](docs/using.md) | Navigation and selection, panels, hierarchy symbols, editing, copying, display options, statistics |
 | [Embedding and API](docs/embedding.md) | `<usd-viewer>` element, host page requirements, API, asset sources and gateways |
+| [Live link](docs/live.md) | Editing the open stage from Python, C++ or curl through a small relay, and reading the viewer's edits back |
 | [Architecture and status](docs/architecture.md) | How the page and the core work together, repository layout, what is verified, known limits |
 
 The bundled skies are CC0 HDRIs from [Poly Haven](https://polyhaven.com); see [web/public/skies/LICENSE.md](web/public/skies/LICENSE.md). The USD logo is Pixar's, from [openusd.org](https://openusd.org).

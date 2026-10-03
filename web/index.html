@@ -15,12 +15,13 @@
   <body>
     <usd-viewer id="viewer"></usd-viewer>
     <script>
-      // ?src=<url>  ?core=<dir>  ?forceWebGL=1  ?panels=none  -> attributes, before the element upgrades
+      // ?src=<url>  ?core=<dir>  ?forceWebGL=1  ?panels=none  ?live=<relay url | 1>  -> attributes, before the element upgrades
       const viewer = document.getElementById('viewer');
       const query = new URLSearchParams(location.search);
       if (query.has('core')) viewer.setAttribute('core-url', query.get('core'));
       if (query.has('forceWebGL')) viewer.setAttribute('force-webgl', '');
       if (query.has('panels')) viewer.setAttribute('panels', query.get('panels'));
+      if (query.has('live')) viewer.setAttribute('live', query.get('live') === '1' ? '' : query.get('live')); // 1: live/ next to the page
       if (query.has('src')) viewer.setAttribute('src', query.get('src'));
     </script>
     <script type="module" src="/src/index.ts"></script>

@@ -797,6 +797,83 @@ def Xform "World"
   noErrors();
 }
 
+/* ---------- live link: importLayer replaces layers in place, or adds overlays ---------- */
+{
+  const geo = (size, extra = '') => `#usda 1.0
+def Xform "World"
+{
+    def Cube "A"
+    {
+        double size = ${size}
+    }
+    def Cube "B"
+    {
+        double size = 1
+    }${extra}
+}
+`;
+  core.FS.writeFile('/tmp/geo.usda', geo(1));
+  open('live.usda', `#usda 1.0
+(
+    subLayers = [@./geo.usda@]
+)
+`);
+  flush();
+  const bytes = (text) => new TextEncoder().encode(text);
+  const imp = (name, data, format = 'usda', create = true) => JSON.parse(core.importLayer(name, data, format, create));
+  const size = (path) => JSON.parse(core.attributeValue(path, 'size', NaN));
+
+  // A short name matches the sublayer; only the prim that differs is touched, and the layer becomes dirty.
+  let edit = imp('geo.usda', bytes(geo(3)));
+  assert.ok(edit.ok, edit.error);
+  assert.deepEqual(edit.changed, ['/World/A']);
+  assert.ok(!edit.resynced.includes('/'), `whole-stage resync: ${edit.resynced}`);
+  assert.deepEqual(edit.dirty, ['/tmp/geo.usda']);
+  assert.equal(size('/World/A'), 3);
+  assert.ok(flush().meshes?.some((m) => m.path === '/World/A'), 'Hydra re-converted the cube');
+  edit = imp('geo.usda', bytes(geo(3)));
+  assert.ok(edit.ok && edit.resynced.length === 0, 'an identical push is a no-op');
+  // The full identifier works too; a new prim resyncs itself only.
+  edit = imp('/tmp/geo.usda', bytes(geo(3, '\n    def Cube "C" {}')));
+  assert.ok(edit.ok, edit.error);
+  assert.ok(edit.resynced.includes('/World/C') && !edit.resynced.includes('/'), `${edit.resynced}`);
+  assert.ok(JSON.parse(core.primChildren('/World')).some((p) => p.name === 'C'));
+  // Binary round trip through the usdc path.
+  edit = imp('geo.usda', core.exportLayer('/tmp/geo.usda', 'usdc'), 'usdc');
+  assert.ok(edit.ok, edit.error);
+  assert.deepEqual(edit.resynced, []);
+  assert.equal(size('/World/A'), 3);
+  // Refusals: the session layer, an unknown name without create, broken text.
+  const session = JSON.parse(core.listLayers()).find((l) => l.session);
+  assert.ok(!imp(session.identifier, bytes(geo(1))).ok);
+  assert.ok(!imp('nope.usda', bytes(geo(1)), 'usda', false).ok);
+  assert.ok(!imp('geo.usda', bytes('#usda 1.0\ndef Cube "Broken" {\n')).ok);
+  diagnostics(); // the parse error is expected
+  assert.equal(size('/World/A'), 3, 'a failed push leaves the layer alone');
+
+  // An unknown name creates an overlay: anonymous, in the stack, never dirty, composed on top.
+  edit = imp('extra.usda', bytes('#usda 1.0\ndef Cube "Live"\n{\n    double size = 2\n}\nover "World"\n{\n    over "A"\n    {\n        double size = 5\n    }\n}\n'));
+  assert.ok(edit.ok, edit.error);
+  assert.deepEqual(edit.dirty, ['/tmp/geo.usda'], 'overlays never count as unsaved');
+  let layers = JSON.parse(core.listLayers()).filter((l) => l.displayName === 'extra.usda');
+  assert.equal(layers.length, 1);
+  assert.ok(layers[0].anonymous && layers[0].inStack && !layers[0].session, JSON.stringify(layers[0]));
+  assert.ok(JSON.parse(core.primChildren('/')).some((p) => p.name === 'Live'));
+  assert.equal(size('/World/A'), 5, 'the overlay wins over the file');
+  edit = imp('extra.usda', bytes('#usda 1.0\ndef Cube "Live"\n{\n    double size = 2\n}\ndef Cube "Live2" {}\n'));
+  assert.ok(edit.ok, edit.error);
+  assert.ok(edit.resynced.includes('/Live2') && !edit.resynced.includes('/Live'), `${edit.resynced}`);
+  assert.equal(JSON.parse(core.listLayers()).filter((l) => l.displayName === 'extra.usda').length, 1, 'updated in place');
+  assert.equal(size('/World/A'), 3, 'the over is gone with the new content');
+  assert.ok(JSON.parse(core.setEditTarget(layers[0].identifier)).ok, 'an overlay can be the edit target');
+  assert.ok(new TextDecoder().decode(core.exportLayer(layers[0].identifier, 'usda')).includes('"Live2"'));
+  // '' is the root layer.
+  edit = imp('', bytes('#usda 1.0\n(\n    subLayers = [@./geo.usda@]\n)\ndef Scope "Root" {}\n'));
+  assert.ok(edit.ok, edit.error);
+  assert.deepEqual(edit.resynced, ['/Root']);
+  noErrors();
+}
+
 core.closeStage();
 console.log('smoke test passed');
 process.exit(0); // the thread pool keeps node alive otherwise

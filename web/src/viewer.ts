@@ -48,7 +48,19 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Shift+drag up', 'Add everything the rectangle touches'],
       ['Shift+drag down', 'Add everything fully inside the rectangle'],
       ['Ctrl+drag up / down', 'Remove, the same way'],
-      ['↑ ↓ ← →', 'Hierarchy: move the selection, expand, collapse'],
+    ],
+  ],
+  [
+    'Hierarchy',
+    [
+      ['↑ ↓ ← →', 'Move the selection, expand, collapse'],
+      ['P', 'Has a payload (load / unload in the details panel)'],
+      ['V', 'Has variant sets (choose in the details panel)'],
+      ['I', 'Instanceable: drawn as an instance of a shared prototype'],
+      ['◆', 'Changed in this session (kept until the stage is reloaded)'],
+      ['◇', 'Something below changed in this session'],
+      ['🔓 / 🔒', 'Lock against selection in the viewport (editor only, not saved)'],
+      ['● / ○', 'Visible / invisible: click to toggle (written to the edit target)'],
     ],
   ],
   [
@@ -104,6 +116,7 @@ export class UsdViewerElement extends HTMLElement {
     time: h('button', { className: 'toggle time' }),
   };
   private statsFrame = 0;
+  private statsTimer = 0;
   private disposed = false;
   private toolName: ToolName = 'select';
   private readonly unload = (event: BeforeUnloadEvent) => {
@@ -207,6 +220,7 @@ export class UsdViewerElement extends HTMLElement {
     if (this.disposed) return;
     this.disposed = true;
     removeEventListener('beforeunload', this.unload);
+    clearInterval(this.statsTimer);
     this.session.dispose();
     this.viewport.dispose();
   }
@@ -345,9 +359,9 @@ export class UsdViewerElement extends HTMLElement {
     this.viewport.sync.setPurposes(purposes);
     this.updateStats();
   }
-  /** USD counts of what the viewport draws (the overlay at its top right). */
-  get stats(): SceneStats {
-    return this.viewport.sync.stats();
+  /** USD counts of what the viewport draws (the overlay at its top right), and how fast it draws. */
+  get stats(): SceneStats & { fps: number | null; frameMs: number } {
+    return { ...this.viewport.sync.stats(), fps: this.viewport.fps, frameMs: this.viewport.frameMs };
   }
 
   /** H: hides the selection (session layer, never saved; undoable). */
@@ -533,10 +547,14 @@ export class UsdViewerElement extends HTMLElement {
       this.updateStats();
     });
     on('stageopen', (e) => {
+      // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
+      clearInterval(this.statsTimer);
+      this.statsTimer = window.setInterval(() => this.updateStats(), 500);
       this.viewport.sync.setUpAxis(e.detail.upAxis);
       this.tree.reset().then(() => this.viewport.frame());
     });
     on('stageclose', () => {
+      clearInterval(this.statsTimer);
       this.updateStats();
       this.viewport.sync.clear();
       this.viewport.lookThrough(null);
@@ -555,10 +573,12 @@ export class UsdViewerElement extends HTMLElement {
       this.showProps(active);
     });
     on('primschange', async (e) => {
-      // Visibility is computed down the tree, so every loaded row may have changed.
-      await this.tree.invalidate(e.detail.visibility ? ['/'] : e.detail.resynced);
+      // Visibility is computed down the tree, so every loaded row may have changed: one batched query.
+      if (e.detail.visibility) await this.tree.refreshVisibility((paths) => session.core.call('primVisibility', JSON.stringify(paths)));
+      if (e.detail.resynced.length) await this.tree.invalidate(e.detail.resynced);
       this.showProps(this.active);
     });
+    on('changedprims', () => this.tree.redraw());
     on('lockchange', () => this.tree.redraw());
     on('refinechange', () => {
       this.props.globalRefine = { setting: session.refineLevel, effective: session.effectiveRefineLevel };
@@ -578,6 +598,7 @@ export class UsdViewerElement extends HTMLElement {
     this.props.oncontext = (x, y, choices) =>
       showMenu(this.shadowRoot!, x, y, choices.map((choice) => ({ label: choice.label, action: () => choice.text().then(copyText).catch(() => {}) })));
     this.tree.isLocked = (path) => session.isLocked(path);
+    this.tree.changeState = (path) => session.changeState(path);
     this.tree.onlock = (path, locked) => session.setLocked(path, locked);
     this.tree.oncontext = (path, x, y) => {
       const locked = session.isLocked(path);
@@ -612,7 +633,15 @@ export class UsdViewerElement extends HTMLElement {
         ['Materials', s.materials],
         ['Textures', s.textures],
       ];
-      this.statsBox.replaceChildren(...rows.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value.toLocaleString())]));
+      const fps = this.viewport.fps;
+      const timing: [string, string][] = [
+        ['FPS', fps === null ? 'idle' : String(fps)],
+        ['Frame', `${this.viewport.frameMs.toFixed(1)} ms`],
+      ];
+      this.statsBox.replaceChildren(
+        ...rows.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value.toLocaleString())]),
+        ...timing.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value)]),
+      );
       this.statsBox.hidden = !this.session.stage;
     });
   }

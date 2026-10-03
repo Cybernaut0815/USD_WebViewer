@@ -50,6 +50,9 @@ export class Viewport {
   private stageSphere = new THREE.Sphere();
   private stageVersion = -1;
   private activeTool: Tool | null = null;
+  private frameTimes: number[] = []; // when the frames of the last second were drawn
+  /** CPU time of the last renderer.render call, in milliseconds. */
+  frameMs = 0;
   /** Called before each frame is drawn, with the camera of that frame in place (gizmos, overlays). */
   readonly beforeRender = new Set<() => void>();
 
@@ -105,11 +108,23 @@ export class Viewport {
       else this.fitClipPlanes();
       for (const hook of this.beforeRender) hook();
       try {
+        const start = performance.now();
         this.renderer.render(this.scene, this.camera);
+        const end = performance.now();
+        this.frameMs = end - start;
+        this.frameTimes.push(end);
+        while (this.frameTimes[0] < end - 1000) this.frameTimes.shift();
       } finally {
         this.presented.splice(0).forEach((done) => done()); // waiters must not hang on a failed frame
       }
     });
+  }
+
+  /** Frames drawn in the last second; null when nothing was drawn (the view renders on demand). */
+  get fps(): number | null {
+    const now = performance.now();
+    const count = this.frameTimes.filter((t) => t > now - 1000).length;
+    return count ? count : null;
   }
 
   /** Resolves after the next frame has been rendered. */

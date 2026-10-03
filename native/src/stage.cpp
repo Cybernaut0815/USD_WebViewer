@@ -66,6 +66,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <unordered_set>
 #include <set>
 #include <sstream>
 
@@ -343,12 +344,18 @@ const char* ArcTypeName(PcpArcType type)
 
 const TfToken kRefineEnable("refinementEnableOverride"), kRefineLevel("refinementLevel");
 
-/// Collects the paths a stage edit resynced, so the page can refresh those subtrees.
+/// Collects the paths a stage edit resynced, so the page can refresh those subtrees, and every
+/// prim it touched at all (resynced or not), which the page marks as changed.
 struct ChangeListener : TfWeakBase {
     SdfPathVector resynced;
+    std::set<SdfPath> changed;
     void Changed(const UsdNotice::ObjectsChanged& notice)
     {
-        for (const SdfPath& path : notice.GetResyncedPaths()) resynced.push_back(path.GetPrimPath());
+        for (const SdfPath& path : notice.GetResyncedPaths()) {
+            resynced.push_back(path.GetPrimPath());
+            changed.insert(path.GetPrimPath());
+        }
+        for (const SdfPath& path : notice.GetChangedInfoOnlyPaths()) changed.insert(path.GetPrimPath());
     }
 };
 
@@ -399,6 +406,8 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit)
     }
     w.WriteKey("resynced");
     WritePaths(w, listener.resynced);
+    w.WriteKey("changed");
+    WritePaths(w, SdfPathVector(listener.changed.begin(), listener.changed.end()));
     if (!gPrevious.IsEmpty()) {
         w.WriteKey("previous");
         WriteJsonValue(w, gPrevious, std::numeric_limits<size_t>::max());
@@ -588,6 +597,22 @@ std::string Stage::Children(const std::string& path) const
     w.BeginArray();
     if (const UsdPrim prim = _stage ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim()) {
         for (const UsdPrim& child : prim.GetFilteredChildren(AllPrims())) WriteSummary(w, child, UsdTimeCode::Default());
+    }
+    w.EndArray();
+    return stream.str();
+}
+
+std::string Stage::Visibility(const std::string& pathsJson) const
+{
+    JsParseError parseError;
+    const JsValue js = JsParseString(pathsJson, &parseError);
+    std::ostringstream stream;
+    JsWriter w(stream);
+    w.BeginArray();
+    for (const JsValue& item : js.IsArray() ? js.GetJsArray() : JsArray()) {
+        const UsdPrim prim = _stage && item.IsString() && SdfPath::IsValidPathString(item.GetString()) ? _stage->GetPrimAtPath(SdfPath(item.GetString())) : UsdPrim();
+        const UsdGeomImageable imageable(prim);
+        w.WriteValue(!imageable || imageable.ComputeVisibility(UsdTimeCode::Default()) != UsdGeomTokens->invisible);
     }
     w.EndArray();
     return stream.str();
@@ -929,16 +954,19 @@ std::string Stage::SessionVisibility(const std::string& mode, const std::string&
         if (mode == "hide") {
             for (const SdfPath& path : selected()) targets[path] = UsdGeomTokens->invisible;
         } else if (mode == "isolate") {
-            // Hide the siblings along each selected prim's ancestor chain.
-            const std::vector<SdfPath> keep = selected();
-            for (const SdfPath& path : keep) {
-                for (SdfPath parent = path.GetParentPath(); !parent.IsEmpty(); parent = parent.GetParentPath()) {
-                    for (const UsdPrim& child : _stage->GetPrimAtPath(parent).GetChildren()) {
-                        const SdfPath& c = child.GetPath();
-                        if (!child.IsA<UsdGeomImageable>()) continue;
-                        if (std::any_of(keep.begin(), keep.end(), [&](const SdfPath& k) { return k.HasPrefix(c); })) continue;
-                        targets[c] = UsdGeomTokens->invisible;
-                    }
+            // Hide the siblings along each selected prim's ancestor chain: every child of an
+            // ancestor that is neither selected nor itself an ancestor of a selected prim.
+            // Each ancestor is visited once, so this is linear in the children visited.
+            std::unordered_set<SdfPath, SdfPath::Hash> kept, parents;
+            for (const SdfPath& path : selected()) {
+                kept.insert(path);
+                for (SdfPath parent = path.GetParentPath(); !parent.IsEmpty() && parents.insert(parent).second; parent = parent.GetParentPath()) {}
+            }
+            for (const SdfPath& parent : parents) {
+                for (const UsdPrim& child : _stage->GetPrimAtPath(parent).GetChildren()) {
+                    const SdfPath& c = child.GetPath();
+                    if (kept.count(c) || parents.count(c) || !child.IsA<UsdGeomImageable>()) continue;
+                    targets[c] = UsdGeomTokens->invisible;
                 }
             }
         } else if (mode == "showAll") {

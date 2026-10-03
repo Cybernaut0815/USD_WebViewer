@@ -32,6 +32,8 @@ export interface CoreApi {
   closeStage(): void;
   reloadStage(): Edit;
   primChildren(path: Path): PrimSummary[];
+  /** Computed visibility of each path (true for non-imageable or missing prims). */
+  primVisibility(pathsJson: string): boolean[];
   primDetails(path: Path, time: number): PrimInfo;
   attributeValue(path: Path, name: string, time: number): Json;
   findPrims(text: string, typeName: string, limit: number): Path[];
@@ -165,6 +167,8 @@ export interface Edit {
   ok: boolean;
   error?: string;
   resynced: Path[];
+  /** Every prim the edit touched (resynced or only changed), for the hierarchy's change markers. */
+  changed?: Path[];
   /** What the edit replaced, when there was an opinion to replace (the inverse edit's input). */
   previous?: Json;
   /** Identifiers of non-anonymous layers with unsaved changes after the edit. */

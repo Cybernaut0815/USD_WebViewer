@@ -98,6 +98,7 @@ void closeStage()
 
 std::string reloadStage() { return gStage.Reload(); }
 std::string primChildren(const std::string& path) { return gStage.Children(path); }
+std::string primVisibility(const std::string& pathsJson) { return gStage.Visibility(pathsJson); }
 std::string primDetails(const std::string& path, double time) { return gStage.Details(path, time); }
 std::string attributeValue(const std::string& path, const std::string& name, double time)
 {
@@ -213,6 +214,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("closeStage", &closeStage);
     function("reloadStage", &reloadStage);
     function("primChildren", &primChildren);
+    function("primVisibility", &primVisibility);
     function("primDetails", &primDetails);
     function("attributeValue", &attributeValue);
     function("findPrims", &findPrims);

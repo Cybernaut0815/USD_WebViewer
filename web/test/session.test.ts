@@ -72,6 +72,20 @@ test('edit rejects a failed edit and reports resynced prims otherwise', async ()
   assert.deepEqual(seen, [{ resynced: ['/a'], visibility: true }]);
 });
 
+test('edited prims and their ancestors are marked; viewer hiding is not', async () => {
+  const { worker, s } = session();
+  let events = 0;
+  s.addEventListener('changedprims', () => events++);
+  worker.replies.set('setAttribute', { ok: true, resynced: [], changed: ['/a/b'], dirty: ['root.usda'] });
+  await s.usd.setAttribute('/a/b', 'size', 3);
+  assert.deepEqual([s.changeState('/a/b'), s.changeState('/a'), s.changeState('/c')], ['self', 'below', null]);
+  worker.replies.set('sessionVisibility', { ok: true, resynced: [], changed: ['/c'], previous: {}, dirty: [] });
+  await s.usd.hide(['/c']);
+  assert.equal(s.changeState('/c'), null);
+  await s.usd.setAttribute('/a/b', 'size', 4); // already marked: no new event
+  assert.equal(events, 1);
+});
+
 test('hiding is one command whose undo sets the session layer back to what it held', async () => {
   const { worker, s } = session();
   worker.replies.set('sessionVisibility', { ok: true, resynced: [], previous: { '/a': null, '/b': 'invisible' }, dirty: [] });

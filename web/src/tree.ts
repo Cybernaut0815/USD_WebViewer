@@ -38,6 +38,8 @@ export class Tree {
   oncontext: (path: Path, x: number, y: number) => void = () => {};
   /** Editor-only lock state, asked per row while drawing. */
   isLocked: (path: Path) => boolean = () => false;
+  /** Edited in this session ('self') or something below was ('below'), asked per row while drawing. */
+  changeState: (path: Path) => 'self' | 'below' | null = () => null;
   private readonly spacer = document.createElement('div');
   private roots: TreeNode[] = [];
   private rows: TreeNode[] = [];
@@ -147,6 +149,20 @@ export class Tree {
     this.refresh();
   }
 
+  /**
+   * Updates the computed visibility of every loaded row with one query, after an edit that only
+   * changed visibility (cheaper than reloading every expanded level).
+   */
+  async refreshVisibility(query: (paths: Path[]) => Promise<boolean[]>): Promise<void> {
+    // Every loaded node, collapsed ones too: expanding reuses their cached summaries.
+    const nodes: TreeNode[] = [...(this.search ?? [])];
+    const walk = (list: TreeNode[]) => list.forEach((n) => (nodes.push(n), n.children && walk(n.children)));
+    walk(this.roots);
+    const visible = await query(nodes.map((n) => n.summary.path));
+    nodes.forEach((node, i) => (node.summary.visible = visible[i] ?? node.summary.visible));
+    this.draw();
+  }
+
   private async reopen(nodes: TreeNode[], open: Set<Path>): Promise<void> {
     for (const node of nodes) {
       if (!open.has(node.summary.path)) continue;
@@ -194,9 +210,14 @@ export class Tree {
     const name = element('span', 'name', s.name);
     row.append(twisty, name);
     if (s.typeName) row.append(element('span', 'type', s.typeName));
-    if (s.hasPayload) row.append(element('span', 'badge', 'P'));
-    if (s.hasVariantSets) row.append(element('span', 'badge', 'V'));
-    if (s.isInstance) row.append(element('span', 'badge', 'I'));
+    const badge = (text: string, title: string) => Object.assign(element('span', 'badge', text), { title });
+    if (s.hasPayload) row.append(badge('P', 'Has a payload (load / unload in the details panel)'));
+    if (s.hasVariantSets) row.append(badge('V', 'Has variant sets (choose in the details panel)'));
+    if (s.isInstance) row.append(badge('I', 'Instanceable: drawn as an instance of a shared prototype'));
+    const change = this.changeState(s.path);
+    const marker = element('span', 'changed', change === 'self' ? '◆' : change === 'below' ? '◇' : '');
+    if (change) marker.title = change === 'self' ? 'Changed in this session' : 'Something below changed in this session';
+    row.append(marker);
     if (!this.search) {
       const lock = element('button', 'lock', locked ? '🔒' : '🔓');
       lock.title = locked ? 'Unlock (selectable again)' : 'Lock (not selectable in the viewport)';

@@ -148,7 +148,7 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 }
 .stats[hidden] { display: none; }
 .stats span { color: var(--dim); }
-.stats output { font-family: ui-monospace, monospace; text-align: right; }
+.stats output { min-width: 9ch; font-family: ui-monospace, monospace; text-align: right; } /* steady width while FPS changes */
 
 .status {
   position: absolute;
@@ -184,7 +184,9 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .name { overflow: hidden; text-overflow: ellipsis; }
 .type { color: var(--dim); white-space: nowrap; }
 .badge { font-size: 10px; color: var(--accent); border: 1px solid var(--line); border-radius: 2px; padding: 0 3px; margin-left: 4px; }
-.lock { margin-left: auto; border: none; background: none; padding: 0 2px; color: var(--dim); opacity: 0.35; font-size: 11px; }
+/* Change marker: the column just left of the lock, orange so it stands apart from selection and links. */
+.changed { margin-left: auto; width: 14px; flex: none; text-align: center; color: #ff8a3d; font-size: 11px; }
+.lock { border: none; background: none; padding: 0 2px; color: var(--dim); opacity: 0.35; font-size: 11px; }
 .lock.on, .row:hover .lock { opacity: 1; }
 .eye { margin-right: 4px; border: none; background: none; padding: 0 4px; color: var(--dim); }
 .popup { position: fixed; inset: auto; margin: 0; padding: 4px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 4px 16px #0008; }

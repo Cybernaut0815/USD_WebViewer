@@ -313,6 +313,35 @@ test.describe('mock core', () => {
     await expect(page.locator('usd-viewer dialog.help')).toContainText('Shift+drag up');
   });
 
+  test('edited prims get a change marker, their parents a hollow one; hiding does not mark', async ({ page }) => {
+    await open(page, MOCK);
+    const cube = page.locator('usd-viewer .row', { hasText: 'Cube' });
+    const world = page.locator('usd-viewer .row', { hasText: 'World' }).first();
+    await expect(cube.locator('.changed')).toHaveText('');
+    await cube.locator('.name').click();
+    await page.keyboard.press('h');
+    await expect(cube).toHaveClass(/dim/); // hidden, but not marked
+    await expect(cube.locator('.changed')).toHaveText('');
+    await expect(world.locator('.changed')).toHaveText('');
+    await page.keyboard.press('Alt+h');
+    await expect(cube).not.toHaveClass(/dim/);
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).usd.setAttribute('/World/Cube', 'size', 2));
+    await expect(cube.locator('.changed')).toHaveText('◆');
+    await expect(world.locator('.changed')).toHaveText('◇');
+    await expect(cube.locator('.changed')).toHaveAttribute('title', 'Changed in this session');
+  });
+
+  test('the stats show the frame rate and the Help window explains the hierarchy symbols', async ({ page }) => {
+    await open(page, MOCK);
+    await expect(page.locator('usd-viewer .stats')).toContainText('FPS');
+    await expect(page.locator('usd-viewer .stats')).toContainText(/Frame\d+\.\d ms/);
+    const stats = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).stats);
+    expect(stats.frameMs).toBeGreaterThan(0);
+    await page.locator('usd-viewer .toolbar button', { hasText: '?' }).click();
+    await expect(page.locator('usd-viewer dialog.help')).toContainText('Has a payload');
+    await expect(page.locator('usd-viewer dialog.help')).toContainText('Changed in this session');
+  });
+
   test('menus drop down without moving the toolbar, one at a time', async ({ page }) => {
     await open(page, MOCK);
     const summary = (name: string) => page.locator('usd-viewer details.menu summary', { hasText: name });
@@ -397,7 +426,7 @@ test.describe('mock core', () => {
     await open(page, MOCK);
     const stats = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).stats);
     // The cube plus three instances of it: 8 points, 6 quads, 12 edges each, not 12 triangles.
-    expect(await stats()).toEqual({ meshes: 4, points: 32, faces: 24, edges: 48, materials: 0, textures: 0 });
+    expect(await stats()).toMatchObject({ meshes: 4, points: 32, faces: 24, edges: 48, materials: 0, textures: 0 });
     await expect(page.locator('usd-viewer .stats')).toContainText('Faces24');
     await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).purposes = ['render']));
     expect((await stats()).meshes).toBe(0);

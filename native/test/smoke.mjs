@@ -119,6 +119,7 @@ def Xform "World" (kind = "component")
   // Session-layer edit, then the same value read back.
   const edit = JSON.parse(core.setAttribute('/World/Cube', 'size', '4', NaN));
   assert.ok(edit.ok, edit.error);
+  assert.deepEqual(edit.changed, ['/World/Cube'], 'the edited prim is reported for the change markers');
   assert.equal(JSON.parse(core.attributeValue('/World/Cube', 'size', NaN)), 4);
   assert.equal(flush().meshes.length, 1, 'the edit reaches the renderer');
 
@@ -274,6 +275,24 @@ def Mesh "Shape"
   noErrors();
 }
 
+/* ---------- isolating a large selection stays linear ---------- */
+{
+  const groups = Array.from({ length: 40 }, (_, g) => `    def Xform "G${g}"\n    {\n${Array.from({ length: 50 }, (_, c) => `        def Cube "C${c}" {}`).join('\n')}\n    }`);
+  open('many.usda', `#usda 1.0\ndef Xform "World"\n{\n${groups.join('\n')}\n}`);
+  flush();
+  // Keep 30 cubes in each of the first 30 groups: 900 selected prims.
+  const keep = Array.from({ length: 30 }, (_, g) => Array.from({ length: 30 }, (_, c) => `/World/G${g}/C${c}`)).flat();
+  const started = performance.now();
+  const edit = JSON.parse(core.sessionVisibility('isolate', JSON.stringify(keep)));
+  const ms = performance.now() - started;
+  assert.ok(edit.ok, edit.error);
+  const hidden = Object.keys(edit.previous);
+  assert.equal(hidden.length, 30 * 20 + 10, '20 siblings in each kept group, plus the 10 other groups');
+  assert.ok(hidden.includes('/World/G0/C30') && hidden.includes('/World/G39') && !hidden.includes('/World/G0/C0'));
+  assert.ok(ms < 2000, `isolate took ${Math.round(ms)} ms`);
+  noErrors();
+}
+
 /* ---------- viewer hiding in the session layer ---------- */
 {
   open('hide.usda', `#usda 1.0
@@ -307,6 +326,9 @@ def Xform "World"
   assert.deepEqual(visible('/World/G'), { C: true, D: true });
   assert.deepEqual(run('showAll', null), { '/World/A': 'invisible' });
   assert.deepEqual(visible('/World'), { A: true, B: true, G: true, M: true });
+  run('hide', ['/World/G']);
+  assert.deepEqual(JSON.parse(core.primVisibility(JSON.stringify(['/World/G/C', '/World/A', '/World/M', '/nope']))), [false, true, true, true], 'computed: inherited from G');
+  run('showAll', null);
   run('hide', ['/World/B']);
   const rootText = new TextDecoder().decode(core.exportLayer('/tmp/hide.usda', 'usda'));
   assert.ok(rootText.includes('def Cube "B"') && !rootText.includes('visibility'), 'the root layer stays untouched');

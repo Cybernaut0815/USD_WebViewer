@@ -165,10 +165,11 @@ export class SceneSync {
     }
     // Rebuilt meshes are new objects, so the overlays are redone with them; instanced overlays
     // live outside their mesh and take its visibility when built.
-    const rebuilt = delta.meshes || delta.removed || delta.visibility;
+    const rebuilt = delta.meshes || delta.removed;
     if (delta.selected) this.selected = delta.selected;
     if (delta.selected || (this.selected.length && rebuilt)) this.highlight(this.selected);
     if (rebuilt) this.wireframes();
+    else if (delta.visibility) this.syncOverlayVisibility();
     if (delta.lights || delta.removed) this.updateEnvironment();
     // The version drives a walk over every object (bounds, shadow fit): structural changes bump
     // it at once, moving objects at most twice a second.
@@ -261,8 +262,7 @@ export class SceneSync {
   setPurposes(purposes: Iterable<string>): void {
     this.purposes = new Set(purposes);
     for (const item of this.items.values()) this.updateVisible(item);
-    this.highlight(this.selected);
-    this.wireframes();
+    this.syncOverlayVisibility();
     this.host.invalidate();
   }
 
@@ -803,11 +803,20 @@ export class SceneSync {
     return this.place(item, proxy);
   }
 
+  /** Instanced overlays live outside their item: give them its visibility again (children follow it already). */
+  private syncOverlayVisibility(): void {
+    for (const proxy of [...this.wires, ...this.highlights]) {
+      const item = proxy.userData.item as Item | undefined;
+      if (item?.object) proxy.visible = item.object.visible;
+    }
+  }
+
   /** Overlays of plain items are children (they follow the transform); instanced ones sit in root. */
   private place<T extends THREE.Object3D>(item: Item, proxy: T): T {
     if (item.instances) {
       proxy.frustumCulled = false;
       proxy.visible = item.object!.visible;
+      proxy.userData.item = item;
       this.root.add(proxy);
     } else item.object!.add(proxy);
     proxy.raycast = () => {};

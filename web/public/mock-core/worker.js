@@ -44,7 +44,7 @@ function summary(path) {
 
 let cubeOffset = 0; // authored by setXform
 let rootLayer = 'mock.usda', dirty = false, reloads = 0;
-const edited = () => { dirty = true; return { ok: true, resynced: [], dirty: [rootLayer] }; };
+const edited = () => { dirty = true; return { ok: true, resynced: [], changed: ['/World/Cube'], dirty: [rootLayer] }; };
 const cubeMatrix = () => translate(Math.sin((time - 1) / 47 * Math.PI * 2) + cubeOffset, 0, 0);
 
 const api = {
@@ -56,6 +56,7 @@ const api = {
   },
   closeStage() { open = false; },
   reloadStage: () => ({ ok: true, resynced: ['/'], dirty: [] }),
+  primVisibility: (json) => JSON.parse(json).map((path) => summary(path).visible),
   primChildren: (path) => (PRIMS[path] ?? []).map((name) => summary(path === '/' ? `/${name}` : `${path}/${name}`)),
   primDetails: (path) => ({
     summary: summary(path), specifier: 'def', purpose: 'default',

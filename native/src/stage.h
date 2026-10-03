@@ -23,6 +23,8 @@ public:
     const UsdStageRefPtr& Get() const { return _stage; }
 
     std::string Children(const std::string& path) const;                   // PrimSummary[]
+    /// Computed visibility of each path in a JSON array (true for non-imageable or missing prims).
+    std::string Visibility(const std::string& pathsJson) const;          // bool[]
     std::string Details(const std::string& path, double time) const;       // PrimInfo
     std::string AttributeValue(const std::string& path, const std::string& name, double time) const;
     std::string Find(const std::string& text, const std::string& typeName, int limit) const; // Path[]

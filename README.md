@@ -112,7 +112,9 @@ Skies (toolbar, `viewer.sky`): five bundled Poly Haven HDRIs (blue sky, sunset, 
 
 Display modes (toolbar, `viewer.displayMode`): **shaded** (bound materials) or **plain** (one grey material), each alone, with the edges of every mesh (**+ wire**), or with red edges on the selection only (**+ selection wire**, the active prim brighter, in place of the yellow fill); and **wireframe** (edges only). Edges are the outlines of the authored faces: no triangulation diagonals, and on refined meshes only the boundaries of the cage faces.
 
-Statistics (top right of the viewport, `viewer.stats`): meshes, vertices, faces and edges of the visible meshes as authored in USD (each instance counted, holes left out, independent of refinement and triangulation), and how many distinct materials are bound to them and how many textures those materials use.
+Statistics (top right of the viewport, `viewer.stats`): meshes, vertices, faces and edges of the visible meshes as authored in USD (each instance counted, holes left out, independent of refinement and triangulation), and how many distinct materials are bound to them and how many textures those materials use. Below them, **FPS** counts the frames drawn in the last second (the view only redraws when something changes, so a still view reads `idle`) and **Frame** is the CPU time of the last draw.
+
+Hierarchy symbols (also in the Help window): **P** has a payload, **V** has variant sets, **I** is instanceable; an orange **◆** marks a prim edited since the stage was opened (saving keeps it, reloading or reopening clears it; H / Shift+H hiding does not count) and **◇** a prim with an edited prim below it.
 
 Subdivision follows Omniverse's convention: a global refinement level (toolbar; 0 by default like usdview and Omniverse, since most production meshes are polygon cages that only look right unrefined; `Auto` picks the highest level up to 2 whose triangle count stays under 3 million for the stage) and, per mesh, the custom attributes `refinementEnableOverride` / `refinementLevel`, editable in the Refinement section of the property panel and travelling with the file.
 

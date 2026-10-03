@@ -123,6 +123,8 @@ export interface UsdSessionEventMap {
   playchange: Event;
   /** `visibility`: the edit changed visibility, which no resync reports. */
   primschange: CustomEvent<{ resynced: Path[]; visibility?: boolean }>;
+  /** Prims were edited for the first time since the stage was opened (see `changed`). */
+  changedprims: Event;
   /** Every render delta the core produced, in order; the viewport applies them. */
   delta: CustomEvent<RenderDelta>;
   lockchange: CustomEvent<{ path: Path; locked: boolean }>;
@@ -149,6 +151,9 @@ export class UsdSession extends EventTarget {
   effectiveRefineLevel = 0;
   /** Identifiers of layers with unsaved edits. */
   readonly dirty = new Set<string>();
+  /** Prims edited since the stage was opened or reloaded (saving keeps them); viewer hiding does not count. */
+  readonly changed = new Set<Path>();
+  private changedBelow = new Set<Path>(); // ancestors of changed prims
   /** Edits below are undoable: the core reports what each one replaced, and the inverse re-authors it. */
   readonly usd: UsdStageApi = {
     children: (path = '/') => this.core.call('primChildren', path),
@@ -221,11 +226,12 @@ export class UsdSession extends EventTarget {
     setEditTarget: (identifier) => this.edit(this.core.call('setEditTarget', identifier)).then(() => undefined),
     exportLayer: (identifier, format) => this.core.call('exportLayer', identifier, format),
     reload: async (identifiers = []) => {
-      await this.edit(this.core.call('reloadLayers', identifiers));
+      await this.edit(this.core.call('reloadLayers', identifiers), { viewOnly: true });
       this.commands.clear();
+      this.clearChanged();
     },
     clearEdits: async () => {
-      await this.edit(this.core.call('clearSessionEdits'));
+      await this.edit(this.core.call('clearSessionEdits'), { viewOnly: true }); // viewer-only edits, never marked
       this.commands.clear();
     },
   };
@@ -306,6 +312,7 @@ export class UsdSession extends EventTarget {
     this.activePath = null;
     this.locked.clear();
     this.commands.clear();
+    this.clearChanged();
     await this.core.call('closeStage');
     this.drops.clear();
     this.handles.clear();
@@ -350,7 +357,7 @@ export class UsdSession extends EventTarget {
       if (drop && files) {
         files.set(drop[2], new File([bytes], drop[2].split('/').pop()!));
         await this.core.call('remount', drop[1], [...files].map(([path, file]) => ({ path, file })));
-        await this.edit(this.core.call('reloadLayers', [layer.identifier]));
+        await this.edit(this.core.call('reloadLayers', [layer.identifier]), { viewOnly: true }); // saving keeps the markers
       }
       saved.push(layer.identifier);
     }
@@ -381,8 +388,9 @@ export class UsdSession extends EventTarget {
         const files = this.drops.get(dir);
         if (files) await this.core.call('remount', dir, [...files].map(([path, file]) => ({ path, file })));
       }
-      await this.edit(this.core.call('reloadLayers', changed));
+      await this.edit(this.core.call('reloadLayers', changed), { viewOnly: true });
       this.commands.clear();
+      this.clearChanged();
       this.emit('diskchange', { identifiers: changed });
     } catch (error: any) {
       this.report('error', error.message);
@@ -525,10 +533,11 @@ export class UsdSession extends EventTarget {
    * Awaits an edit, fails on error, flushes, and tells listeners which prims resynced. Not
    * undoable by itself; `quiet` skips the primschange event (a drag emits one at its end).
    */
-  async edit(call: Promise<Edit>, options: { quiet?: boolean; visibility?: boolean } = {}): Promise<Edit> {
+  async edit(call: Promise<Edit>, options: { quiet?: boolean; visibility?: boolean; viewOnly?: boolean } = {}): Promise<Edit> {
     const result = await call;
     if (!result.ok) throw new Error(result.error ?? 'edit failed');
     this.setDirty(result.dirty ?? []);
+    if (!options.viewOnly) this.markChanged(result.changed ?? []);
     await this.flush();
     if (!options.quiet) this.emit('primschange', { resynced: result.resynced, visibility: options.visibility });
     return result;
@@ -539,19 +548,20 @@ export class UsdSession extends EventTarget {
     forward: () => Promise<Edit>,
     inverse: (previous: Json | undefined) => Promise<Edit> | null,
     visibility = false,
+    viewOnly = false,
   ): Promise<void> {
     let previous: Json | undefined;
     let first = true;
     return this.commands.run({
       label: 'edit',
       do: async () => {
-        const result = await this.edit(forward(), { visibility });
+        const result = await this.edit(forward(), { visibility, viewOnly });
         if (first) previous = result.previous;
         first = false;
       },
       undo: async () => {
         const call = inverse(previous);
-        if (call) await this.edit(call, { visibility });
+        if (call) await this.edit(call, { visibility, viewOnly });
       },
     });
   }
@@ -561,7 +571,30 @@ export class UsdSession extends EventTarget {
       () => this.core.call('sessionVisibility', mode, JSON.stringify(paths)),
       (previous) => this.core.call('sessionVisibility', 'set', JSON.stringify(previous ?? {})),
       true,
+      true,
     );
+  }
+
+  /** Whether a prim was edited in this session ('self'), or something below it was ('below'). */
+  changeState(path: Path): 'self' | 'below' | null {
+    return this.changed.has(path) ? 'self' : this.changedBelow.has(path) ? 'below' : null;
+  }
+
+  private markChanged(paths: readonly Path[]): void {
+    const added = paths.filter((p) => p !== '/' && !this.changed.has(p));
+    if (!added.length) return;
+    for (const path of added) {
+      this.changed.add(path);
+      for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) this.changedBelow.add(path.slice(0, i));
+    }
+    this.dispatchEvent(new Event('changedprims'));
+  }
+
+  private clearChanged(): void {
+    if (!this.changed.size) return;
+    this.changed.clear();
+    this.changedBelow.clear();
+    this.dispatchEvent(new Event('changedprims'));
   }
 
   /** Puts an attribute back to an earlier opinion, or removes the opinion when there was none. */

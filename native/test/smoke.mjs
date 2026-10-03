@@ -412,23 +412,50 @@ def Mesh "Omni"
   assert.equal(by['/Omni'], 144, 'Omniverse attributes: level 1 regardless of the global level');
   noErrors();
 
-  // A big cage: 310 x 310 quads only fit level 1 under the budget.
+  // A big cage: 310 x 310 quads only fit level 1 under the default budget.
   const n = 310;
   const points = [];
   for (let y = 0; y <= n; y++) for (let x = 0; x <= n; x++) points.push(`(${x}, ${y}, 0)`);
   const counts = Array(n * n).fill(4).join(', ');
   const indices = [];
   for (let y = 0; y < n; y++) for (let x = 0; x < n; x++) indices.push(y * (n + 1) + x, y * (n + 1) + x + 1, (y + 1) * (n + 1) + x + 1, (y + 1) * (n + 1) + x);
-  open('grid.usda', `#usda 1.0
-def Mesh "Grid"
+  const gridMesh = (scheme) => `def Mesh "Grid"
 {
-    int[] faceVertexCounts = [${counts}]
+${scheme}    int[] faceVertexCounts = [${counts}]
     int[] faceVertexIndices = [${indices.join(', ')}]
     point3f[] points = [${points.join(', ')}]
-}`);
+}`;
+  open('grid.usda', `#usda 1.0\n${gridMesh('    uniform token subdivisionScheme = "catmullClark"\n')}`);
   const grid = flush();
   assert.equal(grid.refineLevel, 1);
   assert.equal(grid.meshes[0].indices.length, n * n * 4 * 6);
+  // The budget is set by the page (from the hardware): below 4x the cage, the automatic level drops to 0.
+  core.setRefineBudget(5e5);
+  const small = flush();
+  assert.equal(small.refineLevel, 0);
+  assert.equal(small.meshes[0].indices.length, n * n * 6);
+  core.setRefineBudget(3e6);
+  assert.equal(flush().refineLevel, 1);
+
+  // The same grid without an authored scheme (USD's fallback is catmullClark, as for any polygon
+  // cage that says nothing): the automatic level leaves it alone.
+  open('grid-plain.usda', `#usda 1.0\n${gridMesh('')}\ndef Mesh "Flat"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+}`);
+  const plain = flush();
+  assert.equal(plain.refineLevel, 0, 'no authored subdivision surface: automatic is 0');
+  assert.equal(plain.meshes.find((m) => m.path === '/Grid').indices.length, n * n * 6);
+  // An explicit level refines it; only meshes whose level changes are converted and sent again.
+  core.setRefineLevel(1);
+  assert.deepEqual(flush().meshes.map((m) => m.path), ['/Grid'], 'the scheme "none" mesh is not re-sent');
+  core.setRefineLevel(-1);
+  assert.deepEqual(flush().meshes.map((m) => m.path), ['/Grid']);
+  core.setRefineLevel(-1);
+  assert.equal(flush().meshes, undefined, 'nothing changes: nothing is sent');
   core.setRefineLevel(0);
   noErrors();
 }

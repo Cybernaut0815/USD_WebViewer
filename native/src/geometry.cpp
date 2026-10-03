@@ -9,8 +9,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
 
 namespace {
 
@@ -218,15 +216,19 @@ MeshOut BuildMesh(const MeshIn& in)
     // Fan triangulation. `source` remembers which mesh vertex each output index refers to.
     std::vector<int> cornerFace(corners, 0);
     std::vector<uint32_t> sourceTriangles; // mesh vertex indices, for smooth normals
-    // Face edges by welded vertex pair. An edge met twice from the same authored
-    // face lies inside it (refinement) and is not drawn.
+    // Face edges by welded vertex pair, sorted afterwards (one allocation, not one per edge:
+    // the meshes are built in parallel and the wasm allocator serialises small allocations).
+    // An edge met twice from the same authored face lies inside it (refinement): not drawn.
     struct Edge {
+        uint64_t key;
+        uint32_t order; // first sighting wins
         uint32_t a, b;
         int base;
-        bool drawn;
     };
     std::vector<Edge> edges;
-    std::unordered_map<uint64_t, size_t> edgeSlots;
+    edges.reserve(corners);
+    out.indices.reserve(corners * 3);
+    sourceTriangles.reserve(corners * 3);
     size_t offset = 0;
     for (size_t f = 0; f < poly.counts.size(); f++) {
         const int n = poly.counts[f];
@@ -248,20 +250,23 @@ MeshOut BuildMesh(const MeshIn& in)
         }
         for (int i = 0; valid && i < n; i++) {
             const size_t c0 = offset + i, c1 = offset + (i + 1) % n;
-            const auto [slot, added] = edgeSlots.try_emplace(EdgeKey(poly.indices[c0], poly.indices[c1]), edges.size());
-            if (added) {
-                edges.push_back({ expand ? uint32_t(c0) : uint32_t(poly.indices[c0]),
-                    expand ? uint32_t(c1) : uint32_t(poly.indices[c1]), poly.baseFace[f], true });
-            } else if (edges[slot->second].base == poly.baseFace[f]) {
-                edges[slot->second].drawn = false;
-            }
+            edges.push_back({ EdgeKey(poly.indices[c0], poly.indices[c1]), uint32_t(edges.size()),
+                expand ? uint32_t(c0) : uint32_t(poly.indices[c0]), expand ? uint32_t(c1) : uint32_t(poly.indices[c1]),
+                poly.baseFace[f] });
         }
         offset += n;
     }
-    for (const Edge& e : edges) {
-        if (!e.drawn) continue;
-        out.edges.push_back(e.a);
-        out.edges.push_back(e.b);
+    std::sort(edges.begin(), edges.end(), [](const Edge& x, const Edge& y) { return x.key != y.key ? x.key < y.key : x.order < y.order; });
+    out.edges.reserve(edges.size() * 2);
+    for (size_t i = 0; i < edges.size();) {
+        size_t j = i + 1;
+        bool drawn = true;
+        for (; j < edges.size() && edges[j].key == edges[i].key; j++) drawn &= edges[j].base != edges[i].base;
+        if (drawn) {
+            out.edges.push_back(edges[i].a);
+            out.edges.push_back(edges[i].b);
+        }
+        i = j;
     }
 
     // Lays per-vertex data out the way the output positions are laid out.
@@ -330,19 +335,24 @@ MeshCounts CountMesh(const MeshIn& in)
 {
     MeshCounts counts;
     counts.points = in.points.size();
-    const std::unordered_set<int> holes(in.holeIndices.cbegin(), in.holeIndices.cend());
-    std::unordered_set<uint64_t> edges;
+    std::vector<bool> hole(in.faceVertexCounts.size(), false);
+    for (int f : in.holeIndices) {
+        if (f >= 0 && size_t(f) < hole.size()) hole[f] = true;
+    }
+    std::vector<uint64_t> edges; // sorted and deduplicated below: one allocation, see BuildMesh
+    edges.reserve(in.faceVertexIndices.size());
     size_t offset = 0;
     for (size_t f = 0; f < in.faceVertexCounts.size(); f++) {
         const int n = in.faceVertexCounts[f];
         if (n < 0 || offset + n > in.faceVertexIndices.size()) break; // malformed topology
-        if (n >= 3 && !holes.count(int(f))) {
+        if (n >= 3 && !hole[f]) {
             counts.faces++;
-            for (int i = 0; i < n; i++) edges.insert(EdgeKey(in.faceVertexIndices[offset + i], in.faceVertexIndices[offset + (i + 1) % n]));
+            for (int i = 0; i < n; i++) edges.push_back(EdgeKey(in.faceVertexIndices[offset + i], in.faceVertexIndices[offset + (i + 1) % n]));
         }
         offset += n;
     }
-    counts.edges = edges.size();
+    std::sort(edges.begin(), edges.end());
+    counts.edges = size_t(std::unique(edges.begin(), edges.end()) - edges.begin());
     return counts;
 }
 

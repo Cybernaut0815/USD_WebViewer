@@ -57,6 +57,8 @@ export interface UsdStageApi {
   reload(identifiers?: string[]): Promise<void>;
   /** Global subdivision refinement level; -1 = automatic. */
   setComplexity(level: number): Promise<void>;
+  /** Output triangles the automatic level may produce; the viewer sets it from the hardware. */
+  setRefineBudget(triangles: number): Promise<void>;
   /** Omniverse-style per-prim override (refinementEnableOverride + refinementLevel on the mesh). */
   setRefinement(path: Path, enabled: boolean, level: number): Promise<void>;
   clearRefinement(path: Path): Promise<void>;
@@ -215,6 +217,10 @@ export class UsdSession extends EventTarget {
       this.refineLevel = level;
       this.core.call('setRefineLevel', level);
       this.emit('refinechange', { level });
+      await this.flush();
+    },
+    setRefineBudget: async (triangles) => {
+      this.core.call('setRefineBudget', triangles);
       await this.flush();
     },
     setRefinement: (path, enabled, level) =>

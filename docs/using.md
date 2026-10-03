@@ -102,8 +102,10 @@ The prim menu (right-click) also copies the prim's USD, either the composed subt
   - Stage cameras, chosen in the toolbar, keep their own lens.
 - **Purposes, backface culling, tone mapping, exposure**: View ▸ Purposes and View ▸ Shading.
 - **Subdivision** follows Omniverse's convention:
-  - **Global level** (toolbar): 0 by default, like usdview and Omniverse. `Auto` picks the highest level up to 2 that keeps the stage under 3 million triangles.
-  - **Per-mesh override**: the custom attributes `refinementEnableOverride` / `refinementLevel`, edited in the property panel's Refinement section. They travel with the file.
+  - **Global level** (toolbar): 0 by default, like usdview and Omniverse. A level of 1–3 refines every mesh whose scheme is catmullClark or loop. That includes meshes that never set a scheme, because USD's fallback is catmullClark; most production polygon cages are like that.
+  - **Auto** only refines meshes whose file explicitly sets `subdivisionScheme` to catmullClark or loop. Of those, it uses the highest level up to 2 whose output stays within the **Auto budget**. Everything else stays at 0, so a stage like Kitchen_set, which sets no scheme, is left as authored.
+  - **Auto budget** (View ▸ Subdivision): defaults to this machine's value, taken from its memory and CPU threads, between about 1.5 and 6 million triangles. It can be set by hand from 0.5 to 8 million and is remembered in the browser. The upper limit protects the core's 4 GB WebAssembly heap. One mesh never refines past two thirds of the budget.
+  - **Per-mesh override**: the custom attributes `refinementEnableOverride` / `refinementLevel`, edited in the property panel's Refinement section. They travel with the file and win over the global level and Auto.
 
 ## Statistics
 

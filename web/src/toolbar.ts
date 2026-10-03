@@ -1,7 +1,7 @@
 // Toolbar: file opening, framing, camera, refinement, purposes, display settings, messages.
 import { collectDrop, download, fromInput } from './files.ts';
 import { h } from './props.ts';
-import { DEFAULT_BACKGROUND, type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
+import { DEFAULT_BACKGROUND, hardwareRefineBudget, type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
 import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 
@@ -44,7 +44,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   session.addEventListener('stageclose', refresh);
 
   const refine = select(
-    'Global subdivision refinement level; meshes with their own override keep it',
+    'Global subdivision refinement level for every catmullClark / loop mesh. Auto: only meshes whose file sets subdivisionScheme, at the highest level (up to 2) within the Auto budget (View ▸ Subdivision). Meshes with their own refinement override keep it',
     [['-1', 'Refine: auto'], ['0', 'Refine 0'], ['1', 'Refine 1'], ['2', 'Refine 2'], ['3', 'Refine 3']],
     (v) => session.usd.setComplexity(Number(v)),
     String(session.refineLevel),
@@ -80,6 +80,12 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     return h('label', {}, box, ` ${panel[0].toUpperCase()}${panel.slice(1)}`);
   });
   const help = button('?', 'Keys and mouse (F1)', () => viewer.showHelp());
+  const millions = (triangles: number) => `${+(triangles / 1e6).toFixed(1)}M`;
+  const budget = h('input', { type: 'number', min: '0.5', max: '8', step: '0.5', title: 'Auto budget in millions of output triangles' }) as HTMLInputElement;
+  const syncBudget = () => (budget.value = String(+(viewer.refineBudget / 1e6).toFixed(1)));
+  budget.addEventListener('change', () => budget.value && (viewer.refineBudget = Number(budget.value) * 1e6));
+  viewer.addEventListener('refinebudgetchange', syncBudget);
+  syncBudget();
   const background = h('input', { type: 'color', value: viewer.backgroundColor, title: 'Background colour' }) as HTMLInputElement;
   background.addEventListener('input', () => (viewer.backgroundColor = background.value));
   viewer.addEventListener('backgroundchange', () => (background.value = viewer.backgroundColor));
@@ -243,6 +249,12 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     'View',
     ['Panels', ...panelBoxes, item('Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection))],
     ['Purposes', ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value}`))],
+    [
+      'Subdivision',
+      h('label', { title: 'Refine: auto smooths authored subdivision surfaces up to this many triangles' }, 'Auto budget ', budget, ' M triangles'),
+      button(`Hardware default (${millions(hardwareRefineBudget())})`, 'From this machine: memory and CPU threads', () => (viewer.refineBudget = null)),
+      h('span', { className: 'dim' }, 'Above 8M the 4 GB core heap is at risk'),
+    ],
     [
       'Background',
       h('label', {}, background, ' Colour'),

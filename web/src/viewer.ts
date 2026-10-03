@@ -19,7 +19,7 @@ import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } f
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode;
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event; refinebudgetchange: Event };
 export { DEFAULT_BACKGROUND };
 export type { CameraSettings };
 /** Which panels around the viewport are shown. */
@@ -92,6 +92,19 @@ const SHORTCUTS: [string, [string, string][]][] = [
 ];
 const LAYOUT_KEY = 'usd-viewer:layout';
 
+/**
+ * The automatic refinement budget this machine gets by default, in output triangles: 3M at 4 GB
+ * of memory, scaled with navigator.deviceMemory (Chromium only, rounded, at most 8) between 1.5M
+ * and 6M, and 25% less with fewer than 4 CPU threads (refinement runs on the CPU). The core's
+ * 32-bit heap (4 GB, shared with the stage) caps any budget at 8M.
+ */
+export function hardwareRefineBudget(): number {
+  const memory = (navigator as { deviceMemory?: number }).deviceMemory ?? 4;
+  let budget = Math.min(Math.max((3e6 * memory) / 4, 1.5e6), 6e6);
+  if ((navigator.hardwareConcurrency ?? 4) < 4) budget *= 0.75;
+  return Math.round(Math.min(budget, 8e6) / 1e5) * 1e5;
+}
+
 export class UsdViewerElement extends HTMLElement {
   static readonly observedAttributes = ['src', 'panels'];
 
@@ -111,7 +124,8 @@ export class UsdViewerElement extends HTMLElement {
   private readonly skyTextures: TextureCache;
   private skyName: string | null = null;
   /** Panel widths and visibility, kept per browser. */
-  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true, background: DEFAULT_BACKGROUND }; // widths: share of the element
+  // widths: share of the element; refineBudget: null follows the hardware
+  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true, background: DEFAULT_BACKGROUND, refineBudget: null as number | null };
   /** Tabs on the viewport's borders that show and hide the panels. */
   private readonly toggles = {
     left: h('button', { className: 'toggle side' }),
@@ -142,6 +156,7 @@ export class UsdViewerElement extends HTMLElement {
     try {
       const saved = JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? '{}');
       for (const side of ['left', 'right'] as const) if (!(saved[side] > 0 && saved[side] < 1)) delete saved[side]; // older pixel widths
+      if (!(saved.refineBudget >= 5e5 && saved.refineBudget <= 8e6)) delete saved.refineBudget; // null: the hardware's
       Object.assign(this.layout, saved);
     } catch {} // storage blocked or corrupt: defaults
     this.viewport.background = this.layout.background;
@@ -351,6 +366,20 @@ export class UsdViewerElement extends HTMLElement {
   }
 
   /** The free camera's projection, focal length and clipping (stage cameras keep their own). */
+  /**
+   * Output triangles "Refine: auto" may produce for the stage's authored subdivision surfaces.
+   * Defaults to hardwareRefineBudget(); setting null goes back to it. Remembered per browser.
+   */
+  get refineBudget(): number {
+    return this.layout.refineBudget ?? hardwareRefineBudget();
+  }
+  set refineBudget(triangles: number | null) {
+    this.layout.refineBudget = triangles === null ? null : Math.min(Math.max(triangles, 5e5), 8e6);
+    this.applyLayout();
+    this.session.usd.setRefineBudget(this.refineBudget).catch(() => {});
+    this.dispatchEvent(new Event('refinebudgetchange'));
+  }
+
   get cameraSettings(): CameraSettings {
     return this.viewport.cameraSettings;
   }
@@ -420,6 +449,7 @@ export class UsdViewerElement extends HTMLElement {
     }
     this.setStatus('Starting USD core…');
     await Promise.all([this.viewport.init(), this.session.ready]);
+    this.session.core.call('setRefineBudget', this.refineBudget);
     this.setStatus('');
   }
 

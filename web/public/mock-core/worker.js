@@ -78,6 +78,7 @@ const api = {
   readAsset: () => null,
   setTime(t) { time = Number.isNaN(t) ? 1 : t; timeDirty = true; },
   setRefineLevel() {},
+  setRefineBudget() {},
   flush() {
     if (!open) return {};
     const delta = {};

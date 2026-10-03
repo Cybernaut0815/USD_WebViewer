@@ -28,9 +28,12 @@ public:
 
     void SetStage(const UsdStageRefPtr& stage); // null closes
     void SetTime(UsdTimeCode time);
-    /// Global refinement level; -1 picks one from a triangle budget (the default).
+    /// Global refinement level; -1 (automatic) refines only meshes that author a subdivision
+    /// scheme, at the highest level <= 2 that keeps them under the triangle budget.
     void SetRefineLevel(int level);
-    /// Re-converts every subdividable mesh and curve (after refinement changes).
+    /// Output triangles the automatic level may produce (also scales the per-mesh cap).
+    void SetRefineBudget(double triangles);
+    /// Re-converts the meshes and curves whose refinement level changed.
     void MarkRefinable();
     /// Re-converts one mesh (after its refinement attributes changed).
     void MarkMesh(const SdfPath& path);
@@ -45,6 +48,7 @@ public:
 
 private:
     struct Rec;
+    struct MeshJob;
     class Factory;
     friend struct Rec;
 
@@ -57,21 +61,31 @@ private:
     void ConvertMaterial(Rec& rec, emscripten::val& delta);
     void ConvertLight(Rec& rec, emscripten::val& delta);
     void ConvertCamera(Rec& rec, emscripten::val& delta);
-    void ConvertMesh(Rec& rec, bool created, emscripten::val& delta);
+    /// Meshes convert in parallel: GatherMesh reads the scene index (thread-safe) and BuildMeshJob
+    /// builds the geometry on any thread; EmitMesh writes the JS entry on this thread.
+    bool GatherMesh(Rec& rec, bool created, MeshJob* job);
+    static void BuildMeshJob(MeshJob& job);
+    void EmitMesh(MeshJob& job, emscripten::val& entry);
     void ConvertCurves(Rec& rec, bool created, emscripten::val& delta);
     void ConvertPoints(Rec& rec, bool created, emscripten::val& delta);
     bool UpdateInstancing(Rec& rec, const HdContainerDataSourceHandle& source, emscripten::val& entry);
     void UpdateSelection(Rec& rec, const HdContainerDataSourceHandle& source);
 
     int RefineLevel() const { return _refineLevel < 0 ? _autoLevel : _refineLevel; }
-    void UpdateAutoLevel();
+    /// Recomputes the automatic level when meshes changed; true when it moved.
+    bool UpdateAutoLevel();
     int MeshRefineLevel(const SdfPath& path, const HdContainerDataSourceHandle& source) const;
+    /// The USD prim behind a scene index prim (native-instance prototypes through their prim origin).
+    UsdPrim UsdPrimOf(const SdfPath& path, const HdContainerDataSourceHandle& source) const;
+    /// The level a mesh is converted at (0 when its scheme does not subdivide).
+    int EffectiveMeshLevel(const SdfPath& path, const HdContainerDataSourceHandle& source) const;
 
     UsdStageRefPtr _stage;
     UsdImagingSceneIndexRefPtr _usd;
     HdSceneIndexBaseRefPtr _scene; // end of the filtering chain
     HdsiPrimManagingSceneIndexObserverRefPtr _observer;
     int _refineLevel = 0;  // like usdview and Omniverse; -1: automatic from a triangle budget
+    double _autoBudget = 3e6; // output triangles the automatic level may produce (set from the page)
     int _autoLevel = 0;     // what automatic resolved to for this stage
     bool _autoDirty = true; // mesh records came or went since _autoLevel was computed
     uint32_t _nextRid = 1;

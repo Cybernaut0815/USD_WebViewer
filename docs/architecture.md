@@ -56,8 +56,9 @@ Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 M
 - **Lighting:** area lights are approximated. Rect lights cast no shadows, disk lights are drawn square, and cylinder lights are drawn as points.
 - **Not rendered:** UDIM textures, light linking, IES profiles, volumes and displacement.
 - **Refinement:**
-  - The automatic refinement level is stage-wide, so one huge cage lowers it for every mesh.
-  - Each mesh is also capped at 2 million output triangles.
+  - The automatic level is shared by every authored subdivision surface, so one huge cage lowers it for all of them.
+  - Each mesh is also capped at two thirds of the Auto budget (2 million triangles at the default 3 million).
+  - Refinement runs on the CPU. Meshes are read and refined on all core threads, but a level change on a large stage still takes seconds: Kitchen_set at level 1 is 1.1 million refined quads.
 - **Saving:** write-back and disk watching need the File System Access API, which means Chromium on desktop. Elsewhere, saving downloads the layer. Layers opened from URLs can only be downloaded, and stay flagged as unsaved.
 - **Transforms and undo:**
   - The gizmo sits at the prim's origin, not at its pivot.

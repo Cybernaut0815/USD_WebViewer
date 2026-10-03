@@ -368,6 +368,25 @@ test.describe('mock core', () => {
     expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).backgroundColor)).toBe('#26282b');
   });
 
+  test('the auto refinement budget follows the hardware unless set, and is remembered', async ({ page }) => {
+    await page.addInitScript(() => sessionStorage.getItem('kept') || (localStorage.clear(), sessionStorage.setItem('kept', '1')));
+    await open(page, MOCK);
+    const budget = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).refineBudget);
+    const hardware = await budget();
+    expect(hardware).toBeGreaterThanOrEqual(1.125e6);
+    expect(hardware).toBeLessThanOrEqual(6e6);
+    await page.locator('usd-viewer details.menu summary', { hasText: 'View' }).click();
+    await page.locator('usd-viewer .dropdown input[title^="Auto budget"]').fill('1.5');
+    await page.locator('usd-viewer .dropdown input[title^="Auto budget"]').dispatchEvent('change');
+    expect(await budget()).toBe(1.5e6);
+    await page.reload();
+    await open(page, MOCK);
+    expect(await budget()).toBe(1.5e6); // remembered in this browser
+    await page.locator('usd-viewer details.menu summary', { hasText: 'View' }).click();
+    await page.locator('usd-viewer .dropdown button', { hasText: 'Hardware default' }).click();
+    expect(await budget()).toBe(hardware);
+  });
+
   test('the stats show the frame rate and the Help window explains the hierarchy symbols', async ({ page }) => {
     await open(page, MOCK);
     await expect(page.locator('usd-viewer .stats')).toContainText('FPS');

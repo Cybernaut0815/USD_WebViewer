@@ -123,6 +123,74 @@ export class SelectTool implements Tool {
   }
 }
 
+/** True for key events aimed at a text field, which keep their keys. */
+export function typing(e: KeyboardEvent): boolean {
+  const target = e.composedPath()[0] as HTMLElement;
+  return target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+}
+
+const WASD = new Set(['w', 'a', 's', 'd']);
+
+/**
+ * Select, plus W A S D flying the free camera: W / S along the view, A / D sideways. The orbit
+ * target moves along, so orbiting still turns about what is ahead; speed is the distance to it
+ * per second, so zooming in slows the flight. No gizmo, so nothing can be moved.
+ */
+export class NavigateTool extends SelectTool {
+  private keys: AbortController | null = null;
+  private frame = 0;
+
+  activate(viewport: Viewport): void {
+    super.activate(viewport);
+    this.keys = new AbortController();
+    const { signal } = this.keys;
+    const held = new Set<string>();
+    let last = 0;
+    const forward = new THREE.Vector3();
+    const right = new THREE.Vector3();
+    const step = (now: number) => {
+      const dt = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      const view = viewport.view;
+      const target = viewport.controls.target;
+      view.getWorldDirection(forward);
+      right.crossVectors(forward, view.up).normalize();
+      const offset = new THREE.Vector3()
+        .addScaledVector(forward, +held.has('w') - +held.has('s'))
+        .addScaledVector(right, +held.has('d') - +held.has('a'))
+        .setLength(view.position.distanceTo(target) * dt);
+      view.position.add(offset);
+      target.add(offset);
+      viewport.controls.update(); // fires change, which redraws
+      this.frame = held.size ? requestAnimationFrame(step) : 0;
+    };
+    const root = viewport.canvas.getRootNode();
+    root.addEventListener(
+      'keydown',
+      (event) => {
+        const e = event as KeyboardEvent;
+        const key = e.key.toLowerCase();
+        if (!WASD.has(key) || e.ctrlKey || e.metaKey || e.altKey || typing(e) || viewport.cameraPath !== null) return;
+        held.add(key);
+        if (this.frame) return;
+        last = performance.now();
+        this.frame = requestAnimationFrame(step);
+      },
+      { signal },
+    );
+    root.addEventListener('keyup', (e) => held.delete((e as KeyboardEvent).key.toLowerCase()), { signal });
+    addEventListener('blur', () => held.clear(), { signal }); // a key released elsewhere sends no keyup
+  }
+
+  deactivate(): void {
+    this.keys?.abort();
+    this.keys = null;
+    cancelAnimationFrame(this.frame);
+    this.frame = 0;
+    super.deactivate();
+  }
+}
+
 export type TransformMode = 'translate' | 'rotate' | 'scale';
 
 /** A prim being dragged: where it started, and how to turn a world delta into its local matrix. */

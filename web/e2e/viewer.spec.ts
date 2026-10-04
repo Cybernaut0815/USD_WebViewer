@@ -578,6 +578,31 @@ test.describe('mock core', () => {
     expect(result.selection).toEqual(['/World/Cube']);
   });
 
+  test('N toggles navigate, where W flies the camera forward and E R do not pick a gizmo', async ({ page }) => {
+    await open(page, MOCK);
+    const camera = () =>
+      page.evaluate(() => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        const c = viewer.three.camera;
+        return { tool: viewer.tool, position: c.position.toArray(), forward: c.getWorldDirection(c.position.clone()).toArray() };
+      });
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('n');
+    await page.keyboard.press('e');
+    await page.keyboard.press('r');
+    const before = await camera();
+    await page.keyboard.down('w');
+    await page.waitForTimeout(300);
+    await page.keyboard.up('w');
+    const after = await camera();
+    const ahead = after.position.reduce((sum, p, i) => sum + (p - before.position[i]) * before.forward[i], 0);
+    expect(before.tool).toBe('navigate');
+    expect(after.tool).toBe('navigate');
+    expect(ahead).toBeGreaterThan(0.1);
+    await page.keyboard.press('n');
+    expect((await camera()).tool).toBe('select');
+  });
+
   test('save writes dirty layers into the picked folder, which is then watched for changes', async ({ page }) => {
     await page.addInitScript(() => {
       // A fake File System Access directory with one file, controllable from the test.

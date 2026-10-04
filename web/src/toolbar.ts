@@ -4,6 +4,7 @@ import { h } from './props.ts';
 import { DEFAULT_BACKGROUND, hardwareRefineBudget, type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
 import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
+import logo from './usd-logo.svg';
 
 export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLElement {
   const session = viewer.session;
@@ -118,8 +119,8 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
 
   // Editing: tool, edit target, saving.
   const tool = select(
-    'Tool (Q W E R)',
-    [['select', 'Select'], ['translate', 'Move'], ['rotate', 'Rotate'], ['scale', 'Scale']],
+    'Tool (Q W E R; N: navigate with W A S D)',
+    [['select', 'Select'], ['translate', 'Move'], ['rotate', 'Rotate'], ['scale', 'Scale'], ['navigate', 'Navigate']],
     (v) => (viewer.tool = v as ToolName),
   );
   viewer.addEventListener('toolchange', () => (tool.value = viewer.tool));
@@ -284,6 +285,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   const element = h(
     'header',
     { className: 'toolbar' },
+    h('img', { className: 'logo', src: logo, alt: 'USD', title: 'Universal Scene Description' }),
     fileMenu,
     editMenu,
     viewMenu,

@@ -10,14 +10,14 @@ import type { Path, PickResult, StageInfo } from './protocol.ts';
 import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
-import { SelectTool, type TransformMode, TransformTool } from './tools.ts';
+import { NavigateTool, SelectTool, type TransformMode, TransformTool, typing } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
 import type { DisplayMode, SceneStats } from './scene.ts';
 import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
-export type ToolName = 'select' | TransformMode;
+export type ToolName = 'select' | TransformMode | 'navigate';
 export type { OpenOptions, SchemeOptions, UsdStageApi };
 export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event; refinebudgetchange: Event };
 export { DEFAULT_BACKGROUND };
@@ -39,7 +39,7 @@ const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'r
 export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', forest: 'Forest', industrial: 'Industrial', studio: 'Studio' };
 /** The Help window's contents; the key handler in build() implements the keyboard rows. */
 const SHORTCUTS: [string, [string, string][]][] = [
-  ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale']]],
+  ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale'], ['N', 'Navigate: W A S D move the camera; Move, Rotate and Scale are off']]],
   [
     'Selection',
     [
@@ -73,6 +73,7 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Left drag', 'Orbit'],
       ['Right drag', 'Pan'],
       ['Wheel / middle drag', 'Zoom (towards the cursor)'],
+      ['W A S D (navigate)', 'Forward, left, back, right; speed follows the zoom'],
       ['F', 'Frame the selection, or everything'],
       ['H', 'Hide the selection (session layer, not saved)'],
       ['Shift+H', 'Hide everything but the selection'],
@@ -140,6 +141,8 @@ export class UsdViewerElement extends HTMLElement {
   private statsTimer = 0;
   private disposed = false;
   private toolName: ToolName = 'select';
+  /** The tool N returns to when it leaves navigate. */
+  private toolBeforeNavigate: ToolName = 'select';
   /** Between stageopen and stageloaded: the view is framed on the first meshes, then again at the end. */
   private loading = false;
   private framed = false;
@@ -253,7 +256,7 @@ export class UsdViewerElement extends HTMLElement {
     this.viewport.dispose();
   }
 
-  /** The active viewport tool: select, or a transform gizmo (Q W E R). */
+  /** The active viewport tool: select, a transform gizmo (Q W E R), or navigate (N, W A S D flies). */
   get tool(): ToolName {
     return this.toolName;
   }
@@ -262,6 +265,7 @@ export class UsdViewerElement extends HTMLElement {
     this.toolName = name;
     const current = this.viewport.tool;
     if (name === 'select') this.viewport.tool = new SelectTool(this.session);
+    else if (name === 'navigate') this.viewport.tool = new NavigateTool(this.session);
     else if (current instanceof TransformTool) current.setMode(name);
     else this.viewport.tool = new TransformTool(this.session, name);
     this.dispatchEvent(new Event('toolchange'));
@@ -515,15 +519,21 @@ export class UsdViewerElement extends HTMLElement {
     );
     // Keys work from the viewport and the panels, not while typing.
     app.addEventListener('keydown', (e) => {
+      if (typing(e)) return;
       const target = e.composedPath()[0] as HTMLElement;
-      if (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) return;
       const key = e.key.toLowerCase();
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();
       else if (e.ctrlKey && key === 's') this.save().catch(() => {});
-      else if (plain && TOOL_KEYS[key]) this.tool = TOOL_KEYS[key];
+      else if (plain && key === 'n') {
+        if (this.tool === 'navigate') this.tool = this.toolBeforeNavigate;
+        else {
+          this.toolBeforeNavigate = this.tool;
+          this.tool = 'navigate';
+        }
+      } else if (plain && TOOL_KEYS[key] && (this.tool !== 'navigate' || key === 'q')) this.tool = TOOL_KEYS[key]; // navigate owns W
       else if (e.code === 'KeyH' && !e.ctrlKey && !e.metaKey) {
         (e.altKey ? this.showAll() : e.shiftKey ? this.isolate() : this.hide()).catch(() => {});
       } else if (e.key === ' ' && plain && target.tagName !== 'BUTTON') this.session.playing ? this.session.pause() : this.session.play();

@@ -4,8 +4,10 @@ import { defineConfig } from '@playwright/test';
 // canvases cannot be captured reliably, and software GL is the same everywhere.
 export default defineConfig({
   testDir: 'e2e',
+  // The CI runner is about 2.5 times slower than a desktop: double the default timeouts.
+  timeout: 60_000,
   snapshotPathTemplate: '{testDir}/__goldens__/{arg}{ext}',
-  expect: { toHaveScreenshot: { maxDiffPixelRatio: 0.01 } },
+  expect: { timeout: 10_000, toHaveScreenshot: { maxDiffPixelRatio: 0.01 } },
   use: {
     baseURL: 'http://localhost:4173',
     viewport: { width: 1024, height: 640 },

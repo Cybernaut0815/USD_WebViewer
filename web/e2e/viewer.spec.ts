@@ -406,8 +406,7 @@ test.describe('mock core', () => {
     await page.locator('usd-viewer .dropdown input[title^="Auto budget"]').fill('1.5');
     await page.locator('usd-viewer .dropdown input[title^="Auto budget"]').dispatchEvent('change');
     expect(await budget()).toBe(1.5e6);
-    await page.reload();
-    await open(page, MOCK);
+    await open(page, MOCK); // a fresh page load
     expect(await budget()).toBe(1.5e6); // remembered in this browser
     await page.locator('usd-viewer details.menu summary', { hasText: 'View' }).click();
     await page.locator('usd-viewer .dropdown button', { hasText: 'Hardware default' }).click();

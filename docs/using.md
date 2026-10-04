@@ -9,6 +9,7 @@ Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on t
 | Input | Action |
 |---|---|
 | Left drag / right drag / wheel | Orbit / pan / zoom towards the cursor |
+| `N`, then `W` `A` `S` `D` | Navigate mode: fly forward, left, back, right; the zoom sets the speed. `N` again (or `Q`) leaves it |
 | `F` | Frame the selection, or everything |
 | Click | Select one prim; clicking empty space clears the selection |
 | Shift+click | Add a prim and make it the **active** one. On a prim that is already selected, it only makes it active |
@@ -57,6 +58,7 @@ Edits go to the stage's **edit target**. That is the root layer by default; File
 
 - **Transforms**
   - `Q` is Select; `W` / `E` / `R` are Move / Rotate / Scale.
+  - `N` is Navigate: `W` `A` `S` `D` move the camera, and Move / Rotate / Scale are off until you leave it.
   - The gizmo sits at the active prim, and every selected prim follows it. Rotation and scale happen about the active prim's origin.
   - The objects follow the pointer at once, while each step is written to the prims' xform ops:
     - a translate / rotate / scale stack keeps its ops and precision;

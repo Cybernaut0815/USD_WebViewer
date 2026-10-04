@@ -1,6 +1,6 @@
-# USD Web Viewer
+# <img src="web/src/usd-logo.svg" alt="" height="32" align="top"> USD Web Viewer
 
-A browser viewer and light editor for OpenUSD files. The official OpenUSD 26.08, with Hydra 2, OpenSubdiv and MaterialX, runs in a WebAssembly core, and three.js draws the result with WebGPU, falling back to WebGL2.
+A browser viewer and light editor for [OpenUSD](https://openusd.org) (Universal Scene Description) files. The official OpenUSD 26.08, with Hydra 2, OpenSubdiv and MaterialX, runs in a WebAssembly core, and three.js draws the result with WebGPU, falling back to WebGL2.
 
 ![The viewer with Pixar's Kitchen_set: hierarchy, viewport with statistics, and the property panel](docs/UI_preview.png)
 
@@ -18,6 +18,11 @@ A browser viewer and light editor for OpenUSD files. The official OpenUSD 26.08,
 - **A Chromium-based browser** for the full feature set. Saving in place uses the File System Access API.
 
 ## Installation
+
+On Windows, two scripts in the repo root work by double-click:
+
+- **`build.bat`** installs the npm packages and builds the page into `web/dist`. If the wasm core is missing and emsdk is set up (`%EMSDK%`), it builds the SDK and the core first (see [Building the core](#building-the-core)).
+- **`start.bat`** serves `web/dist` at <http://localhost:4173> and opens the browser. It runs `build.bat` first when there is no build, and opens the mock stage when the build has no core. Close its window to stop the server.
 
 All npm commands run inside `web/`; the repo root has no `package.json`.
 
@@ -70,4 +75,8 @@ Tests: `node native/test/smoke.mjs` checks the core under Node, `npm test` the p
 | [Embedding and API](docs/embedding.md) | `<usd-viewer>` element, host page requirements, API, asset sources and gateways |
 | [Architecture and status](docs/architecture.md) | How the page and the core work together, repository layout, what is verified, known limits |
 
-The bundled skies are CC0 HDRIs from [Poly Haven](https://polyhaven.com); see [web/public/skies/LICENSE.md](web/public/skies/LICENSE.md).
+The bundled skies are CC0 HDRIs from [Poly Haven](https://polyhaven.com); see [web/public/skies/LICENSE.md](web/public/skies/LICENSE.md). The USD logo is Pixar's, from [openusd.org](https://openusd.org).
+
+## License
+
+[Apache 2.0 with the Commons Clause](LICENSE): free to use, modify and share, including inside companies, but not to sell, or to sell a product or service whose value comes mainly from this viewer. This makes it source-available rather than OSI open source. Third-party parts keep their own licenses, listed at the top of [LICENSE](LICENSE).

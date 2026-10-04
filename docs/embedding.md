@@ -55,7 +55,7 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |
-| `tool` | `'select' \| 'translate' \| 'rotate' \| 'scale'` |
+| `tool` | `'select' \| 'translate' \| 'rotate' \| 'scale' \| 'navigate'` |
 | `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping` | View settings |
 | `time`, `play()`, `pause()`, `camera` | Animation and stage cameras |
 | `stats` | USD counts of what is drawn, plus `fps` / `frameMs` |

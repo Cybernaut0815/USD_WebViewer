@@ -84,18 +84,3 @@ jobs:
           name: test-results
           path: web/test-results
       - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: web/dist
-
-  deploy:
-    if: github.ref == 'refs/heads/main'
-    needs: web
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-    steps:
-      - uses: actions/deploy-pages@v4

@@ -240,8 +240,9 @@ export class UsdViewerElement extends HTMLElement {
     return this.session.close();
   }
 
-  /** Resolves when no flush is pending, every texture is in, and a frame has been drawn. */
+  /** Resolves when the tool's core calls are done, no flush is pending, every texture is in, and a frame has been drawn. */
   async idle(): Promise<void> {
+    await this.viewport.tool?.idle?.();
     await this.session.idle();
     await this.viewport.sync.settled();
     await this.viewport.nextFrame();

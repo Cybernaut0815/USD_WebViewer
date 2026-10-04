@@ -30,8 +30,9 @@ async function open(page: Page, url: string) {
 
 /** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X. */
 async function dragAlongX(page: Page, path: string) {
-  const [center, alongX] = await page.evaluate((path) => {
+  const [center, alongX] = await page.evaluate(async (path) => {
     const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+    await viewer.idle(); // the gizmo sits on the selection and has been drawn
     const object = viewer.three.objectsFor(path)[0];
     const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
     const world = object.getWorldPosition(object.position.clone());
@@ -833,7 +834,8 @@ test.describe('wasm core', () => {
   test('a host page drives the viewer through the API only', async ({ page }) => {
     await page.goto('/host.html?forceWebGL=1');
     await page.click('#open');
-    await expect(page.locator('#log')).toContainText('opened, up axis Y');
+    // Core startup plus the open take seconds; a slow CI machine outlasts the 5 s default.
+    await expect(page.locator('#log')).toContainText('opened, up axis Y', { timeout: 30_000 });
     await page.click('#select');
     await expect(page.locator('#log')).toContainText('selected /World/Shapes/Sphere (api)');
     await page.click('#move');

@@ -9,6 +9,8 @@ import type { Viewport } from './viewport.ts';
 export interface Tool {
   activate(viewport: Viewport): void;
   deactivate(): void;
+  /** Resolves when the tool's own core calls (gizmo placement, drag writes) are done. */
+  idle?(): Promise<void>;
 }
 
 /**
@@ -222,6 +224,7 @@ export class TransformTool extends SelectTool {
   private pending: XformEntry[] | null = null;
   private inflight: Promise<void> | null = null;
   private listeners: AbortController | null = null;
+  private readonly busy = new Set<Promise<void>>();
   private readonly follow = () => {
     if (this.controls && this.viewport) this.controls.camera = this.viewport.camera;
   };
@@ -251,13 +254,22 @@ export class TransformTool extends SelectTool {
     controls.addEventListener('dragging-changed', (e) => (viewport.controls.enabled = !e.value && viewport.cameraPath === null));
     controls.addEventListener('mouseDown', () => this.grab());
     controls.addEventListener('objectChange', () => this.moved());
-    controls.addEventListener('mouseUp', () => this.release());
+    controls.addEventListener('mouseUp', () => this.track(this.release()));
     this.listeners = new AbortController();
     const { signal } = this.listeners;
     for (const type of ['selectionchange', 'lockchange', 'primschange', 'timechange'] as const) {
-      this.session.addEventListener(type, () => !this.dragging && this.retarget(), { signal });
+      this.session.addEventListener(type, () => !this.dragging && this.track(this.retarget()), { signal });
     }
-    this.retarget();
+    this.track(this.retarget());
+  }
+
+  async idle(): Promise<void> {
+    while (this.busy.size) await Promise.allSettled([...this.busy]);
+  }
+
+  private track(work: Promise<void>): void {
+    this.busy.add(work);
+    work.finally(() => this.busy.delete(work)).catch(() => {});
   }
 
   deactivate(): void {

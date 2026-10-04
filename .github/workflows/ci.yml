@@ -2,6 +2,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 env:
   EMSDK_VERSION: 5.0.7 # the version OpenUSD 26.08 is tested with

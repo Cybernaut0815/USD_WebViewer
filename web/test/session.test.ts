@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { History, modifySelect, selectUpWithSubtree, UsdSession } from '../src/session.ts';
+import { hasAncestorIn, History, modifySelect, selectUpWithSubtree, UsdSession } from '../src/session.ts';
 
 class FakeWorker {
   onmessage: ((event: any) => void) | null = null;
@@ -61,6 +61,22 @@ test('locked prims cover their subtree and drop out of the selection', () => {
   assert.deepEqual(s.selection, ['/c']);
 });
 
+test('open emits stageopen, the deltas, then stageloaded once the first flush is through', async () => {
+  const { worker, s } = session();
+  worker.replies.set('openStage', { ok: true, url: 'x.usda', upAxis: 'Y', metersPerUnit: 1, startTimeCode: 0, endTimeCode: 0, hasTimeRange: false, timeCodesPerSecond: 24, defaultPrim: null, layers: [] });
+  const order: string[] = [];
+  for (const type of ['stageopen', 'delta', 'stageloaded'] as const) s.addEventListener(type, () => order.push(type));
+  await s.open('http://host/x.usda');
+  assert.deepEqual(order, ['stageopen', 'delta', 'stageloaded']);
+});
+
+test('hasAncestorIn walks the path, not the set', () => {
+  assert.equal(hasAncestorIn('/a/b', new Set(['/a'])), true);
+  assert.equal(hasAncestorIn('/a/b', new Set(['/'])), true);
+  assert.equal(hasAncestorIn('/a/b', new Set(['/ab', '/a/b', '/a/b/c'])), false);
+  assert.equal(hasAncestorIn('/', new Set(['/'])), false);
+});
+
 test('edit rejects a failed edit and reports resynced prims otherwise', async () => {
   const { worker, s } = session();
   worker.replies.set('setVisible', { ok: false, error: 'nope', resynced: [] });
@@ -69,7 +85,7 @@ test('edit rejects a failed edit and reports resynced prims otherwise', async ()
   const seen: unknown[] = [];
   s.addEventListener('primschange', (e) => seen.push((e as CustomEvent).detail));
   await s.usd.setVisible('/a', true);
-  assert.deepEqual(seen, [{ resynced: ['/a'], visibility: true }]);
+  assert.deepEqual(seen, [{ resynced: ['/a'], touched: [], visibility: true }]);
 });
 
 test('the change markers follow the list the core reports after each edit', async () => {

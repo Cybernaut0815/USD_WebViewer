@@ -26,6 +26,8 @@ export interface XformEntry {
 export interface UsdStageApi {
   children(path?: Path): Promise<PrimSummary[]>;
   prim(path: Path, time?: number): Promise<PrimInfo>;
+  /** World-space aligned bounds (min xyz, max xyz) of an imageable prim's subtree; null otherwise. */
+  bounds(path: Path, time?: number): Promise<number[] | null>;
   attribute(path: Path, name: string, time?: number): Promise<Json>;
   find(text: string, typeName?: string, limit?: number): Promise<Path[]>;
   /** The prim and everything below it, in traversal order (at most `limit`, default 10,000). */
@@ -46,6 +48,8 @@ export interface UsdStageApi {
   clearAttribute(path: Path, name: string, time?: number): Promise<void>;
   /** Local, parent and world matrices of a prim that can move; null otherwise. `time` defaults to the current frame. */
   xformInfo(path: Path, time?: number): Promise<XformInfo | null>;
+  /** xformInfo for several prims in one call (one transform cache for all of them). */
+  xformInfos(paths: readonly Path[], time?: number): Promise<(XformInfo | null)[]>;
   /** Authors a local matrix (16 numbers in THREE.Matrix4.elements order) at the current frame. */
   setXform(path: Path, matrix: ArrayLike<number>, time?: number): Promise<void>;
   /** Several prims in one undoable edit. */
@@ -123,12 +127,14 @@ export class History extends EventTarget {
 
 export interface UsdSessionEventMap {
   stageopen: CustomEvent<StageInfo>;
+  /** The first flush after stageopen is complete: every prim of the stage has been sent once. */
+  stageloaded: Event;
   stageclose: Event;
   selectionchange: CustomEvent<{ paths: Path[]; source: SelectionSource; active: Path | null }>;
   timechange: CustomEvent<{ time: number }>;
   playchange: Event;
-  /** `visibility`: the edit changed visibility, which no resync reports. */
-  primschange: CustomEvent<{ resynced: Path[]; visibility?: boolean }>;
+  /** `visibility`: the edit changed visibility, which no resync reports; `touched`: every prim it changed. */
+  primschange: CustomEvent<{ resynced: Path[]; touched?: Path[]; visibility?: boolean }>;
   /** Prims were edited for the first time since the stage was opened (see `changed`). */
   changedprims: Event;
   /** Every render delta the core produced, in order; the viewport applies them. */
@@ -164,6 +170,7 @@ export class UsdSession extends EventTarget {
   readonly usd: UsdStageApi = {
     children: (path = '/') => this.core.call('primChildren', path),
     prim: (path, time = this.currentTime) => this.core.call('primDetails', path, time),
+    bounds: (path, time = this.currentTime) => this.core.call('primBounds', path, time),
     attribute: (path, name, time = this.currentTime) => this.core.call('attributeValue', path, name, time),
     find: (text, typeName = '', limit = 500) => this.core.call('findPrims', text, typeName, limit),
     subtree: (path, limit = SUBTREE_LIMIT) => this.core.call('primSubtree', path, limit),
@@ -196,13 +203,16 @@ export class UsdSession extends EventTarget {
       this.recorded(
         () => this.core.call('setAttribute', path, name, JSON.stringify(value), time),
         (previous) => this.restore(path, name, previous, time),
+        name === 'visibility',
       ),
     clearAttribute: (path, name, time = NaN) =>
       this.recorded(
         () => this.core.call('clearAttribute', path, name, time),
         (previous) => (previous === undefined ? null : this.restore(path, name, previous, time)),
+        name === 'visibility',
       ),
     xformInfo: (path, time = this.currentTime) => this.core.call('xformInfo', path, time),
+    xformInfos: (paths, time = this.currentTime) => this.core.call('xformInfos', JSON.stringify(paths), time),
     setXform: (path, matrix, time = this.currentTime) =>
       this.recorded(
         () => this.core.call('setXform', path, [...(matrix as number[])], time),
@@ -315,6 +325,7 @@ export class UsdSession extends EventTarget {
     this.stage = info;
     this.emit('stageopen', info);
     await this.flush(info.hasTimeRange ? info.startTimeCode : NaN);
+    if (this.stage === info) this.dispatchEvent(new Event('stageloaded'));
     if (this.handles.size) this.watchTimer = window.setInterval(() => this.checkDisk(), 2000);
     return info;
   }
@@ -513,11 +524,24 @@ export class UsdSession extends EventTarget {
 
   /* ---------- core traffic ---------- */
 
-  /** Runs flushes one at a time; the latest requested time wins. Deltas go out as `delta` events. */
+  /**
+   * Runs flushes one at a time; the latest requested time wins. Deltas go out as `delta` events.
+   * A flush arrives in pages: a small first one for a quick first picture, then larger ones that
+   * still leave room for other calls in between. One page is requested ahead of the one being
+   * applied, so the core converts while the page uploads.
+   */
   flush(time?: number): Promise<void> {
     if (time !== undefined) this.wantedTime = time;
     this.needFlush = true;
     this.pumping ??= (async () => {
+      let next: Promise<RenderDelta> | null = null;
+      const apply = (delta: RenderDelta) => {
+        if (delta.refineLevel !== undefined && delta.refineLevel !== this.effectiveRefineLevel) {
+          this.effectiveRefineLevel = delta.refineLevel;
+          this.emit('refinechange', { level: this.refineLevel });
+        }
+        this.emit('delta', delta);
+      };
       try {
         while (this.needFlush && !this.disposed) {
           this.needFlush = false;
@@ -526,18 +550,20 @@ export class UsdSession extends EventTarget {
             this.core.call('setTime', this.wantedTime);
             this.wantedTime = undefined;
           }
-          let delta;
-          do {
-            delta = await this.core.call('flush', 2000);
-            if (delta.refineLevel !== undefined && delta.refineLevel !== this.effectiveRefineLevel) {
-              this.effectiveRefineLevel = delta.refineLevel;
-              this.emit('refinechange', { level: this.refineLevel });
-            }
-            this.emit('delta', delta);
-          } while (delta.more);
+          let page = 0;
+          next = this.core.call('flush', FLUSH_PAGES[0]);
+          while (next) {
+            const delta: RenderDelta = await next;
+            page++;
+            next = delta.more && !this.disposed ? this.core.call('flush', FLUSH_PAGES[Math.min(page, FLUSH_PAGES.length - 1)]) : null;
+            next?.catch(() => {}); // a listener throwing below must not leave it unhandled
+            apply(delta);
+          }
         }
       } catch (error: any) {
         this.report('error', error.message);
+        // The core has already dropped the prefetched page's prims from its dirty set: deliver it.
+        if (next) await next.then(apply).catch(() => {});
       } finally {
         this.pumping = null;
       }
@@ -555,7 +581,7 @@ export class UsdSession extends EventTarget {
     this.setDirty(result.dirty ?? []);
     if (result.changed) this.setChanged(result.changed);
     await this.flush();
-    if (!options.quiet) this.emit('primschange', { resynced: result.resynced, visibility: options.visibility });
+    if (!options.quiet) this.emit('primschange', { resynced: result.resynced, touched: result.touched ?? [], visibility: options.visibility });
     return result;
   }
 
@@ -658,11 +684,20 @@ export class UsdSession extends EventTarget {
   }
 }
 
+/** Geometry prims per flush page: the first page is small so the first picture is quick. */
+const FLUSH_PAGES = [128, 512, 1000];
+
 /** add: Shift; remove: Ctrl; up: Shift+Ctrl adds the nearest ancestor that is not selected yet. */
 export type SelectMode = 'replace' | 'add' | 'remove' | 'up';
 
 /** Shift+Alt selects at most this many prims of a subtree. */
 export const SUBTREE_LIMIT = 10000;
+
+/** True when `set` holds an ancestor of `path` (the pseudo-root counts). Linear in the depth, not in the set. */
+export function hasAncestorIn(path: Path, set: ReadonlySet<Path>): boolean {
+  for (let i = path.lastIndexOf('/'); i > 0; i = path.lastIndexOf('/', i - 1)) if (set.has(path.slice(0, i))) return true;
+  return set.has('/') && path !== '/';
+}
 
 /** The nearest ancestor of `path` (below the pseudo-root) not in `selected`; undefined when all are. */
 function unselectedAncestor(path: Path, selected: ReadonlySet<Path>): Path | undefined {

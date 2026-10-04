@@ -32,6 +32,7 @@ import type {
   Rid,
   Subset,
 } from './protocol.ts';
+import { hasAncestorIn } from './session.ts';
 import * as units from './units.ts';
 
 const GREY = [0.18, 0.18, 0.18];
@@ -55,6 +56,10 @@ interface Item {
   flat: boolean; // no normals available
   doubleSided: boolean;
   instances: Float32Array | null;
+  /** The instance matrices as the line overlays read them (shared by every overlay of the item). */
+  instanceBuffer: THREE.InstancedInterleavedBuffer | null;
+  /** Overlays of an instanced item sit in root, not under its object: dropped with the object. */
+  overlays: THREE.Object3D[];
   curves: { points?: Float32Array; counts?: Uint32Array; widths?: Float32Array | null; colors?: Float32Array | null };
   lightType: string;
   lightParams: LightParams | null;
@@ -108,6 +113,8 @@ export class SceneSync {
   /** Items a drag moves ahead of the core, with the world matrix they started from. */
   private preview = new Map<Rid, { item: Item; start: THREE.Matrix4 }>();
   private lastBoundsBump = 0;
+  /** What the pages of the current flush changed; the per-item passes run once, on its last page. */
+  private pending = { rebuilt: false, structural: false, lights: false, selected: false, visibility: false, moved: false };
   private domeRid: Rid = 0;
   private studio: THREE.Texture | null = null;
   private sky: THREE.Texture | null = null;
@@ -137,7 +144,10 @@ export class SceneSync {
   apply(delta: RenderDelta): void {
     delta.removed?.forEach((rid) => this.remove(rid));
     delta.materials?.forEach((entry) => this.material(entry));
-    delta.meshes?.forEach((entry) => this.mesh(entry));
+    let rebuilt = !!delta.removed;
+    delta.meshes?.forEach((entry) => {
+      rebuilt = this.mesh(entry) || rebuilt;
+    });
     delta.curves?.forEach((entry) => this.curves(entry));
     delta.points?.forEach((entry) => this.points(entry));
     delta.lights?.forEach((entry) => this.light(entry));
@@ -164,22 +174,45 @@ export class SceneSync {
         this.updateVisible(item);
       });
     }
-    // Rebuilt meshes are new objects, so the overlays are redone with them; instanced overlays
-    // live outside their mesh and take its visibility when built.
-    const rebuilt = delta.meshes || delta.removed;
     if (delta.selected) this.selected = delta.selected;
-    if (delta.selected || (this.selected.length && rebuilt)) this.highlight(this.selected);
-    if (rebuilt) this.wireframes();
-    else if (delta.visibility) this.syncOverlayVisibility();
-    if (delta.lights || delta.removed) this.updateEnvironment();
-    // The version drives a walk over every object (bounds, shadow fit): structural changes bump
-    // it at once, moving objects at most twice a second.
-    const structural = !!(delta.removed || delta.meshes || delta.curves || delta.points || delta.lights || delta.cameras);
+    const p = this.pending;
+    p.rebuilt ||= rebuilt;
+    p.structural ||= rebuilt || !!(delta.curves || delta.points || delta.lights || delta.cameras);
+    p.lights ||= !!(delta.lights || delta.removed);
+    p.selected ||= !!delta.selected;
+    p.visibility ||= !!delta.visibility;
+    p.moved ||= !!(delta.xforms || delta.meshes);
+    // Items draw as they arrive; the passes over every item below run once per flush, on its last
+    // page. The bounds (clip planes, shadow fit) still follow the pages, at most twice a second.
     const now = performance.now();
-    if (structural || (delta.xforms && now - this.lastBoundsBump > 500)) {
+    if (delta.more) {
+      if ((p.structural || p.moved) && now - this.lastBoundsBump > 500) {
+        this.version++;
+        this.lastBoundsBump = now;
+      }
+      this.invalidate();
+      return;
+    }
+    this.pending = { rebuilt: false, structural: false, lights: false, selected: false, visibility: false, moved: false };
+    // Rebuilt meshes are new objects, so the overlays are redone with them; instanced overlays
+    // live outside their mesh and take its visibility when built. A deforming mesh keeps its
+    // objects, so its overlays (which share the geometry) need nothing.
+    if (p.selected || (this.selected.length && p.rebuilt)) this.highlight(this.selected);
+    if (p.rebuilt) this.wireframes();
+    else if (p.visibility) this.syncOverlayVisibility();
+    if (p.lights) this.updateEnvironment();
+    // The version drives a walk over every object (bounds, shadow fit): structural changes bump
+    // it at once, moving or deforming objects at most twice a second.
+    if (p.structural || (p.moved && now - this.lastBoundsBump > 500)) {
       this.version++;
       this.lastBoundsBump = now;
     }
+    this.invalidate();
+  }
+
+  /** Redraws, and renders the sun's shadow map again: the stage's content changed (camera moves do not come here). */
+  private invalidate(): void {
+    if (this.sun) this.sun.shadow.needsUpdate = true;
     this.host.invalidate();
   }
 
@@ -187,7 +220,7 @@ export class SceneSync {
   touch(): void {
     this.version++;
     this.lastBoundsBump = performance.now();
-    this.host.invalidate();
+    this.invalidate();
   }
 
   /* ---------- drag prediction ---------- */
@@ -198,18 +231,18 @@ export class SceneSync {
    */
   beginPreview(paths: Path[]): void {
     this.preview.clear();
-    const under = (path: Path, root: Path) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`);
+    const roots = new Set(paths);
     for (const item of this.items.values()) {
       // ponytail: instanced prims and lights wait for the core (instance matrices and light rigs are built there).
       if (!item.object || item.instances || item.kind === 'light' || item.kind === 'camera') continue;
-      if (paths.some((root) => under(item.path, root))) this.preview.set(item.rid, { item, start: item.matrix.clone() });
+      if (roots.has(item.path) || hasAncestorIn(item.path, roots)) this.preview.set(item.rid, { item, start: item.matrix.clone() });
     }
   }
 
   /** World-space delta since the drag started, applied to every previewed object. */
   previewDelta(delta: THREE.Matrix4): void {
     for (const { item, start } of this.preview.values()) item.object!.matrix.multiplyMatrices(delta, start);
-    this.host.invalidate();
+    this.invalidate();
   }
 
   endPreview(): void {
@@ -247,6 +280,7 @@ export class SceneSync {
     this.wireframes();
     this.textures.dispose();
     this.updateEnvironment();
+    this.version++; // the next stage must not inherit this one's bounds
   }
 
   /** Resolves once every material and texture requested so far has finished loading. */
@@ -264,7 +298,7 @@ export class SceneSync {
     this.purposes = new Set(purposes);
     for (const item of this.items.values()) this.updateVisible(item);
     this.syncOverlayVisibility();
-    this.host.invalidate();
+    this.invalidate();
   }
 
   setDisplayMode(mode: DisplayMode): void {
@@ -273,7 +307,7 @@ export class SceneSync {
     for (const item of this.items.values()) if (item.kind === 'mesh') this.assign(item);
     this.highlight(this.selected);
     this.wireframes();
-    this.host.invalidate();
+    this.invalidate();
   }
 
   /** Edge overlays on every mesh, or none, depending on the display mode. */
@@ -314,7 +348,7 @@ export class SceneSync {
     if (path === this.activePath) return;
     this.activePath = path;
     if (this.selected.length) this.highlight(this.selected);
-    this.host.invalidate();
+    this.invalidate();
   }
 
   setCullBackfaces(cull: boolean): void {
@@ -325,7 +359,7 @@ export class SceneSync {
       item.own = null;
       this.assign(item);
     }
-    this.host.invalidate();
+    this.invalidate();
   }
 
   cameras(): { path: Path; params: CameraParams; matrix: THREE.Matrix4 }[] {
@@ -372,6 +406,8 @@ export class SceneSync {
         flat: false,
         doubleSided: false,
         instances: null,
+        instanceBuffer: null,
+        overlays: [],
         curves: {},
         lightType: '',
         lightParams: null,
@@ -402,6 +438,10 @@ export class SceneSync {
 
   private detach(item: Item): void {
     if (!item.object) return;
+    // Root-level overlays would otherwise keep drawing (and re-uploading) the disposed geometry
+    // until the flush's last page rebuilds them; disposing twice is harmless.
+    for (const proxy of item.overlays) dispose(proxy);
+    item.overlays = [];
     this.root.remove(item.object);
     item.object.traverse((o) => (o as any).isLight && (o as THREE.Light).dispose());
     if ((item.object as THREE.InstancedMesh).isInstancedMesh) (item.object as THREE.InstancedMesh).dispose();
@@ -442,7 +482,7 @@ export class SceneSync {
       for (const item of this.items.values()) {
         if (item.material === entry.rid || item.subsets?.some((s) => s.material === entry.rid)) this.assign(item);
       }
-      this.host.invalidate();
+      this.invalidate();
     });
   }
 
@@ -486,10 +526,12 @@ export class SceneSync {
 
   /* ---------- meshes ---------- */
 
-  private mesh(e: MeshEntry): void {
+  /** True when the item's object was replaced, or its instance matrices changed in place: its overlays are stale. */
+  private mesh(e: MeshEntry): boolean {
     const item = this.item(e, 'mesh');
     let rebuild = !item.object;
     let restyle = false;
+    let moved = false;
     if (e.displayColor || e.displayOpacity !== undefined) {
       item.displayColor = e.displayColor ?? item.displayColor;
       item.displayOpacity = e.displayOpacity ?? item.displayOpacity;
@@ -515,11 +557,14 @@ export class SceneSync {
       rebuild = true;
     }
     const g = item.geometry;
-    if (!g) return;
+    if (!g) return false;
     if (e.positions) {
       stream(g, 'position', e.positions, 3);
       g.computeBoundingBox();
-      g.computeBoundingSphere();
+      // The sphere around the box: conservative, fine for culling and the pick pre-test, and
+      // two passes over the vertices cheaper than computeBoundingSphere (per frame when deforming).
+      g.boundingSphere ??= new THREE.Sphere();
+      g.boundingBox!.getBoundingSphere(g.boundingSphere);
     }
     if (e.counts) item.counts = e.counts;
     if (e.edges) {
@@ -560,22 +605,32 @@ export class SceneSync {
       if (same && !rebuild) {
         (mesh!.instanceMatrix.array as Float32Array).set(e.instances!);
         mesh!.instanceMatrix.needsUpdate = true;
+        if (item.instanceBuffer) item.instanceBuffer.needsUpdate = true;
         mesh!.computeBoundingSphere();
+        moved = true;
       } else rebuild = true;
     }
     if (rebuild) {
       const materials = this.materialsFor(item, !!g.attributes.color);
       let object: THREE.Mesh;
       if (item.instances) {
-        const count = item.instances.length / 16;
-        const instanced = new THREE.InstancedMesh(g, materials, count);
+        // Built with one instance: the attribute below replaces the constructor's own array.
+        const instanced = new THREE.InstancedMesh(g, materials, 1);
         instanced.instanceMatrix = new THREE.InstancedBufferAttribute(item.instances, 16);
+        instanced.count = item.instances.length / 16;
         instanced.computeBoundingSphere();
+        item.instanceBuffer = new THREE.InstancedInterleavedBuffer(item.instances, 16, 1);
         object = instanced;
-      } else object = new THREE.Mesh(g, materials);
+      } else {
+        item.instanceBuffer = null;
+        object = new THREE.Mesh(g, materials);
+      }
       object.castShadow = object.receiveShadow = true;
       this.attach(item, object);
-    } else if (restyle) this.assign(item);
+      return true;
+    }
+    if (restyle) this.assign(item);
+    return moved;
   }
 
   /* ---------- curves ---------- */
@@ -674,6 +729,9 @@ export class SceneSync {
           directional.castShadow = true;
           directional.shadow.mapSize.set(2048, 2048);
           directional.shadow.bias = -0.0005;
+          // The map is view independent: rendered when the content changes (invalidate()), not per frame.
+          directional.shadow.autoUpdate = false;
+          directional.shadow.needsUpdate = true;
           directional.userData.rid = item.rid;
           this.sun = directional;
         }
@@ -740,7 +798,7 @@ export class SceneSync {
       this.scene.backgroundIntensity = intensity;
       this.scene.environmentRotation.set(0, 0, 0);
       this.scene.backgroundRotation.set(0, 0, 0);
-      this.host.invalidate();
+      this.invalidate();
     };
     if (this.sky) {
       this.sky.mapping = THREE.EquirectangularReflectionMapping;
@@ -793,9 +851,12 @@ export class SceneSync {
     if (item.kind !== 'mesh' || !item.object || !item.geometry) return null;
     let proxy: THREE.Mesh;
     if (item.instances) {
-      const matrices = pickInstances(item.instances, instances);
-      const instanced = new THREE.InstancedMesh(item.geometry, material, matrices.length / 16);
-      instanced.instanceMatrix = new THREE.InstancedBufferAttribute(matrices, 16);
+      const source = item.object as THREE.InstancedMesh;
+      const instanced = new THREE.InstancedMesh(item.geometry, material, 1);
+      // The whole item shares the mesh's own matrices (no copy); a partial selection picks its own.
+      instanced.instanceMatrix =
+        instances || !source.isInstancedMesh ? new THREE.InstancedBufferAttribute(pickInstances(item.instances, instances), 16) : source.instanceMatrix;
+      instanced.count = instances ? instances.length : item.instances.length / 16;
       proxy = instanced;
     } else proxy = new THREE.Mesh(item.geometry, material);
     // With subsets the geometry has groups; a single material ignores them only when unset.
@@ -807,9 +868,11 @@ export class SceneSync {
   private lines(item: Item, material: THREE.LineBasicNodeMaterial, instances?: Uint32Array): THREE.LineSegments | null {
     if (item.kind !== 'mesh' || !item.object || !item.edges) return null;
     if (!item.instances) return this.place(item, new THREE.LineSegments(item.edges, material));
-    const matrices = pickInstances(item.instances, instances);
-    const proxy = new THREE.LineSegments(item.edges, instancedLines(material, matrices));
-    (proxy as any).count = matrices.length / 16; // the renderer draws `count` instances of any object
+    const buffer = instances
+      ? new THREE.InstancedInterleavedBuffer(pickInstances(item.instances, instances), 16, 1)
+      : (item.instanceBuffer ??= new THREE.InstancedInterleavedBuffer(item.instances, 16, 1));
+    const proxy = new THREE.LineSegments(item.edges, instancedLines(material, buffer));
+    (proxy as any).count = buffer.count; // the renderer draws `count` instances of any object
     proxy.userData.ownsMaterial = true;
     return this.place(item, proxy);
   }
@@ -828,6 +891,7 @@ export class SceneSync {
       proxy.frustumCulled = false;
       proxy.visible = item.object!.visible;
       proxy.userData.item = item;
+      item.overlays.push(proxy);
       this.root.add(proxy);
     } else item.object!.add(proxy);
     proxy.raycast = () => {};
@@ -838,7 +902,7 @@ export class SceneSync {
 
 /* ---------- helpers ---------- */
 
-/** 16 floats per chosen instance (all when `picked` is omitted). */
+/** 16 floats per chosen instance (a copy of all of them when `picked` is omitted). */
 function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
   if (!picked) return all.slice();
   const matrices = new Float32Array(picked.length * 16);

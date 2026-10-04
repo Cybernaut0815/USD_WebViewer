@@ -26,6 +26,8 @@ public:
     /// Computed visibility of each path in a JSON array (true for non-imageable or missing prims).
     std::string Visibility(const std::string& pathsJson) const;          // bool[]
     std::string Details(const std::string& path, double time) const;       // PrimInfo
+    /// World-space aligned bounds of an imageable prim's subtree (min xyz, max xyz), or null.
+    std::string Bounds(const std::string& path, double time) const; // number[6] | null
     std::string AttributeValue(const std::string& path, const std::string& name, double time) const;
     std::string Find(const std::string& text, const std::string& typeName, int limit) const; // Path[]
     /// The prim and everything below it, in traversal order, at most `limit` paths.
@@ -35,6 +37,8 @@ public:
 
     /// Local, parent-to-world and world matrices of an xformable prim (instance proxies: their instance).
     std::string XformInfo(const std::string& path, double time) const; // XformInfo | null
+    /// The same for a JSON array of paths, sharing one transform cache. // (XformInfo | null)[]
+    std::string XformInfos(const std::string& pathsJson, double time) const;
     std::string ListLayers() const;                                      // LayerInfo[]
     /// Bytes of a layer as "usda" or "usdc" text/binary, or the whole stage flattened ("flat").
     bool ExportLayer(const std::string& identifier, const std::string& format, std::string* bytes) const;

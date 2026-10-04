@@ -77,8 +77,9 @@ const api = {
     primvars: [{ name: 'displayColor', typeName: 'color3f[]', interpolation: 'constant', elementSize: 1, indexed: false, value: [[0.8, 0.2, 0.2]], authored: true }],
     arcs: [{ type: 'root', layer: '', introducedAt: '', target: path, targetLayer: 'mock.usda', ancestral: false, implicit: false, hasSpecs: true }],
     refinement: TYPES[path] === 'Mesh' ? { enabled: false, level: 0 } : null,
-    relationships: [], variantSets: [], boundMaterial: null, worldXform: translate(0, 0, 0), worldBounds: null, primStack: [{ layer: 'mock.usda', path }],
+    relationships: [], variantSets: [], boundMaterial: null, worldXform: translate(0, 0, 0), primStack: [{ layer: 'mock.usda', path }],
   }),
+  primBounds: (path) => (path === '/World/Cube' ? [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5] : null),
   exportPrim: (path) => `def Xform "${path.split('/').pop()}"\n{\n}\n`,
   setRefinement: () => edited(),
   clearRefinement: () => edited(),
@@ -160,6 +161,7 @@ const api = {
   clearAttribute: () => edited(),
   clearSessionEdits: () => ({ ok: true, resynced: [], dirty: [] }),
   xformInfo: (path) => (path === '/World/Cube' ? { path, local: cubeMatrix(), parent: translate(0, 0, 0), world: cubeMatrix(), resets: false } : null),
+  xformInfos: (json, t) => JSON.parse(json).map((path) => api.xformInfo(path, t)),
   setXform(path, m) {
     if (path !== '/World/Cube') return { ok: false, error: 'not xformable', resynced: [], dirty: [] };
     const previous = cubeMatrix();

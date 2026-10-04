@@ -391,10 +391,9 @@ export const ACTIVE_LINE = new THREE.LineBasicNodeMaterial({ color: 0xff6a6a });
 /** Wireframe mode: the surface is not drawn but stays pickable. */
 export const HIDDEN = new THREE.MeshBasicNodeMaterial({ visible: false });
 
-/** A copy of a line material that places instance i with matrices[16i..16i+16] (draw with object.count = instances). */
-export function instancedLines(base: THREE.LineBasicNodeMaterial, matrices: Float32Array): THREE.Material {
+/** A copy of a line material that places instance i with the matrix at buffer[16i..16i+16] (draw with object.count = instances). */
+export function instancedLines(base: THREE.LineBasicNodeMaterial, buffer: THREE.InstancedInterleavedBuffer): THREE.Material {
   const m = base.clone();
-  const buffer = new THREE.InstancedInterleavedBuffer(matrices, 16, 1);
   const column = (offset: number): Node => instancedBufferAttribute(buffer as any, 'vec4', 16, offset);
   m.positionNode = mat4(column(0), column(4), column(8), column(12)).mul(vec4(positionGeometry, 1)).xyz;
   return m;

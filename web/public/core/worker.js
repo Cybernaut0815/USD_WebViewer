@@ -7,7 +7,8 @@ let drops = 0;
 const boot = (async () => {
   const { default: createCore } = await import('./usdcore.js');
   core = await createCore();
-  const threads = Math.min(8, navigator.hardwareConcurrency || 4);
+  // ponytail: 4 measured faster than 8 for the mesh build (allocator contention); raise once mimalloc is measured.
+  const threads = Math.min(4, navigator.hardwareConcurrency || 4);
   core.init(threads);
   return { usd: core.usdVersion(), threads };
 })();

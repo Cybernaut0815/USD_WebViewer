@@ -90,8 +90,10 @@ export class Props {
   oncopy: (text: Promise<string>) => void = () => {};
   /** Right click on a value box: the host shows these copy choices. */
   oncontext: (x: number, y: number, choices: CopyChoice[]) => void = () => {};
-  /** Full value of an attribute, for copying what the panel shows truncated. */
+  /** Full value of an attribute, for copying what the panel shows truncated and for loading array values on demand. */
   attributeValue: (path: Path, name: string) => Promise<Json> = () => Promise.resolve(null);
+  /** World bounds of a prim (min xyz, max xyz): a subtree walk, asked for only while its section is open. */
+  bounds: (path: Path) => Promise<number[] | null> = () => Promise.resolve(null);
   /** Which sections the user folded or unfolded; kept when another prim is shown. */
   private readonly folded = new Map<string, boolean>();
 
@@ -221,14 +223,37 @@ export class Props {
         { name: 'worldTransform', typeName: 'matrix4d', text: `( ${rows.map((r) => `(${r.join(', ')})`).join(', ')} )` },
         h('table', { className: 'matrix' }, ...rows.map((r) => h('tr', {}, ...r.map((c) => h('td', {}, c))))),
       );
-      const transform: (Node | string)[][] = [['Matrix', matrix]];
-      if (info.worldBounds) {
-        const b = info.worldBounds.map((v) => format(v));
-        transform.push(['Bounds min', box({ name: 'boundsMin', typeName: 'double3', text: `(${b.slice(0, 3).join(', ')})` })]);
-        transform.push(['Bounds max', box({ name: 'boundsMax', typeName: 'double3', text: `(${b.slice(3).join(', ')})` })]);
-      }
-      parts.push(this.section('World transform', false, table(transform)));
+      const transform = table([['Matrix', matrix]]);
+      const details = this.section('World transform', false, transform) as HTMLDetailsElement;
+      // Bounds walk the prim's subtree in the core: fetched once, and only while the section is open.
+      let asked = false;
+      const fill = async () => {
+        if (asked) return;
+        asked = true;
+        const b = (await this.bounds(s.path))?.map((v) => format(v));
+        if (!b || !details.isConnected) return;
+        transform.append(
+          h('tr', {}, h('td', {}, 'Bounds min'), h('td', {}, box({ name: 'boundsMin', typeName: 'double3', text: `(${b.slice(0, 3).join(', ')})` }))),
+          h('tr', {}, h('td', {}, 'Bounds max'), h('td', {}, box({ name: 'boundsMax', typeName: 'double3', text: `(${b.slice(3).join(', ')})` }))),
+        );
+      };
+      if (details.open) fill();
+      else details.addEventListener('toggle', () => details.open && fill(), { once: true });
+      parts.push(details);
     }
+    // Numeric arrays arrive as null (the core does not decode them for the panel): a link loads the head.
+    const lazyArray = (name: string, typeName: string, path: Path) => {
+      const load = h('a', { href: '#', title: 'Load the first values' }, 'load…');
+      const el = box({ name, typeName, text: '', full: async () => usdaText(await this.attributeValue(path, name), typeName) }, load);
+      load.addEventListener('click', async (event) => {
+        event.preventDefault();
+        const value = await this.attributeValue(path, name);
+        const text = format(Array.isArray(value) && value.length > 16 ? { length: value.length, head: value.slice(0, 16) } : value);
+        el.textContent = text;
+        copies.get(el)!.text = text;
+      });
+      return el;
+    };
     if (info.attributes.length) {
       const rows: (Node | string)[][] = [];
       for (const a of info.attributes) {
@@ -238,12 +263,14 @@ export class Props {
         if (a.variability === 'uniform') name.append(h('span', { className: 'badge', title: 'uniform (not time varying)' }, 'U'));
         const value = a.connections?.length
           ? box({ name: `${a.name}.connect`, typeName: a.typeName, text: a.connections.map((c) => `<${c}>`).join(', ') }, ...a.connections.map(link))
-          : box({
-              name: a.name,
-              typeName: a.typeName,
-              text: format(a.value),
-              full: async () => usdaText(await this.attributeValue(s.path, a.name), a.typeName),
-            });
+          : a.value === null && a.authored && a.typeName.endsWith('[]')
+            ? lazyArray(a.name, a.typeName, s.path)
+            : box({
+                name: a.name,
+                typeName: a.typeName,
+                text: format(a.value),
+                full: async () => usdaText(await this.attributeValue(s.path, a.name), a.typeName),
+              });
         const metadata = Object.entries(a.metadata);
         const row = h('tr', {}, h('td', {}, name), h('td', {}, h('span', { className: 'type' }, a.typeName)), h('td', {}, value));
         if (metadata.length) {
@@ -269,12 +296,15 @@ export class Props {
               const name = h('span', { className: p.inheritedFrom ? 'fallback' : '', title: p.inheritedFrom ? `inherited from ${p.inheritedFrom}` : '' }, p.name);
               if (p.indexed) name.append(h('span', { className: 'badge', title: 'indexed' }, 'I'));
               const decl = `${p.typeName} ${p.interpolation}${p.elementSize !== 1 ? ` ×${p.elementSize}` : ''}`;
-              const value = box({
-                name: `primvars:${p.name}`,
-                typeName: p.typeName,
-                text: format(p.value),
-                full: async () => usdaText(await this.attributeValue(p.inheritedFrom ?? s.path, `primvars:${p.name}`), p.typeName),
-              });
+              const value =
+                p.value === null && p.authored && p.typeName.endsWith('[]')
+                  ? lazyArray(`primvars:${p.name}`, p.typeName, p.inheritedFrom ?? s.path)
+                  : box({
+                      name: `primvars:${p.name}`,
+                      typeName: p.typeName,
+                      text: format(p.value),
+                      full: async () => usdaText(await this.attributeValue(p.inheritedFrom ?? s.path, `primvars:${p.name}`), p.typeName),
+                    });
               return [name, h('span', { className: 'type' }, decl), value];
             }),
           ),

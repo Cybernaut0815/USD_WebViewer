@@ -55,6 +55,9 @@ target_link_options(usdcore PRIVATE
     -pthread -fexceptions -lembind -lworkerfs.js --no-entry
     -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=worker,node
     -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB
+    # Meshes are read and built on all threads; the default allocator's one lock makes 8 threads
+    # slower than 4. mimalloc keeps per-thread heaps.
+    -sMALLOC=mimalloc
     # USD recurses deeply (composition, value parsing); the 64 KB default overflows silently.
     -sSTACK_SIZE=8MB -sDEFAULT_PTHREAD_STACK_SIZE=2MB
     -sPTHREAD_POOL_SIZE=8

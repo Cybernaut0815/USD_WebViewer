@@ -3,7 +3,7 @@ import * as THREE from 'three/webgpu';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type { Path, XformInfo } from './protocol.ts';
 import type { UsdSession, XformEntry } from './session.ts';
-import { modifySelect, type SelectMode, selectUpWithSubtree } from './session.ts';
+import { hasAncestorIn, modifySelect, type SelectMode, selectUpWithSubtree } from './session.ts';
 import type { Viewport } from './viewport.ts';
 
 export interface Tool {
@@ -149,6 +149,7 @@ export class TransformTool extends SelectTool {
   private anchor: XformInfo | null = null;
   private targets: Target[] = [];
   private dragging = false;
+  private retargetSeq = 0; // the latest retarget wins; earlier answers are dropped
   private last: XformEntry[] | null = null;
   private pending: XformEntry[] | null = null;
   private inflight: Promise<void> | null = null;
@@ -220,11 +221,15 @@ export class TransformTool extends SelectTool {
     const session = this.session;
     const chosen = session.selection.filter((p) => !session.isLocked(p));
     // A prim moves with its selected ancestor; moving both would apply the offset twice.
-    const roots = chosen.filter((p) => !chosen.some((q) => q !== p && p.startsWith(q === '/' ? '/' : `${q}/`)));
-    const infos = (await Promise.all(roots.map((p) => session.usd.xformInfo(p)))).filter((i): i is XformInfo => i !== null);
-    if (this.dragging) return; // a drag started meanwhile; it keeps its targets
+    const set = new Set(chosen);
+    const roots = chosen.filter((p) => !hasAncestorIn(p, set));
+    const seq = ++this.retargetSeq;
+    const infos = roots.length ? (await session.usd.xformInfos(roots)).filter((i): i is XformInfo => i !== null) : [];
+    if (seq !== this.retargetSeq || this.dragging) return; // superseded, or a drag started meanwhile and keeps its targets
     // Two selected paths can resolve to one editable prim (instance proxies): keep the first.
-    this.infos = infos.filter((info, i) => infos.findIndex((o) => o.path === info.path) === i);
+    const byPath = new Map<Path, XformInfo>();
+    for (const info of infos) if (!byPath.has(info.path)) byPath.set(info.path, info);
+    this.infos = [...byPath.values()];
     const active = session.active;
     this.anchor = (active && this.infos.find((i) => active === i.path || active.startsWith(`${i.path}/`))) || this.infos[0] || null;
     if (!this.controls) return;

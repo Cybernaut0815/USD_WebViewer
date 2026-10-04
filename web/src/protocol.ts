@@ -35,6 +35,8 @@ export interface CoreApi {
   /** Computed visibility of each path (true for non-imageable or missing prims). */
   primVisibility(pathsJson: string): boolean[];
   primDetails(path: Path, time: number): PrimInfo;
+  /** World-space aligned bounds of an imageable prim's subtree (min xyz, max xyz); null otherwise. */
+  primBounds(path: Path, time: number): number[] | null;
   attributeValue(path: Path, name: string, time: number): Json;
   findPrims(text: string, typeName: string, limit: number): Path[];
   /** The prim and everything below it, in traversal order, at most `limit` paths. */
@@ -74,6 +76,8 @@ export interface CoreApi {
   clearSessionEdits(): Edit;
   /** Matrices of an xformable prim (instance proxies: their instance); null for other prims. */
   xformInfo(path: Path, time: number): XformInfo | null;
+  /** The same for a JSON array of paths, computed with one shared transform cache. */
+  xformInfos(pathsJson: string, time: number): (XformInfo | null)[];
   /** Authors a local matrix (16 numbers, row-major like THREE.Matrix4.elements); `previous` is the old local matrix. */
   setXform(path: Path, matrix: number[], time: number): Edit;
   /** Several prims in one edit: JSON of `{ path, matrix }[]`; `previous` lists the old local matrices in order. */
@@ -123,7 +127,8 @@ export interface PrimSummary {
 export interface AttributeInfo {
   name: string;
   typeName: string;
-  value: Json; // long arrays are truncated: { length, head }
+  /** Long arrays are truncated: { length, head }. Numeric arrays are null: the panel fetches them with attributeValue on demand. */
+  value: Json;
   authored: boolean;
   timeSamples: number;
   custom: boolean;
@@ -138,8 +143,9 @@ export interface PrimvarInfo {
   interpolation: string;
   elementSize: number;
   indexed: boolean;
-  value: Json; // truncated like AttributeInfo.value
-  indices?: Json;
+  value: Json; // truncated like AttributeInfo.value, null for numeric arrays
+  indices?: Json; // present when indexed; null when value is
+
   authored: boolean;
   inheritedFrom?: Path; // ancestor that defines it; absent for the prim's own primvars
 }
@@ -168,16 +174,17 @@ export interface PrimInfo {
   relationships: { name: string; targets: Path[] }[];
   variantSets: { name: string; variants: string[]; selection: string }[];
   boundMaterial: Path | null;
-  worldXform: number[] | null; // 16
-  worldBounds: number[] | null; // min xyz, max xyz
+  worldXform: number[] | null; // 16 (bounds: primBounds)
   primStack: { layer: string; path: Path }[];
 }
 export interface Edit {
   ok: boolean;
   error?: string;
   resynced: Path[];
-  /** Every prim the edit touched (resynced or only changed), for the hierarchy's change markers. */
+  /** Every prim that differs from the stage as opened after this edit, for the hierarchy's change markers. */
   changed?: Path[];
+  /** The prims this edit changed at all (resynced or info only): what a visibility refresh has to look at. */
+  touched?: Path[];
   /** What the edit replaced, when there was an opinion to replace (the inverse edit's input). */
   previous?: Json;
   /** Identifiers of non-anonymous layers with unsaved changes after the edit. */

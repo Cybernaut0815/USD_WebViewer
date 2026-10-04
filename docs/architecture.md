@@ -58,10 +58,11 @@ Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 M
 - **Refinement:**
   - The automatic level is shared by every authored subdivision surface, so one huge cage lowers it for all of them.
   - Each mesh is also capped at two thirds of the Auto budget (2 million triangles at the default 3 million).
-  - Refinement runs on the CPU. Meshes are read and refined on all core threads, but a level change on a large stage still takes seconds: Kitchen_set at level 1 is 1.1 million refined quads.
+  - Refinement runs on the CPU. Meshes are read and refined on four core threads (more measured slower: the parallel build contends on shared locks), but a level change on a large stage still takes seconds: Kitchen_set at level 1 is 1.1 million refined quads.
+- **Loading** is paged: the first picture shows the first 128 geometry prims, later pages carry up to 1000 prims or 256 MB of streams each, and the view is framed again when the stage is complete (`stageloaded`).
 - **Saving:** write-back and disk watching need the File System Access API, which means Chromium on desktop. Elsewhere, saving downloads the layer. Layers opened from URLs can only be downloaded, and stay flagged as unsaved.
 - **Transforms and undo:**
   - The gizmo sits at the prim's origin, not at its pivot.
   - Undo re-authors earlier values rather than removing the layer's specs. A transform op added to a prim that had none therefore stays after undo, and so does its change marker. Clear edits removes it.
-- **Skinning** runs on the CPU: about 10 frames per second for a 300k-vertex character.
-- **Memory:** the core is wasm32, so a stage has to fit in 4 GB.
+- **Skinning** runs on the CPU. A frame of a deforming mesh is a positions-only update laid out like the last full conversion (no triangulation): the 90 meshes of UsdSkelExamples' HumanFemale take about 50 ms per frame in the core on a 2020 laptop.
+- **Memory:** the core is wasm32, so a stage has to fit in 4 GB. Meshes reach the page welded (vertices split only where a faceVarying or uniform primvar differs: about a third of the face corners on textured stages), a flush converts meshes 64 at a time within a 256 MB page, and ten 1-million-quad grids peak at about 2.5 GB.

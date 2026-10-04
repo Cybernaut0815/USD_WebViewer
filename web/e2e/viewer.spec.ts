@@ -265,7 +265,10 @@ test.describe('mock core', () => {
     await transform.locator('summary').click();
     await transform.locator('.value').first().click({ button: 'right' });
     await page.locator('usd-viewer .popup button', { hasText: 'Copy section as text' }).click();
-    await expect.poll(copied).toBe('matrix4d worldTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )');
+    // Opening the section fetched the bounds (a subtree walk the panel does not pay for otherwise).
+    await expect.poll(copied).toBe(
+      'matrix4d worldTransform = ( (1, 0, 0, 0), (0, 1, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1) )\ndouble3 boundsMin = (-0.5, -0.5, -0.5)\ndouble3 boundsMax = (0.5, 0.5, 0.5)',
+    );
     // Primvars copy too, fetching the full value.
     await page.locator('usd-viewer .props tr', { hasText: 'displayColor' }).locator('.value').click({ button: 'right' });
     await page.locator('usd-viewer .popup button', { hasText: 'Copy typed declaration' }).click();

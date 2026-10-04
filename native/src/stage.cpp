@@ -66,6 +66,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
 #include <set>
 #include <sstream>
@@ -243,11 +244,31 @@ UsdTimeCode Time(double time) { return std::isnan(time) ? UsdTimeCode::Default()
 
 Usd_PrimFlagsPredicate AllPrims() { return UsdTraverseInstanceProxies(UsdPrimAllPrimsPredicate); }
 
-void WriteSummary(JsWriter& w, const UsdPrim& prim, UsdTimeCode time)
+/// Computed visibility of a prim's ancestors and itself; true for the pseudo-root. Walks every
+/// ancestor, so callers with many siblings pass the parent's answer to WriteSummary instead.
+bool ComputedVisible(const UsdPrim& prim, UsdTimeCode time)
+{
+    if (!prim || prim.IsPseudoRoot()) return true;
+    return UsdGeomImageable(prim).ComputeVisibility(time) != UsdGeomTokens->invisible;
+}
+
+/// The prim's own visibility opinion is "invisible" (the only value that propagates down).
+bool AuthoredInvisible(const UsdGeomImageable& imageable, UsdTimeCode time)
+{
+    TfToken value;
+    return imageable && imageable.GetVisibilityAttr().Get(&value, time) && value == UsdGeomTokens->invisible;
+}
+
+/// `parentVisible`: the parent's computed visibility, when the caller knows it (one attribute read
+/// per child instead of a walk to the root for each).
+void WriteSummary(JsWriter& w, const UsdPrim& prim, UsdTimeCode time, const bool* parentVisible = nullptr)
 {
     TfToken kind;
     UsdModelAPI(prim).GetKind(&kind);
     const UsdGeomImageable imageable(prim);
+    const bool visible = !imageable ? true
+        : parentVisible ? *parentVisible && !AuthoredInvisible(imageable, time)
+                        : imageable.ComputeVisibility(time) != UsdGeomTokens->invisible;
     w.BeginObject();
     w.WriteKey("name");
     w.WriteValue(prim.GetName().GetString());
@@ -262,7 +283,7 @@ void WriteSummary(JsWriter& w, const UsdPrim& prim, UsdTimeCode time)
     w.WriteKey("active");
     w.WriteValue(prim.IsActive());
     w.WriteKey("visible");
-    w.WriteValue(!imageable || imageable.ComputeVisibility(time) != UsdGeomTokens->invisible);
+    w.WriteValue(visible);
     w.WriteKey("isInstance");
     w.WriteValue(prim.IsInstance());
     w.WriteKey("hasPayload");
@@ -293,14 +314,26 @@ void WriteMetadata(JsWriter& w, const UsdObject& object, const std::vector<TfTok
     w.EndObject();
 }
 
+/// Numeric arrays (points, indices, uv sets, ...) are not decoded for the inspector, which loads
+/// them on request through AttributeValue; token, string, asset and path arrays stay inline.
+bool LazyArray(const SdfValueTypeName& typeName)
+{
+    if (!typeName.IsArray()) return false;
+    const TfType scalar = typeName.GetScalarType().GetType();
+    return scalar != TfType::Find<TfToken>() && scalar != TfType::Find<std::string>()
+        && scalar != TfType::Find<SdfAssetPath>() && scalar != TfType::Find<SdfPath>();
+}
+
 void WritePrimvar(JsWriter& w, const UsdGeomPrimvar& primvar, const UsdPrim& owner, UsdTimeCode at)
 {
     TfToken name, interpolation;
     SdfValueTypeName typeName;
     int elementSize = 1;
     primvar.GetDeclarationInfo(&name, &typeName, &interpolation, &elementSize);
+    const bool authored = primvar.HasAuthoredValue();
+    const bool lazy = LazyArray(typeName) && authored; // unauthored ones show their fallback as before
     VtValue value;
-    primvar.Get(&value, at);
+    if (!lazy) primvar.Get(&value, at);
     w.BeginObject();
     w.WriteKey("name");
     w.WriteValue(name.GetString());
@@ -313,15 +346,18 @@ void WritePrimvar(JsWriter& w, const UsdGeomPrimvar& primvar, const UsdPrim& own
     w.WriteKey("indexed");
     w.WriteValue(primvar.IsIndexed());
     w.WriteKey("value");
-    WriteJsonValue(w, value, 16);
+    WriteJsonValue(w, value, 16); // null when lazy
     if (primvar.IsIndexed()) {
-        VtIntArray indices;
-        primvar.GetIndices(&indices, at);
         w.WriteKey("indices");
-        WriteJsonValue(w, VtValue(indices), 16);
+        if (lazy) w.WriteValue(nullptr);
+        else {
+            VtIntArray indices;
+            primvar.GetIndices(&indices, at);
+            WriteJsonValue(w, VtValue(indices), 16);
+        }
     }
     w.WriteKey("authored");
-    w.WriteValue(primvar.HasAuthoredValue());
+    w.WriteValue(authored);
     if (primvar.GetAttr().GetPrim() != owner) {
         w.WriteKey("inheritedFrom");
         w.WriteValue(primvar.GetAttr().GetPrim().GetPath().GetString());
@@ -347,12 +383,12 @@ const TfToken kRefineEnable("refinementEnableOverride"), kRefineLevel("refinemen
 /// Collects the paths a stage edit resynced, so the page can refresh those subtrees, and every
 /// prim it touched at all (resynced or not), which the page marks as changed.
 struct ChangeListener : TfWeakBase {
-    SdfPathVector resynced;
+    SdfPathVector resynced; // prim resyncs only: property adds and removes are not subtree changes
     std::set<SdfPath> changed;
     void Changed(const UsdNotice::ObjectsChanged& notice)
     {
         for (const SdfPath& path : notice.GetResyncedPaths()) {
-            resynced.push_back(path.GetPrimPath());
+            if (path.IsAbsoluteRootOrPrimPath()) resynced.push_back(path);
             changed.insert(path.GetPrimPath());
         }
         for (const SdfPath& path : notice.GetChangedInfoOnlyPaths()) changed.insert(path.GetPrimPath());
@@ -407,19 +443,32 @@ Fields FieldsOf(const SdfLayerHandle& layer, const SdfPath& path)
 struct ChangeTracker {
     std::vector<std::pair<SdfLayerHandle, SdfLayerRefPtr>> snapshot;
     std::set<SdfPath> touched;
+    /// Differs() per touched prim, recomputed only for the prims an edit changes.
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> state;
     struct Stash {
         SdfPath path;
         std::vector<std::pair<SdfLayerHandle, SdfLayerRefPtr>> layers; // null: the layer had no spec there
     };
     std::map<int, Stash> stashes;
     int nextStash = 1;
+    /// The stage whose layers are copied by the first tracked edit (a copy of a large stage takes
+    /// seconds and doubles its memory, so opening does not pay for it).
+    UsdStageRefPtr pending;
 
-    void Take(const UsdStageRefPtr& stage)
+    void Reset(const UsdStageRefPtr& stage)
     {
         snapshot.clear();
         touched.clear();
+        state.clear();
         stashes.clear();
-        if (!stage) return;
+        pending = stage;
+    }
+
+    void Ensure()
+    {
+        if (!pending) return;
+        const UsdStageRefPtr stage = pending;
+        pending = nullptr;
         for (const SdfLayerHandle& layer : stage->GetLayerStack(/*includeSessionLayers=*/false)) {
             SdfLayerRefPtr copy = SdfLayer::CreateAnonymous("snapshot");
             copy->TransferContent(layer);
@@ -484,6 +533,7 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit, bool track = true)
     ChangeListener listener;
     gPrevious = VtValue();
     if (stage) {
+        if (track) gTracker.Ensure();
         TfNotice::Key key = TfNotice::Register(TfCreateWeakPtr(&listener), &ChangeListener::Changed, UsdStageWeakPtr(stage));
         error = edit();
         TfNotice::Revoke(key);
@@ -500,13 +550,20 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit, bool track = true)
     }
     w.WriteKey("resynced");
     WritePaths(w, listener.resynced);
-    // The full current list: prims touched so far that still differ from the stage as opened.
+    // The full current list: prims touched so far that still differ from the stage as opened. Only
+    // the prims this edit changed (or resynced below) are compared again; the rest keep their state.
     w.WriteKey("changed");
     SdfPathVector changed;
     for (const SdfPath& path : gTracker.touched) {
-        if (gTracker.Differs(path)) changed.push_back(path);
+        const bool recheck = listener.changed.count(path)
+            || std::any_of(listener.resynced.begin(), listener.resynced.end(), [&](const SdfPath& r) { return path.HasPrefix(r); });
+        auto known = gTracker.state.find(path);
+        if (recheck || known == gTracker.state.end()) known = gTracker.state.insert_or_assign(path, gTracker.Differs(path)).first;
+        if (known->second) changed.push_back(path);
     }
     WritePaths(w, changed);
+    w.WriteKey("touched");
+    WritePaths(w, SdfPathVector(listener.changed.begin(), listener.changed.end()));
     if (!gPrevious.IsEmpty()) {
         w.WriteKey("previous");
         WriteJsonValue(w, gPrevious, std::numeric_limits<size_t>::max());
@@ -646,7 +703,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
     Close();
     _stage = UsdStage::Open(url, loadPayloads ? UsdStage::LoadAll : UsdStage::LoadNone);
     _url = url;
-    gTracker.Take(_stage);
+    gTracker.Reset(_stage);
     std::ostringstream stream;
     JsWriter w(stream);
     w.BeginObject();
@@ -686,7 +743,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
 
 void Stage::Close()
 {
-    gTracker.Take(nullptr);
+    gTracker.Reset(nullptr);
     _stage.Reset();
     _url.clear();
 }
@@ -697,7 +754,8 @@ std::string Stage::Children(const std::string& path) const
     JsWriter w(stream);
     w.BeginArray();
     if (const UsdPrim prim = _stage ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim()) {
-        for (const UsdPrim& child : prim.GetFilteredChildren(AllPrims())) WriteSummary(w, child, UsdTimeCode::Default());
+        const bool parentVisible = ComputedVisible(prim, UsdTimeCode::Default());
+        for (const UsdPrim& child : prim.GetFilteredChildren(AllPrims())) WriteSummary(w, child, UsdTimeCode::Default(), &parentVisible);
     }
     w.EndArray();
     return stream.str();
@@ -710,12 +768,45 @@ std::string Stage::Visibility(const std::string& pathsJson) const
     std::ostringstream stream;
     JsWriter w(stream);
     w.BeginArray();
+    // Memoised per ancestor: the hierarchy asks for whole levels, whose ancestors are shared, so
+    // each prim's own opinion is read once instead of once per descendant.
+    std::unordered_map<SdfPath, bool, SdfPath::Hash> memo { { SdfPath::AbsoluteRootPath(), true } };
+    const auto visible = [&](const SdfPath& path) {
+        std::vector<SdfPath> chain; // path and its unknown ancestors, nearest first
+        SdfPath at = path;
+        while (!memo.count(at)) {
+            chain.push_back(at);
+            at = at.GetParentPath();
+        }
+        bool result = memo[at];
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            result = result && !AuthoredInvisible(UsdGeomImageable(_stage->GetPrimAtPath(*it)), UsdTimeCode::Default());
+            memo[*it] = result;
+        }
+        return result;
+    };
     for (const JsValue& item : js.IsArray() ? js.GetJsArray() : JsArray()) {
         const UsdPrim prim = _stage && item.IsString() && SdfPath::IsValidPathString(item.GetString()) ? _stage->GetPrimAtPath(SdfPath(item.GetString())) : UsdPrim();
-        const UsdGeomImageable imageable(prim);
-        w.WriteValue(!imageable || imageable.ComputeVisibility(UsdTimeCode::Default()) != UsdGeomTokens->invisible);
+        // Non-imageable and missing prims count as visible, like the summaries.
+        w.WriteValue(!UsdGeomImageable(prim) || visible(prim.GetPath()));
     }
     w.EndArray();
+    return stream.str();
+}
+
+std::string Stage::Bounds(const std::string& path, double time) const
+{
+    const UsdPrim prim = _stage && SdfPath::IsValidPathString(path) ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim();
+    const UsdGeomImageable imageable(prim);
+    if (!imageable) return "null";
+    const UsdTimeCode at = Time(time);
+    UsdGeomBBoxCache cache(at, { UsdGeomTokens->default_, UsdGeomTokens->render, UsdGeomTokens->proxy }, true);
+    const GfRange3d range = cache.ComputeWorldBound(prim).ComputeAlignedRange();
+    if (range.IsEmpty()) return "null";
+    std::ostringstream stream;
+    JsWriter w(stream);
+    const double bounds[6] = { range.GetMin()[0], range.GetMin()[1], range.GetMin()[2], range.GetMax()[0], range.GetMax()[1], range.GetMax()[2] };
+    WriteNumbers(w, bounds, 6);
     return stream.str();
 }
 
@@ -747,19 +838,21 @@ std::string Stage::Details(const std::string& path, double time) const
     w.WriteKey("attributes");
     w.BeginArray();
     for (const UsdAttribute& attribute : prim.GetAttributes()) {
+        const SdfValueTypeName typeName = attribute.GetTypeName();
+        const bool authored = attribute.HasAuthoredValue();
         VtValue value;
-        attribute.Get(&value, at);
+        if (!(LazyArray(typeName) && authored)) attribute.Get(&value, at); // unauthored arrays show their fallback as before
         SdfPathVector connections;
         attribute.GetConnections(&connections);
         w.BeginObject();
         w.WriteKey("name");
         w.WriteValue(attribute.GetName().GetString());
         w.WriteKey("typeName");
-        w.WriteValue(attribute.GetTypeName().GetAsToken().GetString());
+        w.WriteValue(typeName.GetAsToken().GetString());
         w.WriteKey("value");
-        WriteJsonValue(w, value, 16);
+        WriteJsonValue(w, value, 16); // null for lazy arrays: the panel asks for them on demand
         w.WriteKey("authored");
-        w.WriteValue(attribute.HasAuthoredValue());
+        w.WriteValue(authored);
         w.WriteKey("timeSamples");
         w.WriteValue(uint64_t(attribute.GetNumTimeSamples()));
         w.WriteKey("custom");
@@ -816,16 +909,7 @@ std::string Stage::Details(const std::string& path, double time) const
     w.WriteKey("worldXform");
     if (const UsdGeomXformable xformable { prim }) Write(w, xformable.ComputeLocalToWorldTransform(at));
     else w.WriteValue(nullptr);
-    w.WriteKey("worldBounds");
-    GfRange3d range;
-    if (imageable) {
-        UsdGeomBBoxCache cache(at, { UsdGeomTokens->default_, UsdGeomTokens->render, UsdGeomTokens->proxy }, true);
-        range = cache.ComputeWorldBound(prim).ComputeAlignedRange();
-    }
-    if (!range.IsEmpty()) {
-        const double bounds[6] = { range.GetMin()[0], range.GetMin()[1], range.GetMin()[2], range.GetMax()[0], range.GetMax()[1], range.GetMax()[2] };
-        WriteNumbers(w, bounds, 6);
-    } else w.WriteValue(nullptr);
+    // World bounds are a subtree walk: the panel asks Bounds() for them when its section is open.
 
     w.WriteKey("primvars");
     w.BeginArray();
@@ -1158,16 +1242,17 @@ std::string Stage::RestorePrim(int stash)
 
 void Stage::ResetChanges()
 {
-    gTracker.Take(_stage);
+    gTracker.Reset(_stage);
 }
 
 std::string Stage::SetLoaded(const std::string& path, bool loaded)
 {
+    // Load rules are stage state, not layer content: nothing to track (and no snapshot to take).
     return Edit(_stage, [&]() -> std::string {
         if (loaded) _stage->Load(SdfPath(path));
         else _stage->Unload(SdfPath(path));
         return "";
-    });
+    }, /*track=*/false);
 }
 
 std::string Stage::SetAttribute(const std::string& path, const std::string& name, const std::string& json, double time)
@@ -1194,16 +1279,12 @@ std::string Stage::ClearSessionEdits()
     });
 }
 
-std::string Stage::XformInfo(const std::string& path, double time) const
+namespace {
+
+void WriteXformInfo(JsWriter& w, const UsdPrim& prim, UsdGeomXformCache& cache)
 {
-    const UsdPrim prim = EditablePrim(_stage, path);
-    const UsdGeomXformable xformable(prim);
-    if (!xformable) return "null";
-    UsdGeomXformCache cache(Time(time));
     bool resets = false;
     const GfMatrix4d local = cache.GetLocalTransformation(prim, &resets);
-    std::ostringstream stream;
-    JsWriter w(stream);
     w.BeginObject();
     w.WriteKey("path");
     w.WriteValue(prim.GetPath().GetString());
@@ -1216,6 +1297,35 @@ std::string Stage::XformInfo(const std::string& path, double time) const
     w.WriteKey("resets");
     w.WriteValue(resets);
     w.EndObject();
+}
+
+} // namespace
+
+std::string Stage::XformInfo(const std::string& path, double time) const
+{
+    const UsdPrim prim = EditablePrim(_stage, path);
+    if (!UsdGeomXformable(prim)) return "null";
+    UsdGeomXformCache cache(Time(time));
+    std::ostringstream stream;
+    JsWriter w(stream);
+    WriteXformInfo(w, prim, cache);
+    return stream.str();
+}
+
+std::string Stage::XformInfos(const std::string& pathsJson, double time) const
+{
+    JsParseError parseError;
+    const JsValue js = JsParseString(pathsJson, &parseError);
+    UsdGeomXformCache cache(Time(time)); // one cache: the prims of a selection share their ancestors
+    std::ostringstream stream;
+    JsWriter w(stream);
+    w.BeginArray();
+    for (const JsValue& item : js.IsArray() ? js.GetJsArray() : JsArray()) {
+        const UsdPrim prim = item.IsString() ? EditablePrim(_stage, item.GetString()) : UsdPrim();
+        if (UsdGeomXformable(prim)) WriteXformInfo(w, prim, cache);
+        else w.WriteValue(nullptr);
+    }
+    w.EndArray();
     return stream.str();
 }
 
@@ -1382,7 +1492,7 @@ std::string Stage::SetEditTarget(const std::string& identifier)
             return "";
         }
         return identifier + " is not in the stage's local layer stack";
-    });
+    }, /*track=*/false); // authors nothing
 }
 
 std::string Stage::ReloadLayers(const std::vector<std::string>& identifiers)
@@ -1397,5 +1507,5 @@ std::string Stage::ReloadLayers(const std::vector<std::string>& identifiers)
         for (const SdfLayerHandle& layer : layers) WebResolver::Forget(layer->GetIdentifier());
         SdfLayer::ReloadLayers(layers, true);
         return "";
-    });
+    }, /*track=*/false); // the page resets the change baseline after a reload; a save reloads what it wrote
 }

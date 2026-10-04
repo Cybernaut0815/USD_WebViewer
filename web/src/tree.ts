@@ -1,7 +1,7 @@
 // Hierarchy panel: lazily loaded prim tree drawn as a window of fixed-height
 // rows, so the DOM stays small however many prims the stage has.
 import type { Path, PrimSummary } from './protocol.ts';
-import type { SelectMode } from './session.ts';
+import { hasAncestorIn, type SelectMode } from './session.ts';
 
 const ROW = 22; // px, must match .row in viewer.css
 
@@ -142,26 +142,41 @@ export class Tree {
       this.roots = this.wrap(await this.load('/'), 0);
       await this.reopen(this.roots, open);
     } else {
-      for (const path of paths) {
-        const node = flatten(this.roots).find((n) => n.summary.path === path);
-        if (!node?.children) continue;
+      // One pass over the rows, the reloads in parallel; a path under another reloaded path is
+      // covered by that reload (reopen loads fresh children).
+      const byPath = new Map(flatten(this.roots).map((n) => [n.summary.path, n]));
+      const set = new Set(paths);
+      const reloads = [...set].flatMap((path) => {
+        const node = byPath.get(path);
+        if (!node?.children || hasAncestorIn(path, set)) return [];
         const open = new Set(flatten(node.children).filter((n) => n.expanded).map((n) => n.summary.path));
-        node.children = this.wrap(await this.load(path), node.depth + 1);
-        await this.reopen(node.children, open);
-      }
+        return [
+          this.load(path).then(async (children) => {
+            node.children = this.wrap(children, node.depth + 1);
+            await this.reopen(node.children, open);
+          }),
+        ];
+      });
+      await Promise.all(reloads);
     }
     this.refresh();
   }
 
   /**
-   * Updates the computed visibility of every loaded row with one query, after an edit that only
-   * changed visibility (cheaper than reloading every expanded level).
+   * Updates the computed visibility of loaded rows with one query, after an edit that only changed
+   * visibility (cheaper than reloading every expanded level). With `touched` (the prims the edit
+   * changed) only the rows at or below them are asked about; without it, every loaded row.
    */
-  async refreshVisibility(query: (paths: Path[]) => Promise<boolean[]>): Promise<void> {
+  async refreshVisibility(query: (paths: Path[]) => Promise<boolean[]>, touched?: readonly Path[]): Promise<void> {
     // Every loaded node, collapsed ones too: expanding reuses their cached summaries.
-    const nodes: TreeNode[] = [...(this.search ?? [])];
+    let nodes: TreeNode[] = [...(this.search ?? [])];
     const walk = (list: TreeNode[]) => list.forEach((n) => (nodes.push(n), n.children && walk(n.children)));
     walk(this.roots);
+    if (touched?.length) {
+      const set = new Set(touched);
+      nodes = nodes.filter((n) => set.has(n.summary.path) || hasAncestorIn(n.summary.path, set));
+    }
+    if (!nodes.length) return;
     const visible = await query(nodes.map((n) => n.summary.path));
     nodes.forEach((node, i) => (node.summary.visible = visible[i] ?? node.summary.visible));
     this.draw();

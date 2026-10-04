@@ -34,9 +34,6 @@ struct MeshIn {
     VtVec3fArray points;
     std::vector<PrimvarIn> primvars; // authored normals travel as "normals"
     int refineLevel = 0;
-    /// Force one output vertex per face corner. Set on point-only updates, when
-    /// the primvars that originally required that layout are not passed again.
-    bool expand = false;
 };
 
 struct PrimvarOut {
@@ -54,10 +51,24 @@ struct MeshOut {
     /// Line pairs along authored face boundaries (no triangulation diagonals, and on
     /// refined meshes no edges inside an authored face), in the layout of `indices`.
     std::vector<uint32_t> edges;
-    bool expanded = false; // one vertex per face corner (see MeshIn::expand)
+    bool refined = false; // the output is the refined surface, not the authored mesh
+    /// Faces drawn and distinct edges of the mesh that was triangulated (the authored
+    /// counts unless `refined`, when CountMesh gives them).
+    size_t drawnFaces = 0, distinctEdges = 0;
+    /// Output vertex -> mesh vertex. Corners are welded by their mesh vertex and the values of
+    /// the faceVarying and uniform primvars, so only seams split vertices; empty when the
+    /// output vertices are the mesh vertices.
+    std::vector<uint32_t> weld;
+    /// Corner -> output vertex, kept only for meshes with faceVarying normals (BuildMeshPoints needs it).
+    std::vector<uint32_t> cornerVertex;
 };
 
 MeshOut BuildMesh(const MeshIn& in);
+
+/// Positions and normals of a mesh whose points moved, in the layout (`weld`, `cornerVertex`)
+/// of its last BuildMesh: no triangulation, no edges. False when the mesh does not fit that
+/// layout any more (or is refined): convert it fully again.
+bool BuildMeshPoints(const MeshIn& in, const std::vector<uint32_t>& weld, const std::vector<uint32_t>& cornerVertex, MeshOut* out);
 
 /// Counts of the authored mesh: points, faces drawn (holes and degenerate faces
 /// left out) and the distinct edges of those faces.

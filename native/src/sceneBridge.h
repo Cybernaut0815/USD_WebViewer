@@ -52,7 +52,8 @@ private:
     class Factory;
     friend struct Rec;
 
-    void Dirty(Rec* rec);
+    /// `locators`: what changed (null: everything), to tell dependants only about changes that reach them.
+    void Dirty(Rec* rec, const HdDataSourceLocatorSet* locators = nullptr);
     void Removed(Rec* rec);
     Rec* Find(const SdfPath& path) const;
     uint32_t RidOf(const SdfPath& path) const;
@@ -64,7 +65,7 @@ private:
     /// Meshes convert in parallel: GatherMesh reads the scene index (thread-safe) and BuildMeshJob
     /// builds the geometry on any thread; EmitMesh writes the JS entry on this thread.
     bool GatherMesh(Rec& rec, bool created, MeshJob* job);
-    static void BuildMeshJob(MeshJob& job);
+    void BuildMeshJob(MeshJob& job);
     void EmitMesh(MeshJob& job, emscripten::val& entry);
     void ConvertCurves(Rec& rec, bool created, emscripten::val& delta);
     void ConvertPoints(Rec& rec, bool created, emscripten::val& delta);

@@ -32,7 +32,7 @@ export interface PanelState {
 const sheet = new CSSStyleSheet();
 sheet.replaceSync(css);
 const MIRRORED: (keyof UsdSessionEventMap)[] = [
-  'stageopen', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'log', 'error',
+  'stageopen', 'stageloaded', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'log', 'error',
 ];
 const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'rotate', r: 'scale' };
 /** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
@@ -93,6 +93,8 @@ const SHORTCUTS: [string, [string, string][]][] = [
   ['Help', [['F1 or ?', 'This window']]],
 ];
 const LAYOUT_KEY = 'usd-viewer:layout';
+/** Selections above this size fill the prim picker's options only when it is opened. */
+const LAZY_PICKER = 200;
 
 /**
  * The automatic refinement budget this machine gets by default, in output triangles: 3M at 4 GB
@@ -138,6 +140,11 @@ export class UsdViewerElement extends HTMLElement {
   private statsTimer = 0;
   private disposed = false;
   private toolName: ToolName = 'select';
+  /** Between stageopen and stageloaded: the view is framed on the first meshes, then again at the end. */
+  private loading = false;
+  private framed = false;
+  /** The selection behind the picker; its options are built when it is opened (selections can be huge). */
+  private pickerPaths: readonly Path[] = [];
   private readonly unload = (event: BeforeUnloadEvent) => {
     if (this.session.dirty.size) event.preventDefault();
   };
@@ -487,6 +494,12 @@ export class UsdViewerElement extends HTMLElement {
       ...SHORTCUTS.map(([group, rows]) => h('section', {}, h('h4', {}, group), h('table', {}, ...rows.map(([keys, what]) => h('tr', {}, h('td', {}, h('kbd', {}, keys)), h('td', {}, what)))))),
     );
     this.picker.addEventListener('change', () => this.session.select(this.selection, 'api', this.picker.value));
+    for (const type of ['pointerdown', 'keydown', 'focus']) {
+      this.picker.addEventListener(type, () => {
+        if (this.picker.options.length === this.pickerPaths.length) return;
+        this.picker.replaceChildren(...this.pickerPaths.map((path) => h('option', { value: path, selected: path === this.active, title: path }, path)));
+      });
+    }
     this.toggles.time.addEventListener('click', () => (this.panels = { timeline: !this.layout.timeline }));
     const app = h(
       'div',
@@ -596,14 +609,25 @@ export class UsdViewerElement extends HTMLElement {
     }
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
+      // The first page with meshes gets framed at once; stageloaded frames the complete stage.
+      if (this.loading && !this.framed && e.detail.meshes?.length) {
+        this.framed = true;
+        this.viewport.frame();
+      }
       this.updateStats();
     });
     on('stageopen', (e) => {
       // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
       clearInterval(this.statsTimer);
       this.statsTimer = window.setInterval(() => this.updateStats(), 500);
+      this.loading = true;
+      this.framed = false;
       this.viewport.sync.setUpAxis(e.detail.upAxis);
-      this.tree.reset().then(() => this.viewport.frame());
+      this.tree.reset().catch(() => {});
+    });
+    on('stageloaded', () => {
+      this.loading = false;
+      this.viewport.frame();
     });
     on('stageclose', () => {
       clearInterval(this.statsTimer);
@@ -618,15 +642,20 @@ export class UsdViewerElement extends HTMLElement {
       this.tree.setSelection(paths, active);
       this.viewport.sync.setActive(active);
       this.picker.hidden = paths.length < 2;
-      if (paths.length > 1) {
+      this.pickerPaths = paths;
+      if (paths.length > 1 && paths.length <= LAZY_PICKER) {
         this.picker.replaceChildren(...paths.map((path) => h('option', { value: path, selected: path === active, title: path }, path)));
+      } else if (paths.length > 1) {
+        // Thousands of options (a subtree or marquee selection) are built when the picker is opened.
+        const shown = active ?? paths[0];
+        this.picker.replaceChildren(h('option', { value: shown, selected: true, title: shown }, shown));
       }
       if (source === 'viewport' && active) await this.tree.reveal(active);
       this.showProps(active);
     });
     on('primschange', async (e) => {
       // Visibility is computed down the tree, so every loaded row may have changed: one batched query.
-      if (e.detail.visibility) await this.tree.refreshVisibility((paths) => session.core.call('primVisibility', JSON.stringify(paths)));
+      if (e.detail.visibility) await this.tree.refreshVisibility((paths) => session.core.call('primVisibility', JSON.stringify(paths)), e.detail.touched);
       if (e.detail.resynced.length) await this.tree.invalidate(e.detail.resynced);
       this.showProps(this.active);
     });
@@ -647,6 +676,7 @@ export class UsdViewerElement extends HTMLElement {
     this.props.onrefinement = (path, enabled, level) => this.usd.setRefinement(path, enabled, level).catch(() => {});
     // Values in the panel are truncated; the clipboard gets the whole thing.
     this.props.attributeValue = (path, name) => this.usd.attribute(path, name);
+    this.props.bounds = (path) => this.usd.bounds(path);
     this.props.oncopy = (text) => text.then(copyText).catch(() => {});
     this.props.oncontext = (x, y, choices) =>
       showMenu(this.shadowRoot!, x, y, choices.map((choice) => ({ label: choice.label, action: () => choice.text().then(copyText).catch(() => {}) })));

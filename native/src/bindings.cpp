@@ -101,6 +101,7 @@ std::string primChildren(const std::string& path) { return gStage.Children(path)
 std::string primSubtree(const std::string& path, int limit) { return gStage.Subtree(path, limit); }
 std::string primVisibility(const std::string& pathsJson) { return gStage.Visibility(pathsJson); }
 std::string primDetails(const std::string& path, double time) { return gStage.Details(path, time); }
+std::string primBounds(const std::string& path, double time) { return gStage.Bounds(path, time); }
 std::string attributeValue(const std::string& path, const std::string& name, double time)
 {
     return gStage.AttributeValue(path, name, time);
@@ -181,6 +182,7 @@ std::string setAttribute(const std::string& path, const std::string& name, const
 std::string clearSessionEdits() { return gStage.ClearSessionEdits(); }
 
 std::string xformInfo(const std::string& path, double time) { return gStage.XformInfo(path, time); }
+std::string xformInfos(const std::string& pathsJson, double time) { return gStage.XformInfos(pathsJson, time); }
 std::string setXform(const std::string& path, const val& matrix, double time)
 {
     return gStage.SetXform(path, emscripten::vecFromJSArray<double>(matrix), time);
@@ -222,6 +224,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("primSubtree", &primSubtree);
     function("primVisibility", &primVisibility);
     function("primDetails", &primDetails);
+    function("primBounds", &primBounds);
     function("attributeValue", &attributeValue);
     function("findPrims", &findPrims);
     function("exportPrim", &exportPrim);
@@ -245,6 +248,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setAttribute", &setAttribute);
     function("clearSessionEdits", &clearSessionEdits);
     function("xformInfo", &xformInfo);
+    function("xformInfos", &xformInfos);
     function("setXform", &setXform);
     function("setXforms", &setXforms);
     function("clearAttribute", &clearAttribute);

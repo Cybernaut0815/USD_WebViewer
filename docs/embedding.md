@@ -43,7 +43,7 @@ The element is a thin layout around two reusable parts:
 
 Host pages extend it in two ways:
 - **Panels:** add your own through the `toolbar`, `left`, `right` and `bottom` slots.
-- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more.
+- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more.
 
 The rule for every module: change the stage through `viewer.usd`, then let the core's render delta move the three.js objects. Never edit three.js objects to represent stage state. `web/src/protocol.ts` is the contract between the page and the core.
 
@@ -51,7 +51,7 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 
 | Member | Purpose |
 |---|---|
-| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `attribute`, `find`, `subtree`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload` |
+| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `bounds` the world bounds. |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |

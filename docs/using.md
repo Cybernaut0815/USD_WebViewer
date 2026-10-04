@@ -84,6 +84,7 @@ Edits go to the stage's **edit target**. That is the root layer by default; File
 Every value in the property panel sits in a box.
 - **Click** a box to copy its value.
 - **Right-click** to copy `value`, `name = value`, the typed usda declaration, or the whole section as text. Long arrays are copied in full, not as shown.
+- **Numeric arrays** (points, indices, uv sets, ...) are not read when a prim is selected, so selecting a huge mesh costs nothing: click **load…** in their box to see the first values. Copying always gets the whole array. The world bounds in the World transform section are computed when that section is open.
 
 The prim menu (right-click) also copies the prim's USD, either the composed subtree or only what the edit layer authors, and its path.
 

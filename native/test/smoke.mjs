@@ -106,6 +106,7 @@ def Xform "World" (kind = "component")
   assert.equal(details.worldXform[12], 9);
   assert.equal(details.attributes.find((a) => a.name === 'size').value, 2);
   assert.equal(details.attributes.find((a) => a.name === 'size').variability, 'varying');
+  assert.deepEqual(details.attributes.find((a) => a.name === 'xformOpOrder').value, ['xformOp:translate'], 'token arrays stay inline');
   assert.deepEqual(details.metadata.customData, { note: 'x', depth: 2 }, 'dictionaries nest');
   assert.equal(details.metadata.documentation, 'a cube');
   assert.equal(JSON.parse(core.primDetails('/World', 10)).metadata.kind, 'component');
@@ -222,12 +223,36 @@ def Xform "World"
   assert.equal(box.normals.length, box.positions.length, 'subdivision cages get smooth normals');
   assert.equal(box.primvars.find((p) => p.name === 'st').size, 2);
 
+  // Pages: at most `maxItems` geometry entries per flush, the highlighted set only with the last
+  // page, and a selection change on its own sends no geometry.
+  core.setSelection(['/World/Box', '/World/Ref']);
+  core.setRefineLevel(1); // both cages convert again
+  const page1 = core.flush(1);
+  assert.equal(page1.meshes.length, 1);
+  assert.equal(page1.more, true);
+  assert.equal(page1.selected, undefined, 'the selection waits for the last page');
+  const page2 = core.flush(1);
+  assert.equal(page2.meshes.length, 1);
+  assert.ok(!page2.more);
+  assert.equal(page2.selected.length, 2);
+  core.setRefineLevel(0);
+  flush();
+  core.setSelection(['/World/Box']);
+  const only = core.flush(1000);
+  assert.equal(only.meshes, undefined, 'a selection change sends no geometry');
+  assert.deepEqual(only.selected.map((s) => s.rid), [box.rid]);
+  core.setSelection([]);
+  flush();
+
   const info = JSON.parse(core.primDetails('/World/Box', NaN));
   assert.deepEqual(info.metadata.apiSchemas, ['MaterialBindingAPI'], 'list ops come out applied');
   const st = info.primvars.find((p) => p.name === 'st');
   assert.equal(st.interpolation, 'faceVarying');
   assert.equal(st.indexed, true);
-  assert.equal(st.indices.length, 24);
+  assert.equal(st.value, null, 'numeric arrays are not decoded for the panel');
+  assert.equal(st.indices, null);
+  assert.equal(JSON.parse(core.attributeValue('/World/Box', 'primvars:st:indices', NaN)).length, 24, 'the panel loads them on demand');
+  assert.deepEqual(info.attributes.find((a) => a.name === 'cornerIndices').value, [], 'unauthored arrays keep their fallback');
   assert.equal(info.attributes.find((a) => a.name === 'primvars:st').metadata.interpolation, 'faceVarying');
   assert.equal(info.attributes.find((a) => a.name === 'refinementEnableOverride').custom, true);
   assert.deepEqual(info.refinement, { enabled: false, level: 0 });
@@ -515,6 +540,14 @@ def Xform "World"
   const dots = delta.points[0];
   assert.equal(dots.points.length, 6);
   assert.deepEqual([...dots.widths].map((w) => +w.toFixed(1)), [0.2, 0.4]);
+
+  // Selecting an instancer highlights its instances without rebuilding them.
+  core.setSelection(['/World/Outer']);
+  const picked = flush();
+  assert.ok(picked.selected?.some((s) => s.rid === proto.rid), 'the prototype is listed as selected');
+  assert.equal(picked.meshes, undefined, 'and no geometry or instance matrices are sent again');
+  core.setSelection([]);
+  flush();
   noErrors();
 }
 
@@ -544,9 +577,45 @@ def Mesh "Quad"
   const second = flush().meshes[0];
   assert.equal(second.indices, undefined, 'moving points must not resend topology');
   assert.equal(second.primvars, undefined, 'nor texture coordinates');
-  assert.equal(first.positions.length, 8 * 3, 'faceVarying data needs one vertex per face corner');
+  assert.equal(first.positions.length, 8 * 3, 'the shared edge has different st per face: its corners stay split');
   assert.equal(second.positions.length, first.positions.length, 'same vertex layout on every frame');
   assert.equal(second.positions[2 * 3 + 2], 5);
+  noErrors();
+}
+
+/* ---------- welding: equal per-corner values share a vertex; the layout follows the values ---------- */
+{
+  open('weld.usda', `#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 2
+)
+def Mesh "Strip"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 2, 3, 1, 4, 5, 2, 4, 6, 7, 5]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0), (2, 1, 0), (3, 0, 0), (3, 1, 0)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1), (1, 0), (2, 0), (2, 1), (1, 1), (2, 0), (3, 0), (3, 1), (2, 1)] (
+        interpolation = "faceVarying"
+    )
+    color3f[] primvars:displayColor (
+        interpolation = "uniform"
+    )
+    color3f[] primvars:displayColor.timeSamples = {
+        1: [(1, 0, 0), (1, 0, 0), (0, 0, 1)],
+        2: [(1, 0, 0), (0, 0, 1), (0, 0, 1)],
+    }
+}`);
+  core.setTime(1);
+  const first = flush().meshes[0];
+  assert.equal(first.positions.length, 10 * 3, 'st agrees along both shared edges; only the colour seam splits its two corners');
+  assert.equal(first.indices.length, 18);
+  assert.equal(first.primvars.find((p) => p.name === 'displayColor').data.length, 10 * 3, 'uniform colours travel per welded vertex');
+  core.setTime(2);
+  const second = flush().meshes[0];
+  assert.equal(second.positions.length, 10 * 3, 'the colour seam moved to the other edge: same count');
+  assert.ok(second.indices, 'but another layout, so the triangles are sent again');
   noErrors();
 }
 

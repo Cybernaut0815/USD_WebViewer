@@ -25,7 +25,7 @@
   grid-area: bar;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px; /* one row at 1024 px wide, which the screenshot goldens assume */
   align-items: center;
   padding: 4px 8px;
   background: var(--panel);

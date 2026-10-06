@@ -1,7 +1,7 @@
 // Toolbar: file opening, framing, camera, refinement, purposes, display settings, messages.
 import { collectDrop, download, fromInput } from './files.ts';
 import { h } from './props.ts';
-import { DEFAULT_BACKGROUND, hardwareRefineBudget, type PanelState, SKIES, type ToolName, type UsdViewerElement } from './viewer.ts';
+import { DEFAULT_BACKGROUND, hardwareRefineBudget, type PanelState, SKIES, type UsdViewerElement } from './viewer.ts';
 import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 import logo from './usd-logo.svg';
@@ -132,13 +132,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   // The toolbar is built inside the element's constructor, before `ready` exists.
   queueMicrotask(() => viewer.ready.then(() => (badge.textContent = viewer.backend === 'webgpu' ? 'WebGPU' : 'WebGL2'), () => {}));
 
-  // Editing: tool, edit target, saving.
-  const tool = select(
-    'Tool (Q W E R; N: navigate with W A S D)',
-    [['select', 'Select'], ['translate', 'Move'], ['rotate', 'Rotate'], ['scale', 'Scale'], ['navigate', 'Navigate']],
-    (v) => (viewer.tool = v as ToolName),
-  );
-  viewer.addEventListener('toolchange', () => (tool.value = viewer.tool));
+  // Editing: edit target, saving (the tools are buttons on the view).
   const save = button('Save', 'Write layers with unsaved edits back into the opened folder, or download them', () => viewer.save().catch(() => {})) as HTMLButtonElement;
   const target = h('select', { title: 'Edit target: the layer that receives edits' }) as HTMLSelectElement;
   target.addEventListener('change', () => session.usd.setEditTarget(target.value).catch(() => {}));
@@ -314,7 +308,6 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     viewMenu,
     examplesMenu,
     save,
-    tool,
     cameras,
     refine,
     display,

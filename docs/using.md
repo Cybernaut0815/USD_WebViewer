@@ -9,7 +9,7 @@ Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on t
 | Input | Action |
 |---|---|
 | Left drag / right drag / wheel | Orbit / pan / zoom towards the cursor |
-| `N`, then `W` `A` `S` `D` | Navigate mode: fly forward, left, back, right; the zoom sets the speed. `N` again (or `Q`) leaves it |
+| `N`, then `W` `A` `S` `D` | Navigate mode, game-style: hold a mouse button to look around, `W` `A` `S` `D` fly forward, left, back, right. The wheel sets the speed (shown at the top left), `Shift` flies faster and `Alt` slower. `N` again (or `Q`) leaves it |
 | `F` | Frame the selection, or everything |
 | Click | Select one prim; clicking empty space clears the selection |
 | Shift+click | Add a prim and make it the **active** one. On a prim that is already selected, it only makes it active |
@@ -57,8 +57,8 @@ How change markers behave:
 Edits go to the stage's **edit target**. That is the root layer by default; File ▸ Edit target switches to a sublayer, or to the session layer, whose edits are never saved. Every edit is undoable with `Ctrl+Z` / `Ctrl+Shift+Z`.
 
 - **Transforms**
-  - `Q` is Select; `W` / `E` / `R` are Move / Rotate / Scale.
-  - `N` is Navigate: `W` `A` `S` `D` move the camera, and Move / Rotate / Scale are off until you leave it.
+  - `Q` is Select; `W` / `E` / `R` are Move / Rotate / Scale. The buttons at the top left of the view switch tools too.
+  - `N` is Navigate: the camera flies (see above), and Move / Rotate / Scale are off until you leave it. A click without a drag still selects, and a right click still opens the prim menu. `Ctrl` is not a speed key, because `Ctrl+W` closes the browser tab.
   - The gizmo sits at the active prim, and every selected prim follows it. Rotation and scale happen about the active prim's origin.
   - The objects follow the pointer at once, while each step is written to the prims' xform ops:
     - a translate / rotate / scale stack keeps its ops and precision;

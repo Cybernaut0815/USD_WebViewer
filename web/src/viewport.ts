@@ -45,6 +45,8 @@ export class Viewport {
   readonly controls: OrbitControls;
   /** Path of the stage camera being looked through, null for the free camera. */
   cameraPath: Path | null = null;
+  /** Navigate's speed factor (the wheel's setting), kept while other tools are active. */
+  flySpeed = 1;
   private readonly resizer: ResizeObserver;
   private dirty = false;
   private frameRequest = 0;

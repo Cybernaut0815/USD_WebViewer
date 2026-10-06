@@ -6,7 +6,7 @@ import type { UsdViewerElement } from '../src/viewer.ts';
 const MOCK = '/?core=mock-core/&forceWebGL=1&src=mock.usda';
 
 /** Goldens are of the 3D view; the stats overlay on top of it is checked as text. */
-const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats')] });
+const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats'), page.locator('usd-viewer .tools')] });
 
 /** Opens the app and waits until the stage is drawn. */
 async function open(page: Page, url: string) {
@@ -622,6 +622,42 @@ test.describe('mock core', () => {
     expect(ahead).toBeGreaterThan(0.1);
     await page.keyboard.press('n');
     expect((await camera()).tool).toBe('select');
+  });
+
+  test('Navigate from the view buttons: mouse look while held, wheel and Shift set the speed', async ({ page }) => {
+    await open(page, MOCK);
+    const view = () =>
+      page.evaluate(() => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        const c = viewer.three.camera;
+        return { tool: viewer.tool, position: c.position.toArray(), forward: c.getWorldDirection(c.position.clone()).toArray() };
+      });
+    const navigate = page.locator('usd-viewer .tools button[value="navigate"]');
+    await navigate.click();
+    await expect(navigate).toHaveClass(/on/);
+    const speed = page.locator('usd-viewer .fly-speed');
+    await expect(speed).toHaveText('Speed ×1.0');
+    const box = (await page.locator('usd-viewer canvas').boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -100);
+    await page.mouse.wheel(0, -100);
+    await expect(speed).toHaveText('Speed ×1.6'); // two notches of 1.25
+    await page.keyboard.down('Shift');
+    await expect(speed).toHaveText('Speed ×6.3 (Shift)');
+    await page.keyboard.up('Shift');
+    // Holding the button turns the view in place; letting go leaves the mouse free.
+    const before = await view();
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 150, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    const after = await view();
+    after.position.forEach((p, i) => expect(p).toBeCloseTo(before.position[i], 6));
+    expect(after.forward.reduce((sum, f, i) => sum + f * before.forward[i], 0)).toBeLessThan(0.95);
+    await page.mouse.move(box.x + 10, box.y + 10, { steps: 3 });
+    expect((await view()).forward).toEqual(after.forward);
+    await page.locator('usd-viewer .tools button[value="select"]').click();
+    expect((await view()).tool).toBe('select');
+    await expect(speed).toHaveCount(0);
   });
 
   test('save writes dirty layers into the picked folder, which is then watched for changes', async ({ page }) => {

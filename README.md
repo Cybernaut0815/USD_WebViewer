@@ -11,6 +11,8 @@ A browser viewer and light editor for [OpenUSD](https://openusd.org) (Universal 
 - **Edits** with a transform gizmo, attributes, visibility, variants and refinement. Everything can be undone, and changes save back to the files.
 - **Embeds** as a `<usd-viewer>` web component with a typed API.
 
+Link to test the [viewer](https://cybernaut0815.github.io/USD_WebViewer/).
+
 ## Dependencies
 
 - **Node.js 24+**, for the page and the tests. npm installs three.js, Vite, TypeScript and Playwright.

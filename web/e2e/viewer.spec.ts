@@ -724,6 +724,16 @@ test.describe('wasm core', () => {
     expect(await view()).toEqual({ path: '/World/Camera', position: [0, 2.5, 9] });
     await cameras.selectOption('');
     expect((await view()).path).toBeNull();
+    // Another file (without cameras) while looking through one: back to "Free camera" only.
+    await cameras.selectOption('/World/Camera');
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).open('samples/materialx.usda'));
+    expect((await view()).path).toBeNull();
+    await expect(cameras.locator('option')).toHaveText(['Free camera']);
+    await expect(cameras).toHaveValue('');
+    const note = await page.evaluate(() =>
+      [...document.querySelector('usd-viewer')!.shadowRoot!.querySelectorAll('span')].find((s) => s.textContent === 'Looking through a stage camera')!.hidden,
+    );
+    expect(note).toBe(true); // View ▸ Camera is unlocked again
   });
 
   test('MaterialX networks render through three.js', async ({ page }) => {

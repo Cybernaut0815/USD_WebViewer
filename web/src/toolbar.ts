@@ -41,11 +41,11 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
 
   const cameras = h('select', { title: 'Camera' }) as HTMLSelectElement;
   cameras.addEventListener('change', () => (viewer.camera = cameras.value || null));
+  // Shows the camera the view actually uses: "Free camera" unless a stage camera is looked through.
   const refresh = () => {
-    const current = cameras.value;
     cameras.replaceChildren(
       h('option', { value: '' }, 'Free camera'),
-      ...viewport.sync.cameras().map((c) => h('option', { value: c.path, selected: c.path === current }, c.path)),
+      ...viewport.sync.cameras().map((c) => h('option', { value: c.path, selected: c.path === viewer.camera }, c.path)),
     );
   };
   session.addEventListener('delta', (e) => {
@@ -53,7 +53,8 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     // After the element's own delta listener (registered later) has put the cameras into the scene.
     if (delta.cameras || delta.removed) queueMicrotask(refresh);
   });
-  session.addEventListener('stageclose', refresh);
+  // Also on closing a stage: the element clears the scene, then returns to the free camera.
+  viewer.addEventListener('camerachange', refresh);
 
   const refine = select(
     'Global subdivision refinement level for every catmullClark / loop mesh. Auto: only meshes whose file sets subdivisionScheme, at the highest level (up to 2) within the Auto budget (View ▸ Subdivision). Meshes with their own refinement override keep it',
@@ -218,7 +219,6 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     stageNote.hidden = !stage;
   };
   viewer.addEventListener('camerachange', syncCamera);
-  cameras.addEventListener('change', syncCamera);
   syncCamera();
 
   const fileMenu = menu(

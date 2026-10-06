@@ -35,11 +35,19 @@ const MIRRORED: (keyof UsdSessionEventMap)[] = [
   'stageopen', 'stageloaded', 'stageclose', 'selectionchange', 'timechange', 'playchange', 'primschange', 'lockchange', 'refinechange', 'dirtychange', 'diskchange', 'log', 'error',
 ];
 const TOOL_KEYS: Record<string, ToolName> = { q: 'select', w: 'translate', e: 'rotate', r: 'scale' };
+/** The buttons at the top left of the viewport: tool, label, key. */
+const TOOL_BUTTONS: [ToolName, string, string][] = [
+  ['select', 'Select', 'Q'],
+  ['translate', 'Move', 'W'],
+  ['rotate', 'Rotate', 'E'],
+  ['scale', 'Scale', 'R'],
+  ['navigate', 'Navigate', 'N'],
+];
 /** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
 export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', forest: 'Forest', industrial: 'Industrial', studio: 'Studio' };
 /** The Help window's contents; the key handler in build() implements the keyboard rows. */
 const SHORTCUTS: [string, [string, string][]][] = [
-  ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale'], ['N', 'Navigate: W A S D move the camera; Move, Rotate and Scale are off']]],
+  ['Tools', [['Q', 'Select'], ['W', 'Move'], ['E', 'Rotate'], ['R', 'Scale'], ['N', 'Navigate: fly like a game (below); Move, Rotate and Scale are off'], ['Buttons', 'The same tools at the top left of the view']]],
   [
     'Selection',
     [
@@ -73,7 +81,10 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Left drag', 'Orbit'],
       ['Right drag', 'Pan'],
       ['Wheel / middle drag', 'Zoom (towards the cursor)'],
-      ['W A S D (navigate)', 'Forward, left, back, right; speed follows the zoom'],
+      ['Hold a mouse button (navigate)', 'Look around with the mouse; let go to use the mouse normally'],
+      ['W A S D (navigate)', 'Forward, left, back, right'],
+      ['Wheel (navigate)', 'Flight speed, shown at the top left of the view'],
+      ['Shift / Alt (navigate)', 'Faster / slower while held'],
       ['F', 'Frame the selection, or everything'],
       ['H', 'Hide the selection (session layer, not saved)'],
       ['Shift+H', 'Hide everything but the selection'],
@@ -519,13 +530,25 @@ export class UsdViewerElement extends HTMLElement {
       });
     }
     this.toggles.time.addEventListener('click', () => (this.panels = { timeline: !this.layout.timeline }));
+    const tools = h(
+      'div',
+      { className: 'tools' },
+      ...TOOL_BUTTONS.map(([name, label, key]) => {
+        const button = h('button', { value: name, title: name === 'navigate' ? `${label} (${key}): hold a mouse button to look, W A S D to fly` : `${label} (${key})` }, label);
+        button.addEventListener('click', () => (this.tool = name));
+        return button;
+      }),
+    );
+    const syncTools = () => tools.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.value === this.tool));
+    this.addEventListener('toolchange', syncTools);
+    syncTools();
     const app = h(
       'div',
       { className: 'app' },
       toolbar(this, this.viewport),
       h('aside', { className: 'left' }, h('div', { className: 'search' }, search, clear), this.tree.element, h('slot', { name: 'left' })),
       this.splitter('left'),
-      h('main', {}, this.canvas, this.status, this.statsBox, this.toggles.time),
+      h('main', {}, this.canvas, tools, this.status, this.statsBox, this.toggles.time),
       this.splitter('right'),
       h('aside', { className: 'right' }, this.picker, this.props.element, h('slot', { name: 'right' })),
       h('footer', { className: 'bottom' }, timeline(this.session), h('slot', { name: 'bottom' })),

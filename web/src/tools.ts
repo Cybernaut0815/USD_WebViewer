@@ -21,6 +21,8 @@ export interface Tool {
  */
 export class SelectTool implements Tool {
   protected readonly session: UsdSession;
+  /** Shift / Ctrl / Alt pick the selection mode and drag a rectangle; off: every click replaces. */
+  protected marquee = true;
   private abort: AbortController | null = null;
 
   constructor(session: UsdSession) {
@@ -45,8 +47,9 @@ export class SelectTool implements Tool {
       (e) => {
         down = null;
         if (e.button !== 0 || this.grabbed()) return;
-        const ctrl = e.ctrlKey || e.metaKey;
-        const mode: SelectMode | 'subtree' = e.shiftKey && e.altKey ? 'subtree' : e.shiftKey && ctrl ? 'up' : e.shiftKey ? 'add' : ctrl ? 'remove' : 'replace';
+        const ctrl = this.marquee && (e.ctrlKey || e.metaKey);
+        const shift = this.marquee && e.shiftKey;
+        const mode: SelectMode | 'subtree' = shift && e.altKey ? 'subtree' : shift && ctrl ? 'up' : shift ? 'add' : ctrl ? 'remove' : 'replace';
         down = { x: e.clientX, y: e.clientY, mode, orbit: viewport.controls.enabled };
         if (mode !== 'replace') {
           viewport.controls.enabled = false;
@@ -132,21 +135,47 @@ export function typing(e: KeyboardEvent): boolean {
 }
 
 const WASD = new Set(['w', 'a', 's', 'd']);
+/** Radians the view turns per pixel of mouse movement. */
+const LOOK = 0.003;
+/** Speed factors: one wheel notch, Shift held, Alt held (Ctrl is not used: Ctrl+W closes the tab). */
+const NOTCH = 1.25;
+const FAST = 4;
+const SLOW = 0.25;
 
 /**
- * Select, plus W A S D flying the free camera: W / S along the view, A / D sideways. The orbit
- * target moves along, so orbiting still turns about what is ahead; speed is the distance to it
- * per second, so zooming in slows the flight. No gizmo, so nothing can be moved.
+ * Game-style flight of the free camera. Holding the left or right button turns the view with the
+ * mouse; W / S fly along it, A / D sideways; the wheel sets the speed, Shift flies faster and Alt
+ * slower. A click without a drag still selects (left) or opens the prim menu (right). The orbit
+ * target moves along at its distance, so orbiting afterwards turns about what is ahead; speed is
+ * that distance per second times the wheel factor. No gizmo, so nothing can be moved.
  */
 export class NavigateTool extends SelectTool {
   private keys: AbortController | null = null;
   private frame = 0;
+  private restore: (() => void) | null = null;
+  protected marquee = false; // Shift and Alt set the speed here, not the selection mode
 
   activate(viewport: Viewport): void {
     super.activate(viewport);
     this.keys = new AbortController();
     const { signal } = this.keys;
+    const { canvas, controls } = viewport;
+    // The mouse looks and the wheel sets the speed; the orbit controls stay on for their context-menu guard.
+    controls.enableRotate = controls.enablePan = controls.enableZoom = false;
+    const readout = canvas.parentElement!.appendChild(Object.assign(document.createElement('div'), { className: 'fly-speed' }));
+    this.restore = () => {
+      controls.enableRotate = controls.enablePan = controls.enableZoom = true;
+      readout.remove();
+    };
     const held = new Set<string>();
+    let fast = false;
+    let slow = false;
+    const show = () => {
+      const factor = viewport.flySpeed * (fast ? FAST : 1) * (slow ? SLOW : 1);
+      readout.textContent = `Speed ×${factor < 1 ? factor.toFixed(2) : factor.toFixed(1)}${fast ? ' (Shift)' : slow ? ' (Alt)' : ''}`;
+      readout.title = 'Hold a mouse button to look around, W A S D to fly. Wheel: speed. Shift: faster, Alt: slower';
+    };
+    show();
     let last = 0;
     const forward = new THREE.Vector3();
     const right = new THREE.Vector3();
@@ -154,25 +183,38 @@ export class NavigateTool extends SelectTool {
       const dt = Math.min((now - last) / 1000, 0.1);
       last = now;
       const view = viewport.view;
-      const target = viewport.controls.target;
+      const target = controls.target;
       view.getWorldDirection(forward);
       right.crossVectors(forward, view.up).normalize();
+      const factor = viewport.flySpeed * (fast ? FAST : 1) * (slow ? SLOW : 1);
       const offset = new THREE.Vector3()
         .addScaledVector(forward, +held.has('w') - +held.has('s'))
         .addScaledVector(right, +held.has('d') - +held.has('a'))
-        .setLength(view.position.distanceTo(target) * dt);
+        .setLength(view.position.distanceTo(target) * factor * dt);
       view.position.add(offset);
       target.add(offset);
-      viewport.controls.update(); // fires change, which redraws
+      controls.update(); // fires change, which redraws
       this.frame = held.size ? requestAnimationFrame(step) : 0;
     };
-    const root = viewport.canvas.getRootNode();
+    const modifiers = (e: KeyboardEvent) => {
+      fast = e.shiftKey;
+      slow = e.altKey;
+      show();
+    };
+    const root = canvas.getRootNode();
     root.addEventListener(
       'keydown',
       (event) => {
         const e = event as KeyboardEvent;
+        if (typing(e)) return;
+        if (e.key === 'Shift' || e.key === 'Alt') {
+          if (e.key === 'Alt') e.preventDefault(); // a lone Alt would move the focus to the browser's menu
+          return modifiers(e);
+        }
         const key = e.key.toLowerCase();
-        if (!WASD.has(key) || e.ctrlKey || e.metaKey || e.altKey || typing(e) || viewport.cameraPath !== null) return;
+        if (!WASD.has(key) || e.ctrlKey || e.metaKey || viewport.cameraPath !== null) return;
+        if (e.altKey) e.preventDefault(); // Alt+D focuses the address bar
+        modifiers(e);
         held.add(key);
         if (this.frame) return;
         last = performance.now();
@@ -180,13 +222,64 @@ export class NavigateTool extends SelectTool {
       },
       { signal },
     );
-    root.addEventListener('keyup', (e) => held.delete((e as KeyboardEvent).key.toLowerCase()), { signal });
-    addEventListener('blur', () => held.clear(), { signal }); // a key released elsewhere sends no keyup
+    root.addEventListener(
+      'keyup',
+      (event) => {
+        const e = event as KeyboardEvent;
+        if (e.key === 'Alt' && !typing(e)) e.preventDefault();
+        held.delete(e.key.toLowerCase());
+        modifiers(e);
+      },
+      { signal },
+    );
+    addEventListener('blur', () => (held.clear(), (fast = slow = false), show()), { signal }); // a key released elsewhere sends no keyup
+
+    // Mouse look while a button is held: yaw about the camera's up, pitch short of straight up or down.
+    let looking: number | null = null;
+    const side = new THREE.Vector3();
+    const turn = (dx: number, dy: number) => {
+      const view = viewport.view;
+      const target = controls.target;
+      const direction = target.clone().sub(view.position);
+      const distance = direction.length();
+      direction.normalize().applyAxisAngle(view.up, -dx * LOOK);
+      side.crossVectors(direction, view.up);
+      if (side.lengthSq() > 1e-12) {
+        const pitched = direction.clone().applyAxisAngle(side.normalize(), -dy * LOOK);
+        if (Math.abs(pitched.dot(view.up)) < 0.99) direction.copy(pitched);
+      }
+      target.copy(view.position).addScaledVector(direction, distance);
+      controls.update();
+    };
+    canvas.addEventListener(
+      'pointerdown',
+      (e) => {
+        if ((e.button !== 0 && e.button !== 2) || viewport.cameraPath !== null) return;
+        looking = e.pointerId;
+        canvas.setPointerCapture(e.pointerId); // keeps looking when the pointer leaves the canvas
+      },
+      { signal },
+    );
+    canvas.addEventListener('pointermove', (e) => e.pointerId === looking && turn(e.movementX, e.movementY), { signal });
+    for (const type of ['pointerup', 'pointercancel', 'lostpointercapture'] as const) {
+      canvas.addEventListener(type, (e) => e.pointerId === looking && (looking = null), { signal });
+    }
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        viewport.flySpeed = Math.min(Math.max(viewport.flySpeed * NOTCH ** -Math.sign(e.deltaY), 1 / 64), 64);
+        show();
+      },
+      { signal, passive: false },
+    );
   }
 
   deactivate(): void {
     this.keys?.abort();
     this.keys = null;
+    this.restore?.();
+    this.restore = null;
     cancelAnimationFrame(this.frame);
     this.frame = 0;
     super.deactivate();

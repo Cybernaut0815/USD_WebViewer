@@ -12,6 +12,8 @@ A browser viewer and light editor for [OpenUSD](https://openusd.org) (Universal 
 - **Embeds** as a `<usd-viewer>` web component with a typed API.
 - **Syncs** with other programs: Python, C++ or curl push layers into the open stage through a small relay and receive the viewer's edits.
 
+Link to test the [viewer](https://cybernaut0815.github.io/USD_WebViewer/).
+
 ## Dependencies
 
 - **Node.js 24+**, for the page and the tests. npm installs three.js, Vite, TypeScript and Playwright.

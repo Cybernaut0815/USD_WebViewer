@@ -30,6 +30,8 @@ export interface UsdStageApi {
   /** World-space aligned bounds (min xyz, max xyz) of an imageable prim's subtree; null otherwise. */
   bounds(path: Path, time?: number): Promise<number[] | null>;
   attribute(path: Path, name: string, time?: number): Promise<Json>;
+  /** Like attribute, with arrays past 16 values as { length, head }. */
+  attributeHead(path: Path, name: string, time?: number): Promise<Json>;
   find(text: string, typeName?: string, limit?: number): Promise<Path[]>;
   /** The prim and everything below it, in traversal order (at most `limit`, default 10,000). */
   subtree(path: Path, limit?: number): Promise<Path[]>;
@@ -183,6 +185,7 @@ export class UsdSession extends EventTarget {
     prim: (path, time = this.currentTime) => this.core.call('primDetails', path, time),
     bounds: (path, time = this.currentTime) => this.core.call('primBounds', path, time),
     attribute: (path, name, time = this.currentTime) => this.core.call('attributeValue', path, name, time),
+    attributeHead: (path, name, time = this.currentTime) => this.core.call('attributeHead', path, name, time),
     find: (text, typeName = '', limit = 500) => this.core.call('findPrims', text, typeName, limit),
     subtree: (path, limit = SUBTREE_LIMIT) => this.core.call('primSubtree', path, limit),
     resolvePick: (rid, instance) => this.core.call('resolvePick', rid, instance),

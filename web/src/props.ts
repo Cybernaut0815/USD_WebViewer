@@ -92,6 +92,10 @@ export class Props {
   oncontext: (x: number, y: number, choices: CopyChoice[]) => void = () => {};
   /** Full value of an attribute, for copying what the panel shows truncated and for loading array values on demand. */
   attributeValue: (path: Path, name: string) => Promise<Json> = () => Promise.resolve(null);
+  /** First values of an array attribute (long ones as { length, head }): what an unloaded array box shows once loaded. */
+  attributeHead: (path: Path, name: string) => Promise<Json> = () => Promise.resolve(null);
+  /** Load numeric array values as soon as a prim is shown, instead of on click. */
+  autoLoad = false;
   /** World bounds of a prim (min xyz, max xyz): a subtree walk, asked for only while its section is open. */
   bounds: (path: Path) => Promise<number[] | null> = () => Promise.resolve(null);
   /** Which sections the user folded or unfolded; kept when another prim is shown. */
@@ -100,11 +104,11 @@ export class Props {
   constructor() {
     const target = (event: Event) => {
       const el = (event.target as Element).closest('.value');
-      return el && !(event.target as Element).closest('a') && copies.has(el) ? el : null;
+      return el && copies.has(el) ? el : null;
     };
     this.element.addEventListener('click', (event) => {
       const el = target(event);
-      if (!el) return;
+      if (!el || (event.target as Element).closest('a')) return; // links navigate or load; right click still copies
       this.oncopy(fullText(copies.get(el)!));
       el.classList.add('copied');
       setTimeout(() => el.classList.remove('copied'), 600);
@@ -150,6 +154,13 @@ export class Props {
     };
     const frame = h('button', {}, 'Frame');
     frame.addEventListener('click', () => this.onframe(s.path));
+    // Fillers of the unloaded array boxes below; Load all runs them.
+    const loaders: (() => void)[] = [];
+    const loadAll = h('button', { className: 'load-all', title: 'Load the first values of every array', hidden: true }, 'Load all');
+    loadAll.addEventListener('click', () => {
+      loadAll.hidden = true;
+      loaders.forEach((fill) => fill());
+    });
     const field = (name: string, text: string): (Node | string)[] => [name, box({ name, text })];
     const head: (Node | string)[][] = [
       field('Path', s.path),
@@ -164,7 +175,7 @@ export class Props {
     if (info.boundMaterial) head.push(['Material', box({ name: 'Material', text: info.boundMaterial }, link(info.boundMaterial))]);
     if (info.appliedSchemas.length) head.push(field('API schemas', info.appliedSchemas.join(', ')));
     const parts: HTMLElement[] = [
-      h('div', { className: 'head' }, h('strong', {}, s.name || '/'), h('span', { className: 'type' }, s.typeName), frame),
+      h('div', { className: 'head' }, h('strong', {}, s.name || '/'), h('span', { className: 'type' }, s.typeName), loadAll, frame),
       table(head),
     ];
 
@@ -241,17 +252,24 @@ export class Props {
       else details.addEventListener('toggle', () => details.open && fill(), { once: true });
       parts.push(details);
     }
-    // Numeric arrays arrive as null (the core does not decode them for the panel): a link loads the head.
+    // Numeric arrays arrive as null (the core does not decode them for the panel): a link, Load all or autoLoad fetches the head.
     const lazyArray = (name: string, typeName: string, path: Path) => {
       const load = h('a', { href: '#', title: 'Load the first values' }, 'load…');
       const el = box({ name, typeName, text: '', full: async () => usdaText(await this.attributeValue(path, name), typeName) }, load);
-      load.addEventListener('click', async (event) => {
-        event.preventDefault();
-        const value = await this.attributeValue(path, name);
-        const text = format(Array.isArray(value) && value.length > 16 ? { length: value.length, head: value.slice(0, 16) } : value);
+      let asked = false;
+      const fill = async () => {
+        if (asked) return;
+        asked = true;
+        const text = format(await this.attributeHead(path, name));
+        if (!el.isConnected) return; // another prim is shown by now
         el.textContent = text;
         copies.get(el)!.text = text;
+      };
+      load.addEventListener('click', (event) => {
+        event.preventDefault();
+        fill();
       });
+      loaders.push(fill);
       return el;
     };
     if (info.attributes.length) {
@@ -325,5 +343,7 @@ export class Props {
       parts.push(this.section('Composition', false, table(arcs), table(stack)));
     }
     this.element.replaceChildren(...parts);
+    if (this.autoLoad) loaders.forEach((fill) => fill());
+    else loadAll.hidden = !loaders.length;
   }
 }

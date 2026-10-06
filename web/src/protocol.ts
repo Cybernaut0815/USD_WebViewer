@@ -38,6 +38,8 @@ export interface CoreApi {
   /** World-space aligned bounds of an imageable prim's subtree (min xyz, max xyz); null otherwise. */
   primBounds(path: Path, time: number): number[] | null;
   attributeValue(path: Path, name: string, time: number): Json;
+  /** attributeValue with arrays past 16 values as { length, head }: what the panel shows. */
+  attributeHead(path: Path, name: string, time: number): Json;
   findPrims(text: string, typeName: string, limit: number): Path[];
   /** The prim and everything below it, in traversal order, at most `limit` paths. */
   primSubtree(path: Path, limit: number): Path[];

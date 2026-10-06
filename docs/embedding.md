@@ -52,13 +52,13 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 
 | Member | Purpose |
 |---|---|
-| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `attribute`, `find`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`; `importLayer(name, usdaOrBytes)` replaces a layer's content in place (not undoable) |
+| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `attributeHead`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `attributeHead` only its first 16 values (`{ length, head }`), `bounds` the world bounds. `importLayer(name, usdaOrBytes)` replaces a layer's content in place (not undoable) |
 | `live` | The [live link](live.md): `connect(relayUrl)`, `disconnect()`, `connected`, `id` |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |
 | `tool` | `'select' \| 'translate' \| 'rotate' \| 'scale' \| 'navigate'` |
-| `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping` | View settings |
+| `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping`, `autoLoadArrays` | View settings |
 | `time`, `play()`, `pause()`, `camera` | Animation and stage cameras |
 | `stats` | USD counts of what is drawn, plus `fps` / `frameMs` |
 | `three` | The renderer, scene, root group and camera, for hosts that draw on top |

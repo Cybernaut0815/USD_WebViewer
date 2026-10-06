@@ -50,7 +50,8 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   };
   session.addEventListener('delta', (e) => {
     const delta = (e as CustomEvent).detail;
-    if (delta.cameras || delta.removed) refresh();
+    // After the element's own delta listener (registered later) has put the cameras into the scene.
+    if (delta.cameras || delta.removed) queueMicrotask(refresh);
   });
   session.addEventListener('stageclose', refresh);
 

@@ -710,6 +710,22 @@ test.describe('wasm core', () => {
     expect(backgrounds).toEqual({ stage: true, colour: false, back: true, lit: true });
   });
 
+  test('the camera menu lists stage cameras and looks through them', async ({ page }) => {
+    await open(page, SHOWCASE);
+    const cameras = page.locator('usd-viewer select[title="Camera"]');
+    await expect(cameras.locator('option[value="/World/Camera"]')).toHaveCount(1);
+    await cameras.selectOption('/World/Camera');
+    const view = () =>
+      page.evaluate(async () => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        await viewer.idle();
+        return { path: viewer.camera, position: viewer.three.camera.position.toArray().map((v) => +v.toFixed(3)) };
+      });
+    expect(await view()).toEqual({ path: '/World/Camera', position: [0, 2.5, 9] });
+    await cameras.selectOption('');
+    expect((await view()).path).toBeNull();
+  });
+
   test('MaterialX networks render through three.js', async ({ page }) => {
     const errors = await open(page, '/?forceWebGL=1&src=samples/materialx.usda');
     expect(errors).toEqual([]);

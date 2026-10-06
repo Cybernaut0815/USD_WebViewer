@@ -335,6 +335,7 @@ export class UsdViewerElement extends HTMLElement {
   }
   set camera(path: Path | null) {
     this.viewport.lookThrough(path);
+    this.dispatchEvent(new Event('camerachange'));
   }
   set exposure(ev: number) {
     this.viewport.exposure = ev;
@@ -663,7 +664,7 @@ export class UsdViewerElement extends HTMLElement {
       clearInterval(this.statsTimer);
       this.updateStats();
       this.viewport.sync.clear();
-      this.viewport.lookThrough(null);
+      this.camera = null; // after the clear: the camera menu rebuilds from the empty scene
       this.tree.clear();
       this.props.show(null);
     });

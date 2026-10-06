@@ -6,6 +6,16 @@ import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 import logo from './usd-logo.svg';
 
+/** One-click stages from the USD Working Group assets (CC BY / CC BY-SA / Apache-2.0), pinned to a commit. */
+const EXAMPLES_BASE = 'https://raw.githubusercontent.com/usd-wg/assets/3b75c2dad6a494897557dcca0098257bcf42a8c6/full_assets/';
+const EXAMPLES: [label: string, path: string][] = [
+  ['McUsd', 'McUsd/McUsd.usdz'],
+  ['Shader ball', 'StandardShaderBall/standard_shader_ball_scene.usda'],
+  ['Elephant with monochord', 'ElephantWithMonochord/SoC-ElephantWithMonochord.usdc'],
+  ['Teapot', 'Teapot/Teapot.usd'],
+  ['Chess set (large, ~1 min)', 'OpenChessSet/chess_set.usda'],
+];
+
 export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLElement {
   const session = viewer.session;
   const button = (label: string, title: string, action: () => void) => {
@@ -31,18 +41,20 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
 
   const cameras = h('select', { title: 'Camera' }) as HTMLSelectElement;
   cameras.addEventListener('change', () => (viewer.camera = cameras.value || null));
+  // Shows the camera the view actually uses: "Free camera" unless a stage camera is looked through.
   const refresh = () => {
-    const current = cameras.value;
     cameras.replaceChildren(
       h('option', { value: '' }, 'Free camera'),
-      ...viewport.sync.cameras().map((c) => h('option', { value: c.path, selected: c.path === current }, c.path)),
+      ...viewport.sync.cameras().map((c) => h('option', { value: c.path, selected: c.path === viewer.camera }, c.path)),
     );
   };
   session.addEventListener('delta', (e) => {
     const delta = (e as CustomEvent).detail;
-    if (delta.cameras || delta.removed) refresh();
+    // After the element's own delta listener (registered later) has put the cameras into the scene.
+    if (delta.cameras || delta.removed) queueMicrotask(refresh);
   });
-  session.addEventListener('stageclose', refresh);
+  // Also on closing a stage: the element clears the scene, then returns to the free camera.
+  viewer.addEventListener('camerachange', refresh);
 
   const refine = select(
     'Global subdivision refinement level for every catmullClark / loop mesh. Auto: only meshes whose file sets subdivisionScheme, at the highest level (up to 2) within the Auto budget (View ▸ Subdivision). Meshes with their own refinement override keep it',
@@ -207,7 +219,6 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     stageNote.hidden = !stage;
   };
   viewer.addEventListener('camerachange', syncCamera);
-  cameras.addEventListener('change', syncCamera);
   syncCamera();
 
   const fileMenu = menu(
@@ -288,6 +299,11 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
       h('label', {}, 'Far ', far),
     ],
   );
+  // Stages loaded over the network from GitHub (CORS-enabled), so the hosted page has something to show.
+  const examplesMenu = menu('Examples', [
+    'From github.com/usd-wg/assets',
+    ...EXAMPLES.map(([label, path]) => item(label, EXAMPLES_BASE + path, () => viewer.open(EXAMPLES_BASE + path).catch(() => {}))),
+  ]);
 
   const element = h(
     'header',
@@ -296,6 +312,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     fileMenu,
     editMenu,
     viewMenu,
+    examplesMenu,
     save,
     tool,
     cameras,

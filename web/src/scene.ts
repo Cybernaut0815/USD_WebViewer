@@ -729,6 +729,7 @@ export class SceneSync {
           directional.castShadow = true;
           directional.shadow.mapSize.set(2048, 2048);
           directional.shadow.bias = -0.0005;
+          directional.shadow.radius = 3; // PCF kernel in texels: soft edges (r186 has no PCFSoftShadowMap)
           // The map is view independent: rendered when the content changes (invalidate()), not per frame.
           directional.shadow.autoUpdate = false;
           directional.shadow.needsUpdate = true;

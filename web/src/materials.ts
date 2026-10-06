@@ -98,7 +98,7 @@ export class TextureCache {
     const tex = new THREE.Texture(bitmap);
     tex.flipY = false;
     tex.colorSpace = colorSpace;
-    tex.anisotropy = 4;
+    tex.anisotropy = 16; // both backends clamp to the device's max
     tex.needsUpdate = true;
     return tex;
   }
@@ -256,6 +256,8 @@ async function buildPreviewSurface(
     m.transparent = true;
     m.depthWrite = false;
   }
+  // three's shadow pass ignores opacityNode: mask it there too, so cutouts cast cutout shadows.
+  if (opacity) m.maskShadowNode = opacity.greaterThan(threshold > 0 ? threshold : 0.5);
 
   const normal = await b.connected(surface, 'normal');
   // normalMap() decodes 0..1 samples itself; a (2, -1) scale/bias has already produced -1..1.

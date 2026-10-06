@@ -6,6 +6,16 @@ import type { DisplayMode } from './scene.ts';
 import type { ToneMapping, Viewport } from './viewport.ts';
 import logo from './usd-logo.svg';
 
+/** One-click stages from the USD Working Group assets (CC BY / CC BY-SA / Apache-2.0), pinned to a commit. */
+const EXAMPLES_BASE = 'https://raw.githubusercontent.com/usd-wg/assets/3b75c2dad6a494897557dcca0098257bcf42a8c6/full_assets/';
+const EXAMPLES: [label: string, path: string][] = [
+  ['McUsd', 'McUsd/McUsd.usdz'],
+  ['Shader ball', 'StandardShaderBall/standard_shader_ball_scene.usda'],
+  ['Elephant with monochord', 'ElephantWithMonochord/SoC-ElephantWithMonochord.usdc'],
+  ['Teapot', 'Teapot/Teapot.usd'],
+  ['Chess set (large, ~1 min)', 'OpenChessSet/chess_set.usda'],
+];
+
 export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLElement {
   const session = viewer.session;
   const button = (label: string, title: string, action: () => void) => {
@@ -288,6 +298,11 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
       h('label', {}, 'Far ', far),
     ],
   );
+  // Stages loaded over the network from GitHub (CORS-enabled), so the hosted page has something to show.
+  const examplesMenu = menu('Examples', [
+    'From github.com/usd-wg/assets',
+    ...EXAMPLES.map(([label, path]) => item(label, EXAMPLES_BASE + path, () => viewer.open(EXAMPLES_BASE + path).catch(() => {}))),
+  ]);
 
   const element = h(
     'header',
@@ -296,6 +311,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     fileMenu,
     editMenu,
     viewMenu,
+    examplesMenu,
     save,
     tool,
     cameras,

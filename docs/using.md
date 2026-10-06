@@ -2,7 +2,7 @@
 
 [← README](../README.md)
 
-Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on the viewer, or with `?src=<url>`. Press **?** or **F1** for the Help window, which lists every key and mouse gesture. Keys work while the viewport or the hierarchy has focus, but not while you are typing in a field.
+Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on the viewer, or with `?src=<url>`. The **Examples** menu loads sample stages from [github.com/usd-wg/assets](https://github.com/usd-wg/assets) over the network. Press **?** or **F1** for the Help window, which lists every key and mouse gesture. Keys work while the viewport or the hierarchy has focus, but not while you are typing in a field.
 
 ## Navigation and selection
 

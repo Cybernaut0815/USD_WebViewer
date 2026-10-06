@@ -104,7 +104,12 @@ std::string primDetails(const std::string& path, double time) { return gStage.De
 std::string primBounds(const std::string& path, double time) { return gStage.Bounds(path, time); }
 std::string attributeValue(const std::string& path, const std::string& name, double time)
 {
-    return gStage.AttributeValue(path, name, time);
+    return gStage.AttributeValue(path, name, time, size_t(-1));
+}
+/// The first 16 values of an array, for the details panel: no full array as JSON.
+std::string attributeHead(const std::string& path, const std::string& name, double time)
+{
+    return gStage.AttributeValue(path, name, time, 16);
 }
 std::string findPrims(const std::string& text, const std::string& typeName, int limit)
 {
@@ -226,6 +231,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("primDetails", &primDetails);
     function("primBounds", &primBounds);
     function("attributeValue", &attributeValue);
+    function("attributeHead", &attributeHead);
     function("findPrims", &findPrims);
     function("exportPrim", &exportPrim);
     function("setRefinement", &setRefinement);

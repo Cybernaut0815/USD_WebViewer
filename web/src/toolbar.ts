@@ -98,7 +98,10 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   });
   const cull = h('input', { type: 'checkbox' }) as HTMLInputElement;
   cull.addEventListener('change', () => viewport.sync.setCullBackfaces(cull.checked));
-  const exposure = h('input', { type: 'range', min: '-6', max: '6', step: '0.25', value: '0', title: 'Exposure (EV)' }) as HTMLInputElement;
+  const autoLoad = h('input', { type: 'checkbox', checked: viewer.autoLoadArrays }) as HTMLInputElement;
+  autoLoad.addEventListener('change', () => (viewer.autoLoadArrays = autoLoad.checked));
+  viewer.addEventListener('autoloadchange', () => (autoLoad.checked = viewer.autoLoadArrays));
+  const exposure = h('input',{ type: 'range', min: '-6', max: '6', step: '0.25', value: '0', title: 'Exposure (EV)' }) as HTMLInputElement;
   exposure.addEventListener('input', () => (viewer.exposure = Number(exposure.value)));
 
   const messagesButton = h('button', { title: 'Messages' }, '0 messages') as HTMLButtonElement;
@@ -250,6 +253,10 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     'View',
     ['Panels', ...panelBoxes, item('Frame', 'Frame selection or everything (F)', () => viewer.frame(session.selection))],
     ['Purposes', ...purposeBoxes.map((box) => h('label', {}, box, ` ${box.value}`))],
+    [
+      'Details',
+      h('label', { title: 'Fill numeric arrays (points, indices, uvs) as soon as a prim is selected. Off: click load… or Load all' }, autoLoad, ' Load array values automatically'),
+    ],
     [
       'Subdivision',
       h('label', { title: 'Refine: auto smooths authored subdivision surfaces up to this many triangles' }, 'Auto budget ', budget, ' M triangles'),

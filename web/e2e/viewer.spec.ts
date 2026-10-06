@@ -276,6 +276,27 @@ test.describe('mock core', () => {
     await expect.poll(copied).toBe('color3f[] primvars:displayColor = [(0.8, 0.2, 0.2)]');
   });
 
+  test('numeric arrays load on click, with Load all, or automatically', async ({ page }) => {
+    await page.addInitScript(() => localStorage.clear());
+    await open(page, MOCK);
+    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
+    const value = page.locator('usd-viewer .props tr', { hasText: 'faceVertexCounts' }).locator('.value');
+    const loadAll = page.locator('usd-viewer .props .load-all');
+    await expect(value).toHaveText('load…');
+    await loadAll.click();
+    await expect(value).toHaveText('[4, 4, 4]');
+    await expect(loadAll).toBeHidden();
+    // The setting fills them on selection; Load all is not needed then.
+    await page.locator('usd-viewer details.menu summary', { hasText: 'View' }).click();
+    await page.locator('usd-viewer label', { hasText: 'Load array values automatically' }).click();
+    await page.keyboard.press('Escape');
+    await page.locator('usd-viewer .row .name', { hasText: 'Light' }).click();
+    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
+    await expect(value).toHaveText('[4, 4, 4]');
+    await expect(loadAll).toBeHidden();
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem('usd-viewer:layout')!).autoLoadArrays)).toBe(true);
+  });
+
   test('panels hide, the splitter resizes, and the Help window lists the keys', async ({ page }) => {
     await page.addInitScript(() => localStorage.clear());
     await open(page, MOCK);

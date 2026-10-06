@@ -980,7 +980,7 @@ std::string Stage::Details(const std::string& path, double time) const
     return stream.str();
 }
 
-std::string Stage::AttributeValue(const std::string& path, const std::string& name, double time) const
+std::string Stage::AttributeValue(const std::string& path, const std::string& name, double time, size_t maxElements) const
 {
     std::ostringstream stream;
     JsWriter w(stream);
@@ -988,7 +988,7 @@ std::string Stage::AttributeValue(const std::string& path, const std::string& na
     if (const UsdPrim prim = _stage ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim()) {
         prim.GetAttribute(TfToken(name)).Get(&value, Time(time));
     }
-    WriteJsonValue(w, value, size_t(-1));
+    WriteJsonValue(w, value, maxElements);
     return stream.str();
 }
 

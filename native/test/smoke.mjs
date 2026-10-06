@@ -252,6 +252,9 @@ def Xform "World"
   assert.equal(st.value, null, 'numeric arrays are not decoded for the panel');
   assert.equal(st.indices, null);
   assert.equal(JSON.parse(core.attributeValue('/World/Box', 'primvars:st:indices', NaN)).length, 24, 'the panel loads them on demand');
+  const head = JSON.parse(core.attributeHead('/World/Box', 'primvars:st:indices', NaN));
+  assert.equal(head.length, 24, 'attributeHead gives the length');
+  assert.equal(head.head.length, 16, 'and only the first 16 values');
   assert.deepEqual(info.attributes.find((a) => a.name === 'cornerIndices').value, [], 'unauthored arrays keep their fallback');
   assert.equal(info.attributes.find((a) => a.name === 'primvars:st').metadata.interpolation, 'faceVarying');
   assert.equal(info.attributes.find((a) => a.name === 'refinementEnableOverride').custom, true);

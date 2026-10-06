@@ -19,7 +19,7 @@ import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } f
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode | 'navigate';
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event; refinebudgetchange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event };
 export { DEFAULT_BACKGROUND };
 export type { CameraSettings };
 /** Which panels around the viewport are shown. */
@@ -130,7 +130,7 @@ export class UsdViewerElement extends HTMLElement {
   private skyName: string | null = null;
   /** Panel widths and visibility, kept per browser. */
   // widths: share of the element; refineBudget: null follows the hardware
-  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true, background: DEFAULT_BACKGROUND, refineBudget: null as number | null };
+  private layout = { left: 0.2, right: 0.25, hierarchy: true, details: true, timeline: true, background: DEFAULT_BACKGROUND, refineBudget: null as number | null, autoLoadArrays: false };
   /** Tabs on the viewport's borders that show and hide the panels. */
   private readonly toggles = {
     left: h('button', { className: 'toggle side' }),
@@ -172,6 +172,7 @@ export class UsdViewerElement extends HTMLElement {
       Object.assign(this.layout, saved);
     } catch {} // storage blocked or corrupt: defaults
     this.viewport.background = this.layout.background;
+    this.props.autoLoad = this.layout.autoLoadArrays = this.layout.autoLoadArrays === true;
     root.append(this.build());
     this.wire();
     this.ready = this.start();
@@ -366,6 +367,17 @@ export class UsdViewerElement extends HTMLElement {
     this.layout.background = this.viewport.background;
     this.applyLayout();
     this.dispatchEvent(new Event('backgroundchange'));
+  }
+
+  /** Numeric array values (points, indices, uvs) in the details panel: loaded on selection, or on click (default). Remembered per browser. */
+  get autoLoadArrays(): boolean {
+    return this.layout.autoLoadArrays;
+  }
+  set autoLoadArrays(on: boolean) {
+    this.props.autoLoad = this.layout.autoLoadArrays = on;
+    this.applyLayout();
+    this.showProps(this.active);
+    this.dispatchEvent(new Event('autoloadchange'));
   }
 
   /** Panels around the viewport; hidden ones give their space to it. Remembered per browser. */
@@ -687,6 +699,7 @@ export class UsdViewerElement extends HTMLElement {
     this.props.onrefinement = (path, enabled, level) => this.usd.setRefinement(path, enabled, level).catch(() => {});
     // Values in the panel are truncated; the clipboard gets the whole thing.
     this.props.attributeValue = (path, name) => this.usd.attribute(path, name);
+    this.props.attributeHead = (path, name) => this.usd.attributeHead(path, name);
     this.props.bounds = (path) => this.usd.bounds(path);
     this.props.oncopy = (text) => text.then(copyText).catch(() => {});
     this.props.oncontext = (x, y, choices) =>

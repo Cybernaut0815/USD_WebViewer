@@ -99,9 +99,11 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   budget.addEventListener('change', () => budget.value && (viewer.refineBudget = Number(budget.value) * 1e6));
   viewer.addEventListener('refinebudgetchange', syncBudget);
   syncBudget();
-  const background = h('input', { type: 'color', value: viewer.backgroundColor, title: 'Background colour' }) as HTMLInputElement;
+  // A colour input takes #rrggbb only: it shows the default while the background is 'transparent'.
+  const swatch = () => (viewer.backgroundColor === 'transparent' ? DEFAULT_BACKGROUND : viewer.backgroundColor);
+  const background = h('input', { type: 'color', value: swatch(), title: 'Background colour' }) as HTMLInputElement;
   background.addEventListener('input', () => (viewer.backgroundColor = background.value));
-  viewer.addEventListener('backgroundchange', () => (background.value = viewer.backgroundColor));
+  viewer.addEventListener('backgroundchange', () => (background.value = swatch()));
 
   const purposeBoxes = ['default', 'proxy', 'render', 'guide'].map((purpose) => {
     const box = h('input', { type: 'checkbox', checked: purpose === 'default' || purpose === 'proxy', value: purpose }) as HTMLInputElement;
@@ -325,7 +327,7 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   viewer.addEventListener('dragover', (event) => event.preventDefault());
   viewer.addEventListener('drop', async (event) => {
     event.preventDefault();
-    if (event.dataTransfer) viewer.open(await collectDrop(event.dataTransfer)).catch(() => {});
+    if (event.dataTransfer && !viewer.hasAttribute('readonly')) viewer.open(await collectDrop(event.dataTransfer)).catch(() => {});
   });
   return element;
 }

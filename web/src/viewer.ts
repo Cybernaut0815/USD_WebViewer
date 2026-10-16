@@ -4,7 +4,7 @@
 import type * as THREE from 'three/webgpu';
 import type { LocalFile } from './files.ts';
 import { copyText, type MenuItem, showMenu } from './menu.ts';
-import { TextureCache } from './materials.ts';
+import { ACTIVE, HIGHLIGHT, TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
 import type { Path, PickResult, StageInfo } from './protocol.ts';
 import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
@@ -13,7 +13,7 @@ import { toolbar } from './toolbar.ts';
 import { NavigateTool, SelectTool, type TransformMode, TransformTool, typing } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
-import type { DisplayMode, SceneStats } from './scene.ts';
+import type { DisplayMode, Item, SceneStats } from './scene.ts';
 import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
@@ -214,6 +214,12 @@ export class UsdViewerElement extends HTMLElement {
     scene: THREE.Scene;
     root: THREE.Group;
     camera: THREE.Camera;
+    /** Host objects: framed (frame() without paths) and clipped with the stage, never picked. */
+    overlay: THREE.Group;
+    /** Called before each frame is drawn, with that frame's camera in place. */
+    beforeRender: Set<() => void>;
+    /** The render items, live. Instanced meshes: the prototype's (Hydra) path, stage-space instance matrices. */
+    items(): readonly Readonly<Pick<Item, 'rid' | 'path' | 'kind' | 'object' | 'instances'>>[];
     objectsFor(path: Path): THREE.Object3D[];
     invalidate(): void;
   } {
@@ -223,6 +229,9 @@ export class UsdViewerElement extends HTMLElement {
       scene: v.scene,
       root: v.sync.root,
       camera: v.camera,
+      overlay: v.overlay,
+      beforeRender: v.beforeRender,
+      items: () => [...v.sync.items.values()],
       objectsFor: (path) => v.sync.objectsFor(path),
       invalidate: () => v.invalidate(),
     };
@@ -308,8 +317,10 @@ export class UsdViewerElement extends HTMLElement {
     if (options.frame) this.frame(list);
   }
 
+  /** Frames the prims, or with no paths the whole stage and the shown overlay objects. */
   frame(paths?: readonly Path[]): void {
-    this.viewport.frame(paths?.length ? paths.flatMap((p) => this.viewport.sync.objectsFor(p)) : undefined);
+    const v = this.viewport;
+    v.frame(paths?.length ? paths.flatMap((p) => v.sync.objectsFor(p)) : [v.sync.root, ...v.overlay.children.filter((o) => o.visible)]);
   }
 
   async pick(clientX: number, clientY: number): Promise<PickResult | null> {
@@ -370,7 +381,10 @@ export class UsdViewerElement extends HTMLElement {
     });
   }
 
-  /** Background colour (#rrggbb) wherever no sky or dome texture fills the background. Remembered per browser. */
+  /**
+   * Background colour (#rrggbb, or 'transparent' to show the page behind) wherever no sky or dome texture fills the
+   * background. Remembered per browser.
+   */
   get backgroundColor(): string {
     return this.viewport.background;
   }
@@ -379,6 +393,15 @@ export class UsdViewerElement extends HTMLElement {
     this.layout.background = this.viewport.background;
     this.applyLayout();
     this.dispatchEvent(new Event('backgroundchange'));
+  }
+
+  /** Selection fill of every selected prim, the active one included. Page-wide: all viewers share these materials. */
+  set highlight({ color, opacity }: { color: string; opacity: number }) {
+    for (const material of [HIGHLIGHT, ACTIVE]) {
+      material.color.set(color);
+      material.opacity = opacity;
+    }
+    this.viewport.invalidate();
   }
 
   /** Numeric array values (points, indices, uvs) in the details panel: loaded on selection, or on click (default). Remembered per browser. */
@@ -560,6 +583,7 @@ export class UsdViewerElement extends HTMLElement {
       const target = e.composedPath()[0] as HTMLElement;
       const key = e.key.toLowerCase();
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+      if (this.hasAttribute('readonly') && !(key === 'f' && plain)) return; // readonly: F only (the Help window lists editing keys)
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();
@@ -632,6 +656,7 @@ export class UsdViewerElement extends HTMLElement {
     // Side panels are a share of the window, so they scale with it; the timebar keeps its own height.
     const column = (shown: boolean, share: number) => (shown ? `max(120px, ${(share * 100).toFixed(2)}%)` : '0');
     app.style.gridTemplateColumns = `${column(hierarchy, left)} auto minmax(0, 1fr) auto ${column(details, right)}`;
+    app.style.background = this.layout.background === 'transparent' ? 'none' : '';
     app.classList.toggle('no-left', !hierarchy);
     app.classList.toggle('no-right', !details);
     app.classList.toggle('no-time', !timeline);
@@ -733,6 +758,7 @@ export class UsdViewerElement extends HTMLElement {
     this.tree.onlock = (path, locked) => session.setLocked(path, locked);
     // The prim menu: right click in the hierarchy or on the prim in the viewport.
     this.tree.oncontext = this.viewport.oncontext = (path, x, y) => {
+      if (this.hasAttribute('readonly')) return;
       const locked = session.isLocked(path);
       const items: MenuItem[] = [
         {

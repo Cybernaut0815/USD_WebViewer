@@ -33,6 +33,7 @@ Build the element with `npm run build:lib` (in `web/`). The output is `web/dist-
 | `src` | URL of the stage to open |
 | `core-url`, `skies-url` | Where the core and the skies are served (default: `core/`, `skies/` next to the page) |
 | `panels="none"` | Viewport only: no toolbar, panels or overlays |
+| `readonly` | No edits from the view: of the keys only F works, no prim menu, no drop-to-open. Selection and navigation stay. The panels still edit, so pair it with `panels="none"` |
 | `force-webgl` | Use the WebGL2 backend even where WebGPU is available |
 
 ## Structure
@@ -53,13 +54,14 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 |---|---|
 | `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `attributeHead`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `attributeHead` only its first 16 values (`{ length, head }`), `bounds` the world bounds. |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
-| `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing |
+| `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing; `frame()` without paths frames the stage and the shown `three.overlay` objects |
+| `highlight = { color, opacity }` | Fill of the selected prims (`#rrggbb`, 0 to 1). Page-wide: every viewer on the page shares it |
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |
 | `tool` | `'select' \| 'translate' \| 'rotate' \| 'scale' \| 'navigate'` |
-| `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping`, `autoLoadArrays` | View settings |
+| `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping`, `autoLoadArrays` | View settings; `backgroundColor = 'transparent'` lets the page show through |
 | `time`, `play()`, `pause()`, `camera` | Animation and stage cameras |
 | `stats` | USD counts of what is drawn, plus `fps` / `frameMs` |
-| `three` | The renderer, scene, root group and camera, for hosts that draw on top |
+| `three` | For hosts that draw on top: `renderer`, `scene`, `root` (the stage objects), `camera` (read it again each time: it changes with the projection and stage cameras); `overlay`, a group for host objects that are framed and clipped with the stage but never picked; `beforeRender`, a set of per-frame hooks; `items()`, the render items (`rid`, `path`, `kind`, `object`, `instances`); `objectsFor(path)`; `invalidate()` (the view renders on demand) |
 | `registerScheme(scheme, { gateway, getAuth })` | Route a URL scheme through an HTTP gateway (see below) |
 | `showHelp()`, `screenshot()` | Help window, image of the view |
 

@@ -37,7 +37,7 @@ import * as units from './units.ts';
 
 const GREY = [0.18, 0.18, 0.18];
 
-interface Item {
+export interface Item {
   rid: Rid;
   path: Path;
   kind: 'mesh' | 'curves' | 'points' | 'light' | 'camera';
@@ -489,7 +489,7 @@ export class SceneSync {
   private materialsFor(item: Item, vertexColors: boolean): THREE.Material | THREE.Material[] {
     if (this.displayMode === 'wire') return HIDDEN;
     const single = this.cullBackfaces && !item.doubleSided;
-    if (this.displayMode.startsWith('plain')) return single ? PLAIN.single : PLAIN.double;
+    if (this.displayMode.startsWith('plain')) return item.flat ? (single ? PLAIN.flatSingle : PLAIN.flatDouble) : single ? PLAIN.single : PLAIN.double;
     const style = (material: THREE.Material) => {
       (material as any).flatShading = item.flat;
       material.side = single ? THREE.FrontSide : THREE.DoubleSide;

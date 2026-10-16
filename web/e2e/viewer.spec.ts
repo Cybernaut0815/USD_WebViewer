@@ -711,6 +711,40 @@ test.describe('mock core', () => {
     expect(result.same).toBe(true);
     expect(result.after).not.toBeCloseTo(result.before, 3);
   });
+
+  test('embedding: readonly keys, render items, overlay framing, transparent background, bare layout', async ({ page }) => {
+    await open(page, `${MOCK}&panels=none`);
+    await page.evaluate(() => {
+      document.querySelector('usd-viewer')!.setAttribute('readonly', '');
+      // Handled keys are prevented, so defaultPrevented tells which ones the viewer acted on.
+      document.addEventListener('keydown', (e) => ((window as any).handled ??= []).push(e.defaultPrevented));
+    });
+    await page.locator('usd-viewer canvas').focus();
+    for (const key of ['h', 'w', 'f']) await page.keyboard.press(key);
+    expect(await page.evaluate(() => (window as any).handled)).toEqual([false, false, true]);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.backgroundColor = 'transparent';
+      const pixel = new OffscreenCanvas(1, 1).getContext('2d')!;
+      pixel.drawImage(await createImageBitmap(await viewer.screenshot()), -2, -2); // (2, 2) is background
+      const far = viewer.three.objectsFor('/World/Cube')[0].clone(); // an overlay object far to the side
+      far.matrix.setPosition(50, 0, 0);
+      far.matrixWorldNeedsUpdate = true; // a frozen matrix (matrixAutoUpdate off) edited by hand
+      viewer.three.overlay.add(far);
+      viewer.frame();
+      await viewer.idle(); // drawn: the camera matrices are current
+      const ndc = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
+      return {
+        tool: viewer.tool,
+        meshes: viewer.three.items().filter((i) => i.kind === 'mesh').map((i) => i.path),
+        background: viewer.backgroundColor,
+        alpha: pixel.getImageData(0, 0, 1, 1).data[3],
+        framed: Math.abs(ndc.x) < 1 && Math.abs(ndc.y) < 1,
+        bare: viewer.shadowRoot!.querySelector('canvas')!.clientWidth === viewer.clientWidth,
+      };
+    });
+    expect(result).toEqual({ tool: 'select', meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, bare: true });
+  });
 });
 
 /* ---------- the real wasm core, against the sample stage ---------- */

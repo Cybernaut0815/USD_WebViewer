@@ -7,7 +7,7 @@ export { SelectTool, type Tool, type TransformMode, TransformTool } from './tool
 export type { OpenSource, ToolName, UsdViewerEventMap } from './viewer.ts';
 export { UsdViewerElement };
 
-customElements.define('usd-viewer', UsdViewerElement);
+if (!customElements.get('usd-viewer')) customElements.define('usd-viewer', UsdViewerElement); // a second load (Vite hot update) keeps the first
 
 declare global {
   interface HTMLElementTagNameMap {

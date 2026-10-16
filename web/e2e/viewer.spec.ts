@@ -730,12 +730,19 @@ test.describe('mock core', () => {
       const far = viewer.three.objectsFor('/World/Cube')[0].clone(); // an overlay object far to the side
       far.matrix.setPosition(50, 0, 0);
       far.matrixWorldNeedsUpdate = true; // a frozen matrix (matrixAutoUpdate off) edited by hand
-      viewer.three.overlay.add(far);
+      const floor = far.clone(); // opted out of framing: it must not pull the camera back
+      floor.matrix.setPosition(-5000, 0, 0);
+      floor.matrixWorldNeedsUpdate = true;
+      floor.userData.frame = false;
+      viewer.three.overlay.add(far, floor);
+      viewer.tool = 'translate'; // readonly: no transform tools
       viewer.frame();
       await viewer.idle(); // drawn: the camera matrices are current
       const ndc = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
+      const away = floor.getWorldPosition(floor.position.clone()).project(viewer.three.camera);
       return {
         tool: viewer.tool,
+        unframed: Math.abs(away.x) > 1 || Math.abs(away.y) > 1,
         meshes: viewer.three.items().filter((i) => i.kind === 'mesh').map((i) => i.path),
         background: viewer.backgroundColor,
         alpha: pixel.getImageData(0, 0, 1, 1).data[3],
@@ -743,7 +750,7 @@ test.describe('mock core', () => {
         bare: viewer.shadowRoot!.querySelector('canvas')!.clientWidth === viewer.clientWidth,
       };
     });
-    expect(result).toEqual({ tool: 'select', meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, bare: true });
+    expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, bare: true });
   });
 });
 

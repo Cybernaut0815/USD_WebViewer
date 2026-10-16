@@ -122,7 +122,7 @@ export function hardwareRefineBudget(): number {
 }
 
 export class UsdViewerElement extends HTMLElement {
-  static readonly observedAttributes = ['src', 'panels'];
+  static readonly observedAttributes = ['src', 'panels', 'readonly'];
 
   /** The headless part: stage, selection, time, commands. Modules and host pages work with this. */
   readonly session: UsdSession;
@@ -194,6 +194,7 @@ export class UsdViewerElement extends HTMLElement {
   attributeChangedCallback(name: string, _old: string | null, value: string | null): void {
     if (name === 'src' && value) this.open(value).catch(() => {});
     if (name === 'panels') this.shadowRoot!.firstElementChild!.classList.toggle('bare', value === 'none');
+    if (name === 'readonly' && value !== null && this.tool !== 'navigate') this.tool = 'select'; // drops a transform gizmo
   }
 
   /* ---------- public API (delegates to the session and the viewport) ---------- */
@@ -214,7 +215,7 @@ export class UsdViewerElement extends HTMLElement {
     scene: THREE.Scene;
     root: THREE.Group;
     camera: THREE.Camera;
-    /** Host objects: framed (frame() without paths) and clipped with the stage, never picked. */
+    /** Host objects: framed (frame() without paths; userData.frame = false opts out) and clipped with the stage, never picked. */
     overlay: THREE.Group;
     /** Called before each frame is drawn, with that frame's camera in place. */
     beforeRender: Set<() => void>;
@@ -283,7 +284,7 @@ export class UsdViewerElement extends HTMLElement {
     return this.toolName;
   }
   set tool(name: ToolName) {
-    if (name === this.toolName) return;
+    if (name === this.toolName || (this.hasAttribute('readonly') && name !== 'select' && name !== 'navigate')) return; // readonly: no transform tools
     this.toolName = name;
     const current = this.viewport.tool;
     if (name === 'select') this.viewport.tool = new SelectTool(this.session);
@@ -317,10 +318,10 @@ export class UsdViewerElement extends HTMLElement {
     if (options.frame) this.frame(list);
   }
 
-  /** Frames the prims, or with no paths the whole stage and the shown overlay objects. */
+  /** Frames the prims, or with no paths the whole stage and the shown overlay objects (but those with userData.frame = false). */
   frame(paths?: readonly Path[]): void {
     const v = this.viewport;
-    v.frame(paths?.length ? paths.flatMap((p) => v.sync.objectsFor(p)) : [v.sync.root, ...v.overlay.children.filter((o) => o.visible)]);
+    v.frame(paths?.length ? paths.flatMap((p) => v.sync.objectsFor(p)) : [v.sync.root, ...v.overlay.children.filter((o) => o.visible && o.userData.frame !== false)]);
   }
 
   async pick(clientX: number, clientY: number): Promise<PickResult | null> {

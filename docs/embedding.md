@@ -39,7 +39,7 @@ Build the element with `npm run build:lib` (in `web/`). The output is `web/dist-
 ## Structure
 
 The element is a thin layout around two reusable parts:
-- **`viewer.session`**, a `UsdSession`. It holds the core connection, the stage, selection, locks, time, the undo history, dirty layers and change markers. It touches no DOM.
+- **`viewer.session`**, a `UsdSession`. It holds the core connection, the stage, selection, locks, time, the undo history, dirty layers and change markers. It touches no DOM. A host's own hierarchy can select exactly like the viewer's with the exported `modifySelect(session, paths, mode, source)` (`'replace'`, `'add'`, `'remove'`, `'up'`) and `selectUpWithSubtree(session, path, source)`.
 - **The viewport**, with one active tool.
 
 Host pages extend it in two ways:

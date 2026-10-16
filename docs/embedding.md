@@ -33,7 +33,7 @@ Build the element with `npm run build:lib` (in `web/`). The output is `web/dist-
 | `src` | URL of the stage to open |
 | `core-url`, `skies-url` | Where the core and the skies are served (default: `core/`, `skies/` next to the page) |
 | `panels="none"` | Viewport only: no toolbar, panels or overlays |
-| `readonly` | No edits from the view: of the keys only F works, the Move / Rotate / Scale tools are off, no prim menu, no drop-to-open. Selection and navigation stay. The panels still edit, so pair it with `panels="none"` |
+| `readonly` | No edits from the view: of the keys only F and H / Shift+H / Alt+H work (hiding writes the session layer, never saved), the Move / Rotate / Scale tools are off, no prim menu, no drop-to-open. Selection and navigation stay. The panels still edit, so pair it with `panels="none"` |
 | `force-webgl` | Use the WebGL2 backend even where WebGPU is available |
 
 ## Structure

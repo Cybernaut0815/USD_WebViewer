@@ -584,7 +584,8 @@ export class UsdViewerElement extends HTMLElement {
       const target = e.composedPath()[0] as HTMLElement;
       const key = e.key.toLowerCase();
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-      if (this.hasAttribute('readonly') && !(key === 'f' && plain)) return; // readonly: F only (the Help window lists editing keys)
+      // readonly: F and the H keys only (hiding writes the session layer, never saved; the Help window lists editing keys)
+      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH') return;
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();

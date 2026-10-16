@@ -717,11 +717,11 @@ test.describe('mock core', () => {
     await page.evaluate(() => {
       document.querySelector('usd-viewer')!.setAttribute('readonly', '');
       // Handled keys are prevented, so defaultPrevented tells which ones the viewer acted on.
-      document.addEventListener('keydown', (e) => ((window as any).handled ??= []).push(e.defaultPrevented));
+      document.addEventListener('keydown', (e) => e.key !== 'Alt' && ((window as any).handled ??= []).push(e.defaultPrevented));
     });
     await page.locator('usd-viewer canvas').focus();
-    for (const key of ['h', 'w', 'f']) await page.keyboard.press(key);
-    expect(await page.evaluate(() => (window as any).handled)).toEqual([false, false, true]);
+    for (const key of ['h', 'w', 'f', 'Alt+h']) await page.keyboard.press(key);
+    expect(await page.evaluate(() => (window as any).handled)).toEqual([true, false, true, true]); // hiding and framing only
     const result = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       viewer.backgroundColor = 'transparent';

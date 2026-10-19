@@ -2,7 +2,7 @@
 // open stage, selection, time, locks, the command stack and the flush pump.
 // Panels, tools and host pages talk to this; nothing here touches the DOM.
 import { collectHandle, download, isUsdFile, type LocalFile, rootCandidates } from './files.ts';
-import type { Edit, Json, LayerInfo, LogEntry, Path, PickResult, PrimInfo, PrimSummary, RenderDelta, StageInfo, XformInfo } from './protocol.ts';
+import type { Edit, ExportVariantsResult, ExportVariantsSpec, Json, LayerInfo, LogEntry, MeshMap, Path, PickResult, PrimInfo, PrimSummary, RenderDelta, StageInfo, XformInfo } from './protocol.ts';
 import { CoreClient } from './rpc.ts';
 
 export interface OpenOptions {
@@ -35,6 +35,8 @@ export interface UsdStageApi {
   /** The prim and everything below it, in traversal order (at most `limit`, default 10,000). */
   subtree(path: Path, limit?: number): Promise<Path[]>;
   resolvePick(rid: number, instance: number): Promise<PickResult | null>;
+  /** How a mesh item's drawn triangles map to the polygons they were fanned from (MeshMap). */
+  meshMap(rid: number): Promise<MeshMap | null>;
   setVariant(path: Path, variantSet: string, variant: string): Promise<void>;
   setVisible(path: Path, visible: boolean): Promise<void>;
   /** Viewer hiding, written to the session layer (never saved): hide prims, hide everything else, undo both. */
@@ -61,6 +63,8 @@ export interface UsdStageApi {
   setEditTarget(identifier: string): Promise<void>;
   /** A layer as usda text or usdc binary, or the whole stage flattened (any identifier). */
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Promise<Uint8Array<ArrayBuffer> | null>;
+  /** The stage flattened as shown, as usdc, with a variant set per prim of the spec (ExportVariantsSpec). */
+  exportVariants(spec: ExportVariantsSpec, floats: Float32Array, ints: Int32Array): Promise<ExportVariantsResult>;
   /** Re-reads layers from their files or URLs (all of them when omitted), discarding unsaved edits and the undo history. */
   reload(identifiers?: string[]): Promise<void>;
   /** Global subdivision refinement level; -1 = automatic. */
@@ -178,6 +182,7 @@ export class UsdSession extends EventTarget {
     find: (text, typeName = '', limit = 500) => this.core.call('findPrims', text, typeName, limit),
     subtree: (path, limit = SUBTREE_LIMIT) => this.core.call('primSubtree', path, limit),
     resolvePick: (rid, instance) => this.core.call('resolvePick', rid, instance),
+    meshMap: (rid) => this.core.call('meshMap', rid),
     setVariant: (path, set, variant) =>
       this.recorded(
         () => this.core.call('setVariant', path, set, variant),
@@ -254,6 +259,7 @@ export class UsdSession extends EventTarget {
     layers: () => this.core.call('listLayers'),
     setEditTarget: (identifier) => this.edit(this.core.call('setEditTarget', identifier)).then(() => undefined),
     exportLayer: (identifier, format) => this.core.call('exportLayer', identifier, format),
+    exportVariants: (spec, floats, ints) => this.core.call('exportVariants', JSON.stringify(spec), floats, ints),
     reload: async (identifiers = []) => {
       await this.edit(this.core.call('reloadLayers', identifiers));
       this.commands.clear();

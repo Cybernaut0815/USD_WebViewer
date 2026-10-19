@@ -800,6 +800,159 @@ def Xform "World"
   noErrors();
 }
 
+/* ---------- mesh maps (triangle -> polygon) and the variants export ---------- */
+{
+  open('map.usda', `#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+)
+def Xform "World"
+{
+    def Scope "Looks"
+    {
+        def Material "Red"
+        {
+        }
+        def Material "Blue"
+        {
+        }
+    }
+    def Mesh "Poly" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 3, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 1, 4, 2, 3, 2, 4, 0]
+        int[] holeIndices = [2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0.5, 0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </World/Looks/Red>
+        color3f[] primvars:displayColor = [(1, 1, 1)]
+        def GeomSubset "Tri" (
+            prepend apiSchemas = ["MaterialBindingAPI"]
+        )
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [1]
+            rel material:binding = </World/Looks/Blue>
+        }
+    }
+    def Mesh "Left"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)]
+        uniform token orientation = "leftHanded"
+        uniform token subdivisionScheme = "none"
+    }
+    def Mesh "Smooth"
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+        point3f[] points = [(-0.5, -0.5, 0.5), (0.5, -0.5, 0.5), (-0.5, 0.5, 0.5), (0.5, 0.5, 0.5), (-0.5, 0.5, -0.5), (0.5, 0.5, -0.5), (-0.5, -0.5, -0.5), (0.5, -0.5, -0.5)]
+        uniform token subdivisionScheme = "catmullClark"
+    }
+    def Cube "Box"
+    {
+        double size = 1
+    }
+}`);
+  core.setRefineLevel(1);
+  const meshes = new Map(flush().meshes.map((m) => [m.path, m]));
+  const map = (path) => core.meshMap(meshes.get(path).rid);
+  const polygons = (faces) => new Set(faces).size;
+
+  // Authored faces: the subset's triangle is drawn first (its range), the hole draws nothing.
+  const poly = map('/World/Poly');
+  assert.equal(poly.authored, true);
+  assert.deepEqual([...poly.counts], [4, 3, 4]);
+  assert.deepEqual([...poly.faces], [1, 0, 0], 'faces follow the subset reorder');
+  assert.equal(poly.flipped, false);
+  const at = (mesh, v) => [...mesh.positions.slice(3 * v, 3 * v + 3)].map((x) => +x.toFixed(3));
+  const polyMesh = meshes.get('/World/Poly');
+  assert.deepEqual([0, 1, 2].map((k) => at(polyMesh, polyMesh.indices[k])), [[1, 0, 0], [2, 0.5, 0], [1, 1, 0]], 'triangle 0 fans the triangle face from its first corner');
+
+  const left = map('/World/Left');
+  assert.deepEqual([[...left.faces], left.flipped, left.authored], [[0, 0], true, true]);
+
+  // A refined surface: its own faces (24 quads at level 1), two triangles each, 26 vertices.
+  const smooth = map('/World/Smooth');
+  assert.equal(smooth.authored, false);
+  assert.equal(smooth.counts, null);
+  assert.equal(smooth.faces.length, 48);
+  assert.equal(polygons(smooth.faces), 24);
+  const vertices = smooth.weld ? Math.max(...smooth.weld) + 1 : meshes.get('/World/Smooth').positions.length / 3;
+  assert.equal(vertices, 26);
+
+  // An implicit cube: the generated mesh, 6 quads.
+  const box = map('/World/Box');
+  assert.deepEqual([box.authored, box.faces.length, polygons(box.faces)], [false, 12, 6]);
+  assert.equal(core.meshMap(999999), null);
+  core.setRefineLevel(0);
+  flush();
+
+  // Variants: Poly keeps its polygons (only its look moves into "original"); Box gets other polygons.
+  const floats = new Float32Array([
+    1, 2, 3, // daylight_radiation per Poly face
+    1, 0, 0, 0, 1, 0, 0, 0, 1, // Poly colours
+    0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, // Box points
+    0.5, 0.5, 0.5, // Box colour
+  ]);
+  const ints = new Int32Array([4, 0, 1, 2, 3]);
+  const spec = {
+    set: 'daylight', selection: 'radiation', material: '/Daylight/Result', geometryRoot: '/Daylight_Geometry',
+    usda: '#usda 1.0\ndef Scope "Daylight"\n{\n    def Material "Result"\n    {\n    }\n}\n',
+    prims: [
+      {
+        path: '/World/Poly', primvars: [{ name: 'primvars:daylight_radiation', type: 'float[]', interpolation: 'uniform', data: [0, 3] }],
+        variants: [{ name: 'radiation', primvars: [{ name: 'primvars:displayColor', type: 'color3f[]', interpolation: 'uniform', data: [3, 9] }] }],
+      },
+      {
+        path: '/World/Box',
+        geometry: [
+          { name: 'points', type: 'point3f[]', data: [12, 12] }, { name: 'faceVertexCounts', type: 'int[]', data: [0, 1] },
+          { name: 'faceVertexIndices', type: 'int[]', data: [1, 4] }, { name: 'subdivisionScheme', type: 'token', value: 'none', uniform: true },
+        ],
+        variants: [{ name: 'radiation', primvars: [{ name: 'primvars:displayColor', type: 'color3f[]', interpolation: 'uniform', data: [24, 3] }] }],
+      },
+    ],
+  };
+  const out = core.exportVariants(JSON.stringify(spec), floats, ints);
+  assert.ok(!out.error, out.error);
+  assert.ok(out.bytes.length > 0 && String.fromCharCode(...out.bytes.slice(0, 8)) === 'PXR-USDC', 'usdc');
+  const nope = core.exportVariants('{"set":"daylight","prims":[{"path":"/World/Nope","variants":[]}]}', new Float32Array(), new Int32Array());
+  assert.equal(nope.error, 'not in the flattened stage: /World/Nope');
+
+  core.FS.writeFile('/tmp/variants.usdc', out.bytes);
+  const info = JSON.parse(core.openStage('/tmp/variants.usdc', true));
+  assert.ok(info.ok, info.error);
+  const details = (path) => JSON.parse(core.primDetails(path, NaN));
+  const value = (path, name) => JSON.parse(core.attributeValue(path, name, NaN));
+  let d = details('/World/Poly');
+  assert.deepEqual(d.variantSets, [{ name: 'daylight', variants: ['original', 'radiation'], selection: 'radiation' }]);
+  assert.equal(d.boundMaterial, '/Daylight/Result');
+  assert.deepEqual(value('/World/Poly', 'faceVertexCounts'), [4, 3, 4], 'its own polygons stay');
+  assert.deepEqual(value('/World/Poly', 'primvars:displayColor').length, 3);
+  assert.deepEqual(value('/World/Poly', 'primvars:daylight_radiation'), [1, 2, 3]);
+  assert.equal(details('/World/Poly/Tri').boundMaterial, '/Daylight/Result', 'the subset shows the result too');
+  assert.ok(JSON.parse(core.setVariant('/World/Poly', 'daylight', 'original')).ok);
+  d = details('/World/Poly');
+  assert.equal(d.boundMaterial, '/World/Looks/Red');
+  assert.deepEqual(value('/World/Poly', 'primvars:displayColor'), [[1, 1, 1]]);
+  assert.equal(details('/World/Poly/Tri').boundMaterial, '/World/Looks/Blue');
+
+  d = details('/World/Box');
+  assert.equal(d.summary.typeName, 'Mesh', 'the implicit shape became a Mesh');
+  assert.deepEqual(value('/World/Box', 'faceVertexCounts'), [4]);
+  assert.deepEqual(value('/World/Box', 'primvars:displayColor'), [[0.5, 0.5, 0.5]]);
+  assert.ok(JSON.parse(core.setVariant('/World/Box', 'daylight', 'original')).ok);
+  assert.deepEqual(value('/World/Box', 'faceVertexCounts'), [4], 'its "original" shows the same polygons, without the result');
+  assert.equal(value('/World/Box', 'size'), 1);
+  noErrors();
+}
+
 core.closeStage();
 console.log('smoke test passed');
 process.exit(0); // the thread pool keeps node alive otherwise

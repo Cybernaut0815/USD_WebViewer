@@ -207,6 +207,25 @@ val exportLayer(const std::string& identifier, const std::string& format)
     if (!gStage.ExportLayer(identifier, format, &bytes)) return val::null();
     return val::global("Uint8Array").new_(emscripten::typed_memory_view(bytes.size(), reinterpret_cast<const unsigned char*>(bytes.data())));
 }
+val exportVariants(const std::string& spec, const val& floats, const val& ints)
+{
+    const ArResolverScopedCache cache;
+    std::string bytes;
+    std::vector<std::string> assets;
+    const std::string error = gStage.ExportVariants(spec, emscripten::convertJSArrayToNumberVector<float>(floats),
+        emscripten::convertJSArrayToNumberVector<int>(ints), &bytes, &assets);
+    val out = val::object();
+    if (!error.empty()) {
+        out.set("error", error);
+        return out;
+    }
+    out.set("bytes", val::global("Uint8Array").new_(emscripten::typed_memory_view(bytes.size(), reinterpret_cast<const unsigned char*>(bytes.data()))));
+    val list = val::array();
+    for (const std::string& asset : assets) list.call<void>("push", asset);
+    out.set("assets", list);
+    return out;
+}
+val meshMap(uint32_t rid) { return gBridge.MeshMap(rid); }
 std::string reloadLayers(const val& identifiers)
 {
     const ArResolverScopedCache cache;
@@ -262,4 +281,6 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setEditTarget", &setEditTarget);
     function("exportLayer", &exportLayer);
     function("reloadLayers", &reloadLayers);
+    function("exportVariants", &exportVariants);
+    function("meshMap", &meshMap);
 }

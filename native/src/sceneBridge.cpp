@@ -49,6 +49,7 @@
 #include "pxr/usd/usdLux/blackbody.h"
 
 #include "pxr/base/work/loops.h"
+#include "pxr/usd/usdGeom/mesh.h"
 #include "pxr/usd/usdGeom/tokens.h"
 
 #include <MaterialXFormat/XmlIo.h>
@@ -456,6 +457,8 @@ struct SceneBridge::Rec final : HdsiPrimManagingSceneIndexObserver::PrimBase {
     uint64_t indexHash = 0;                   // of the last full build's triangle list: the layout can change with the counts unchanged
     std::vector<uint32_t> weld, cornerVertex; // output layout of the last full build (MeshOut::weld)
     int level = -1;                           // refinement level of the last conversion (-1: not converted yet)
+    std::vector<int> polys;                   // drawn triangle -> polygon (MeshOut::trianglePoly), in the drawn order
+    bool refined = false, flipped = false;    // of the last full build (MeshOut)
     bool selected = false, selectedAll = false;
     std::vector<uint32_t> selectedInstances;
 
@@ -1227,12 +1230,15 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
             for (int face : out.triangleFace) start[group[face] + 1]++;
             for (size_t g = 1; g < start.size(); g++) start[g] += start[g - 1];
             std::vector<uint32_t> ordered(out.indices.size());
+            std::vector<int> orderedPolys(out.trianglePoly.size());
             std::vector<size_t> cursor(start.begin(), start.end() - 1);
             for (size_t t = 0; t < out.triangleFace.size(); t++) {
                 const size_t slot = cursor[group[out.triangleFace[t]]]++;
                 std::copy_n(&out.indices[t * 3], 3, &ordered[slot * 3]);
+                orderedPolys[slot] = out.trianglePoly[t]; // stable: a polygon's triangles stay consecutive
             }
             out.indices.swap(ordered);
+            out.trianglePoly.swap(orderedPolys);
             val list = val::array();
             const uint32_t meshMaterial = RidOf(BoundMaterial(source));
             for (int g = 0; g <= remainder; g++) {
@@ -1245,6 +1251,9 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
             }
             entry.set("subsets", list);
         }
+        rec.polys = std::move(out.trianglePoly);
+        rec.refined = out.refined;
+        rec.flipped = out.flipped;
         entry.set("indices", Typed("Uint32Array", out.indices.data(), out.indices.size()));
         entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
         entry.set("doubleSided", job.doubleSided);
@@ -1447,4 +1456,27 @@ std::string SceneBridge::ResolvePick(uint32_t rid, int instanceIndex) const
     }
     writer.EndObject();
     return stream.str();
+}
+
+val SceneBridge::MeshMap(uint32_t rid) const
+{
+    const auto found = _paths.find(rid);
+    const Rec* rec = found != _paths.end() && _scene ? Find(found->second) : nullptr;
+    if (!rec || rec->type != HdPrimTypeTokens->mesh || rec->polys.empty()) return val::null();
+    const HdContainerDataSourceHandle source = _scene->GetPrim(rec->path).dataSource;
+    // The polygons are the authored faces unless they came from a refined surface or from the
+    // generated topology of an implicit shape (a Cube, a Sphere: not a UsdGeomMesh).
+    const UsdPrim prim = UsdPrimOf(rec->path, source);
+    const bool authored = !rec->refined && prim && prim.IsA<UsdGeomMesh>();
+    val map = val::object();
+    map.set("faces", Typed("Int32Array", rec->polys.data(), rec->polys.size()));
+    if (authored) {
+        const HdMeshTopologySchema topology = HdMeshSchema::GetFromParent(source).GetTopology();
+        const VtIntArray counts = topology ? Value(topology.GetFaceVertexCounts()) : VtIntArray();
+        map.set("counts", Typed("Int32Array", counts.cdata(), counts.size()));
+    } else map.set("counts", val::null());
+    map.set("weld", rec->weld.empty() ? val::null() : Typed("Uint32Array", rec->weld.data(), rec->weld.size()));
+    map.set("flipped", rec->flipped);
+    map.set("authored", authored);
+    return map;
 }

@@ -139,6 +139,8 @@ const api = {
   setSelection(paths) { selection = paths; },
   resolvePick: (rid, instance) => (rid === 1 ? { path: '/World/Cube' } : { path: '/World/Instances', instancer: '/World/Instances', instanceIndex: instance }),
   setVariant: () => ({ ok: true, resynced: [], dirty: [] }),
+  meshMap: () => null,
+  exportVariants: () => ({ error: 'not in the mock core' }),
   setVisible(path, v) { if (path === '/World/Cube') { visible = v; visDirty = true; } return edited(); },
   // Only the cube can be hidden here; the real core handles every imageable prim.
   sessionVisibility(mode, json) {

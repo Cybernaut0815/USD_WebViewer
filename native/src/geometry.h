@@ -48,6 +48,10 @@ struct MeshOut {
     std::vector<float> normals; // empty: none available, shade flat
     std::vector<PrimvarOut> primvars;
     std::vector<int> triangleFace; // authored face each triangle came from
+    /// The polygon each triangle was fanned from: the authored face, or the last-level face when
+    /// refined. A polygon's triangles are consecutive, (c0, ci, ci+1) for i = 1..n-2.
+    std::vector<int> trianglePoly;
+    bool flipped = false; // leftHanded: the fan swapped the last two corners of every triangle
     /// Line pairs along authored face boundaries (no triangulation diagonals, and on
     /// refined meshes no edges inside an authored face), in the layout of `indices`.
     std::vector<uint32_t> edges;

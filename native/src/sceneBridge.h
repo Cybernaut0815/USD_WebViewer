@@ -45,6 +45,11 @@ public:
 
     /// JSON PickResult for a render item and flattened instance index (-1: none).
     std::string ResolvePick(uint32_t rid, int instanceIndex) const;
+    /// The polygons a mesh item's drawn triangles were fanned from: { faces: Int32Array (drawn
+    /// triangle -> polygon), counts: Int32Array | null (the authored faceVertexCounts when the
+    /// polygons are the authored faces), weld: Uint32Array | null (drawn vertex -> polygon vertex),
+    /// flipped, authored }; null for anything else. MeshMap in protocol.ts.
+    emscripten::val MeshMap(uint32_t rid) const;
 
 private:
     struct Rec;

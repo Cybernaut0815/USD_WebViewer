@@ -59,6 +59,8 @@ export class Viewport {
   frameMs = 0;
   /** Called before each frame is drawn, with the camera of that frame in place (gizmos, overlays). */
   readonly beforeRender = new Set<() => void>();
+  /** Host objects (the element's three.overlay): framed and clipped with the stage, never picked. */
+  readonly overlay = new THREE.Group();
   /** Right click on a prim in the view (set by the element: its prim menu). */
   oncontext: (path: Path, x: number, y: number) => void = () => {};
 
@@ -73,6 +75,7 @@ export class Viewport {
       warn: (message) => host.warn(message),
       invalidate: () => this.invalidate(),
     });
+    this.scene.add(this.overlay);
     this.controls = new OrbitControls(this.freeCamera, canvas);
     this.controls.zoomToCursor = true;
     this.controls.addEventListener('change', () => this.invalidate());
@@ -112,8 +115,9 @@ export class Viewport {
       this.refreshBounds();
       if (this.cameraPath) this.followStageCamera();
       else this.fitClipPlanes();
-      for (const hook of this.beforeRender) hook();
       try {
+        this.camera.updateMatrixWorld(); // hooks see this frame's camera (lookAt leaves its matrices a step behind)
+        for (const hook of this.beforeRender) hook();
         const start = performance.now();
         this.renderer.render(this.scene, this.camera);
         const end = performance.now();
@@ -142,10 +146,11 @@ export class Viewport {
   }
 
   get background(): string {
-    return `#${this.renderer.getClearColor(new THREE.Color()).getHexString()}`;
+    return this.renderer.getClearAlpha() ? `#${this.renderer.getClearColor(new THREE.Color()).getHexString()}` : 'transparent';
   }
   set background(color: string) {
-    this.renderer.setClearColor(/^#[0-9a-f]{6}$/i.test(color) ? color : DEFAULT_BACKGROUND);
+    // 'transparent': clear alpha 0, the page behind the element shows through.
+    this.renderer.setClearColor(/^#[0-9a-f]{6}$/i.test(color) ? color : DEFAULT_BACKGROUND, color === 'transparent' ? 0 : 1);
     this.invalidate();
   }
 
@@ -366,8 +371,12 @@ export class Viewport {
   }
 
   private fitClipPlanes(): void {
-    const sphere = this.stageSphere;
-    if (!this.autoClip || !(sphere.radius > 0)) return;
+    if (!this.autoClip) return;
+    // ponytail: the overlay is measured every frame (a few objects); version it like the stage if hosts add thousands.
+    const box = new THREE.Box3();
+    for (const o of this.overlay.children) if (o.visible) box.expandByObject(o);
+    const sphere = box.getBoundingSphere(new THREE.Sphere()).union(this.stageSphere);
+    if (!(sphere.radius > 0)) return;
     const view = this.view;
     const distance = view.position.distanceTo(sphere.center);
     // Orthographic depth has no precision falloff, so its near plane may sit behind the camera.

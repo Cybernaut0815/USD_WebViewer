@@ -378,10 +378,13 @@ export function pointsMaterial(
   return m;
 }
 
-/** "No materials" display mode: one grey material, single- and double-sided. */
+/** "No materials" display mode: one grey material, single- and double-sided, and flat for meshes without normals. */
+const plain = (side: THREE.Side, flatShading: boolean) => new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side, flatShading });
 export const PLAIN = {
-  double: new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side: THREE.DoubleSide }),
-  single: new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side: THREE.FrontSide }),
+  double: plain(THREE.DoubleSide, false),
+  single: plain(THREE.FrontSide, false),
+  flatDouble: plain(THREE.DoubleSide, true),
+  flatSingle: plain(THREE.FrontSide, true),
 };
 
 /** Edges of the authored faces over the surface, and alone against the dark background. */

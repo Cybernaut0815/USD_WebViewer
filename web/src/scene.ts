@@ -37,7 +37,7 @@ import * as units from './units.ts';
 
 const GREY = [0.18, 0.18, 0.18];
 
-interface Item {
+export interface Item {
   rid: Rid;
   path: Path;
   kind: 'mesh' | 'curves' | 'points' | 'light' | 'camera';
@@ -445,6 +445,7 @@ export class SceneSync {
     this.root.remove(item.object);
     item.object.traverse((o) => (o as any).isLight && (o as THREE.Light).dispose());
     if ((item.object as THREE.InstancedMesh).isInstancedMesh) (item.object as THREE.InstancedMesh).dispose();
+    else released(item.object);
     item.object = null;
   }
 
@@ -489,7 +490,7 @@ export class SceneSync {
   private materialsFor(item: Item, vertexColors: boolean): THREE.Material | THREE.Material[] {
     if (this.displayMode === 'wire') return HIDDEN;
     const single = this.cullBackfaces && !item.doubleSided;
-    if (this.displayMode.startsWith('plain')) return single ? PLAIN.single : PLAIN.double;
+    if (this.displayMode.startsWith('plain')) return item.flat ? (single ? PLAIN.flatSingle : PLAIN.flatDouble) : single ? PLAIN.single : PLAIN.double;
     const style = (material: THREE.Material) => {
       (material as any).flatShading = item.flat;
       material.side = single ? THREE.FrontSide : THREE.DoubleSide;
@@ -914,7 +915,17 @@ function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
 function dispose(proxy: THREE.Object3D): void {
   proxy.removeFromParent();
   if ((proxy as THREE.InstancedMesh).isInstancedMesh) (proxy as THREE.InstancedMesh).dispose();
+  else released(proxy);
   if (proxy.userData.ownsMaterial) ((proxy as THREE.LineSegments).material as THREE.Material).dispose();
+}
+
+/**
+ * Tells the renderer an object is gone for good. It keeps a render object per object and material, holding the
+ * geometry, until one of them fires 'dispose': objects drawn with shared materials (PLAIN, HIGHLIGHT) would keep
+ * every closed stage's geometry alive.
+ */
+function released(object: THREE.Object3D): void {
+  (object as unknown as THREE.EventDispatcher<{ dispose: object }>).dispatchEvent({ type: 'dispose' });
 }
 
 function disposeRecord(record: MaterialRecord): void {

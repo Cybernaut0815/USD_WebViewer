@@ -58,6 +58,8 @@ export interface CoreApi {
   flush(maxItems: number): RenderDelta;
   setSelection(paths: Path[]): void;
   resolvePick(rid: Rid, instanceIndex: number): PickResult | null;
+  /** How a mesh item's drawn triangles map to the polygons they were fanned from; null for anything else. */
+  meshMap(rid: Rid): MeshMap | null;
   setVariant(path: Path, variantSet: string, variant: string): Edit;
   setVisible(path: Path, visible: boolean): Edit;
   /**
@@ -89,6 +91,8 @@ export interface CoreApi {
   setEditTarget(identifier: string): Edit;
   /** A layer as usda text or usdc binary, or the whole stage flattened; null when unknown. */
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Uint8Array<ArrayBuffer> | null;
+  /** The stage flattened as shown (usdc) with a variant set per prim of the spec (JSON of ExportVariantsSpec). */
+  exportVariants(specJson: string, floats: Float32Array, ints: Int32Array): ExportVariantsResult;
   /** Re-reads layers from their source (all non-anonymous used layers when empty), dropping local edits to them. */
   reloadLayers(identifiers: string[]): Edit;
   /** Worker glue: replaces the files behind a mount directory (changed on disk). */
@@ -214,6 +218,38 @@ export interface PickResult {
   instancer?: Path;
   instanceIndex?: number;
 }
+
+/**
+ * The polygons behind a drawn mesh: `faces[t]` is the polygon drawn triangle t was fanned from. A polygon's triangles
+ * are consecutive and fan from its first corner: (c0, ci, ci+1), or (c0, ci+1, ci) when `flipped` (leftHanded).
+ * `authored`: the polygons are the prim's own faces (indices into its faceVertexCounts, given in `counts`); otherwise
+ * they are the faces of a refined surface or of an implicit shape's generated mesh (`counts` null), and `weld` maps
+ * a drawn vertex to the vertex of that surface (null: the same index).
+ */
+export interface MeshMap {
+  faces: Int32Array<ArrayBuffer>;
+  counts: Int32Array<ArrayBuffer> | null;
+  weld: Uint32Array<ArrayBuffer> | null;
+  flipped: boolean;
+  authored: boolean;
+}
+
+/** An attribute to author: `data` is [offset, count] into the floats ('int[]': the ints); a 'token' takes `value`. */
+export interface ExportAttribute { name: string; type: string; interpolation?: string; uniform?: boolean; data?: [number, number]; value?: string }
+/**
+ * exportVariants: on each prim a variant set `set` (selected: `selection`). "original" keeps the prim's look
+ * (material bindings, displayColor, displayOpacity, its subsets' bindings); each variant binds `material` and authors
+ * its primvars. `primvars` go once on the prim. With `geometry`, the variants show other polygons (a refined surface,
+ * an implicit shape's mesh): those attributes go once into a class under `geometryRoot` that the variants reference,
+ * with the primvars, and "original" keeps the whole shape. `usda`: extra prims (the material); `assets`: asset path
+ * prefixes to replace (e.g. a mount directory with './').
+ */
+export interface ExportVariantsSpec {
+  set: string; selection: string; material: Path; geometryRoot: Path; usda?: string; assets?: [string, string][];
+  prims: { path: Path; geometry?: ExportAttribute[]; primvars?: ExportAttribute[]; variants: { name: string; primvars: ExportAttribute[] }[] }[];
+}
+/** usdc bytes and the package-relative asset paths they use, or what went wrong. */
+export type ExportVariantsResult = { bytes: Uint8Array<ArrayBuffer>; assets: string[]; error?: undefined } | { error: string; bytes?: undefined; assets?: undefined };
 
 /* ---------- render delta ----------
    An omitted field means unchanged. `path` is present only on the entry that

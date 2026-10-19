@@ -60,12 +60,19 @@
 #include "pxr/usd/usdGeom/xformCommonAPI.h"
 #include "pxr/usd/usdGeom/xformOp.h"
 #include "pxr/usd/usdShade/materialBindingAPI.h"
+#include "pxr/usd/sdf/reference.h"
+#include "pxr/usd/sdf/relationshipSpec.h"
+#include "pxr/usd/sdf/variantSetSpec.h"
+#include "pxr/usd/sdf/variantSpec.h"
+#include "pxr/usd/usd/tokens.h"
+#include "pxr/usd/usdUtils/dependencies.h"
 
 #include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <set>
@@ -1508,4 +1515,221 @@ std::string Stage::ReloadLayers(const std::vector<std::string>& identifiers)
         SdfLayer::ReloadLayers(layers, true);
         return "";
     }, /*track=*/false); // the page resets the change baseline after a reload; a save reloads what it wrote
+}
+
+namespace {
+
+/// What a result variant replaces on a prim whose own polygons were simulated: its look.
+bool LookProperty(const std::string& name)
+{
+    return TfStringStartsWith(name, "material:binding") || TfStringStartsWith(name, "primvars:displayColor")
+        || TfStringStartsWith(name, "primvars:displayOpacity");
+}
+bool BindingProperty(const std::string& name) { return TfStringStartsWith(name, "material:binding"); }
+/// What makes the shape: a prim exported with other polygons keeps all of it in "original".
+bool ShapeProperty(const std::string& name)
+{
+    static const std::set<std::string> names = { "points", "normals", "faceVertexCounts", "faceVertexIndices", "holeIndices",
+        "creaseIndices", "creaseLengths", "creaseSharpnesses", "cornerIndices", "cornerSharpnesses", "subdivisionScheme",
+        "interpolateBoundary", "faceVaryingLinearInterpolation", "triangleSubdivisionRule", "orientation", "extent", "velocities",
+        "accelerations", "size", "radius", "radiusTop", "radiusBottom", "height", "axis", "width", "length" };
+    return names.count(name) || TfStringStartsWith(name, "primvars:") || BindingProperty(name);
+}
+
+/// Moves the properties `pick` selects from one prim spec to another of the same layer.
+void MoveProperties(const SdfLayerHandle& layer, const SdfPrimSpecHandle& from, const SdfPrimSpecHandle& to, bool (*pick)(const std::string&))
+{
+    std::vector<SdfPropertySpecHandle> moving;
+    for (const SdfPropertySpecHandle& property : from->GetProperties()) {
+        if (pick(property->GetName())) moving.push_back(property);
+    }
+    for (const SdfPropertySpecHandle& property : moving) {
+        SdfCopySpec(layer, property->GetPath(), layer, to->GetPath().AppendProperty(property->GetNameToken()));
+        from->RemoveProperty(property);
+    }
+}
+
+const JsValue& Field(const JsObject& object, const char* key)
+{
+    static const JsValue none;
+    const auto found = object.find(key);
+    return found == object.end() ? none : found->second;
+}
+const JsArray& List(const JsObject& object, const char* key)
+{
+    static const JsArray none;
+    const JsValue& value = Field(object, key);
+    return value.IsArray() ? value.GetJsArray() : none;
+}
+std::string Text(const JsObject& object, const char* key)
+{
+    const JsValue& value = Field(object, key);
+    return value.IsString() ? value.GetString() : std::string();
+}
+
+} // namespace
+
+std::string Stage::ExportVariants(const std::string& specJson, const std::vector<float>& floats, const std::vector<int>& ints,
+    std::string* bytes, std::vector<std::string>* assets) const
+{
+    if (!_stage) return "no stage";
+    JsParseError parseError;
+    const JsValue specValue = JsParseString(specJson, &parseError);
+    if (!specValue.IsObject()) return "invalid spec: " + parseError.reason;
+    const JsObject& spec = specValue.GetJsObject();
+    const std::string setName = Text(spec, "set"), selection = Text(spec, "selection");
+    if (!SdfPath::IsValidIdentifier(setName)) return "invalid variant set name " + setName;
+    const SdfPath material(Text(spec, "material")), geometryRoot(Text(spec, "geometryRoot"));
+
+    // [offset, count] slices of the two arrays, as the value of an attribute of that type.
+    const auto slice = [](const JsValue& range, size_t size, size_t* offset, size_t* count) {
+        if (!range.IsArray() || range.GetJsArray().size() != 2) return false;
+        const JsArray& r = range.GetJsArray();
+        *offset = size_t(r[0].GetReal());
+        *count = size_t(r[1].GetReal());
+        return *offset + *count <= size;
+    };
+    const auto value = [&](const std::string& type, const JsValue& range, VtValue* out) {
+        size_t offset = 0, count = 0;
+        if (type == "int[]") {
+            if (!slice(range, ints.size(), &offset, &count)) return false;
+            *out = VtValue(VtIntArray(ints.begin() + offset, ints.begin() + offset + count));
+            return true;
+        }
+        if (!slice(range, floats.size(), &offset, &count)) return false;
+        if (type == "float[]") {
+            *out = VtValue(VtFloatArray(floats.begin() + offset, floats.begin() + offset + count));
+            return true;
+        }
+        VtVec3fArray vectors(count / 3); // color3f[], point3f[], normal3f[], float3[]
+        std::copy_n(floats.data() + offset, vectors.size() * 3, vectors.data()->data());
+        *out = VtValue(vectors);
+        return true;
+    };
+    std::string error;
+    // One attribute from {name, type, interpolation?, uniform?, data: [offset, count]}; a token from {value}.
+    const auto author = [&](const SdfPrimSpecHandle& prim, const JsValue& item) {
+        if (!item.IsObject() || !error.empty()) return;
+        const JsObject& a = item.GetJsObject();
+        const std::string name = Text(a, "name"), type = Text(a, "type"), interpolation = Text(a, "interpolation");
+        const SdfValueTypeName typeName = SdfSchema::GetInstance().FindType(type);
+        VtValue data;
+        if (type == "token") data = VtValue(TfToken(Text(a, "value")));
+        else if (!typeName || !value(type, Field(a, "data"), &data)) {
+            error = "bad data for " + name + " on " + prim->GetPath().GetString();
+            return;
+        }
+        const SdfAttributeSpecHandle attribute = SdfAttributeSpec::New(prim, name, typeName,
+            Field(a, "uniform").IsBool() && Field(a, "uniform").GetBool() ? SdfVariabilityUniform : SdfVariabilityVarying);
+        if (!attribute) {
+            error = "cannot author " + name + " on " + prim->GetPath().GetString();
+            return;
+        }
+        attribute->SetDefaultValue(data);
+        if (!interpolation.empty()) attribute->SetInfo(UsdGeomTokens->interpolation, VtValue(TfToken(interpolation)));
+    };
+    const auto bind = [&](const SdfPrimSpecHandle& prim) {
+        if (material.IsEmpty()) return;
+        const SdfRelationshipSpecHandle binding = SdfRelationshipSpec::New(prim, "material:binding", /*custom=*/false);
+        binding->GetTargetPathList().ClearEditsAndMakeExplicit();
+        binding->GetTargetPathList().Add(material);
+        prim->SetInfo(UsdTokens->apiSchemas, VtValue(SdfTokenListOp::Create({ TfToken("MaterialBindingAPI") })));
+    };
+
+    const SdfLayerRefPtr layer = _stage->Flatten(/*addSourceFileComment=*/false);
+    if (!layer) return "the stage could not be flattened";
+    {
+        SdfChangeBlock block;
+        // Asset paths: the mount directories of the core become the package root.
+        std::vector<std::pair<std::string, std::string>> prefixes;
+        for (const JsValue& pair : List(spec, "assets")) {
+            if (pair.IsArray() && pair.GetJsArray().size() == 2) prefixes.emplace_back(pair.GetJsArray()[0].GetString(), pair.GetJsArray()[1].GetString());
+        }
+        std::set<std::string> used;
+        if (!prefixes.empty()) {
+            UsdUtilsModifyAssetPaths(layer, [&](const std::string& path) {
+                for (const auto& [from, to] : prefixes) {
+                    if (!TfStringStartsWith(path, from)) continue;
+                    used.insert(path.substr(from.size()));
+                    return to + path.substr(from.size());
+                }
+                return path;
+            });
+        }
+        assets->assign(used.begin(), used.end());
+
+        // Extra prims (the result material), given as usda.
+        if (const std::string extra = Text(spec, "usda"); !extra.empty()) {
+            const SdfLayerRefPtr add = SdfLayer::CreateAnonymous(".usda");
+            if (!add->ImportFromString(extra)) return "invalid usda in the spec";
+            for (const SdfPrimSpecHandle& root : add->GetRootPrims()) {
+                if (layer->GetPrimAtPath(root->GetPath())) return root->GetPath().GetString() + " exists already";
+                SdfCopySpec(add, root->GetPath(), layer, root->GetPath());
+            }
+        }
+
+        int k = 0;
+        for (const JsValue& item : List(spec, "prims")) {
+            if (!item.IsObject()) continue;
+            const JsObject& p = item.GetJsObject();
+            const SdfPath path(Text(p, "path"));
+            const SdfPrimSpecHandle prim = path.IsPrimPath() ? layer->GetPrimAtPath(path) : SdfPrimSpecHandle();
+            if (!prim) return "not in the flattened stage: " + path.GetString();
+            if (prim->GetVariantSets().count(setName)) return path.GetString() + " has a variant set " + setName + " already";
+            const SdfVariantSetSpecHandle set = SdfVariantSetSpec::New(prim, setName);
+            const SdfPrimSpecHandle original = SdfVariantSpec::New(set, "original")->GetPrimSpec();
+            std::vector<SdfPrimSpecHandle> subsets;
+            for (const SdfPrimSpecHandle& child : prim->GetNameChildren()) {
+                if (child->GetTypeName() == "GeomSubset") subsets.push_back(child);
+            }
+            const JsValue& geometry = Field(p, "geometry");
+            SdfPath shared; // the result polygons, once, for every result variant
+            if (geometry.IsArray()) {
+                // Other polygons than its own: "original" keeps the whole shape and the subsets.
+                shared = geometryRoot.AppendChild(TfToken(TfStringPrintf("Mesh%d", k++)));
+                const SdfPrimSpecHandle mesh = SdfCreatePrimInLayer(layer, shared);
+                layer->GetPrimAtPath(geometryRoot)->SetSpecifier(SdfSpecifierClass);
+                mesh->SetSpecifier(SdfSpecifierClass);
+                mesh->SetTypeName("Mesh");
+                for (const JsValue& attribute : geometry.GetJsArray()) author(mesh, attribute);
+                for (const JsValue& primvar : List(p, "primvars")) author(mesh, primvar);
+                MoveProperties(layer, prim, original, ShapeProperty);
+                for (const SdfPrimSpecHandle& subset : subsets) {
+                    SdfCopySpec(layer, subset->GetPath(), layer, original->GetPath().AppendChild(subset->GetNameToken()));
+                    prim->RemoveNameChild(subset);
+                }
+                if (prim->GetTypeName() != "Mesh") { // an implicit shape: a variant cannot change the type
+                    prim->SetTypeName("Mesh");
+                    original->GetReferenceList().Prepend(SdfReference(std::string(), shared));
+                }
+            } else {
+                // Its own polygons: only the look moves, the value primvars sit on the prim.
+                MoveProperties(layer, prim, original, LookProperty);
+                for (const SdfPrimSpecHandle& subset : subsets) {
+                    MoveProperties(layer, subset, SdfPrimSpec::New(original, subset->GetName(), SdfSpecifierOver), BindingProperty);
+                }
+                for (const JsValue& primvar : List(p, "primvars")) author(prim, primvar);
+            }
+            for (const JsValue& variant : List(p, "variants")) {
+                if (!variant.IsObject()) continue;
+                const JsObject& v = variant.GetJsObject();
+                const SdfPrimSpecHandle result = SdfVariantSpec::New(set, Text(v, "name"))->GetPrimSpec();
+                if (!shared.IsEmpty()) result->GetReferenceList().Prepend(SdfReference(std::string(), shared));
+                bind(result);
+                for (const JsValue& primvar : List(v, "primvars")) author(result, primvar);
+            }
+            prim->GetVariantSetNameList().Prepend(setName);
+            prim->SetVariantSelection(setName, selection);
+            if (!error.empty()) return error;
+        }
+    }
+    // Binary through a scratch file in the memory filesystem of the module, as ExportLayer.
+    static const std::string scratch = "/tmp/__variants.usdc";
+    if (!layer->Export(scratch)) return "the layer could not be written";
+    {
+        std::ifstream file(scratch, std::ios::binary);
+        bytes->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    }
+    std::remove(scratch.c_str());
+    return "";
 }

@@ -347,6 +347,8 @@ MeshOut BuildMesh(const MeshIn& in)
     };
     out.indices.reserve(triangles * 3);
     out.triangleFace.reserve(triangles);
+    out.trianglePoly.reserve(triangles);
+    out.flipped = poly.flip;
     std::vector<uint32_t> start(size_t(vertices) + 2, 0); // start[v + 2] counts, then start[v + 1] places, then [start[v], start[v + 1]) is bucket v
     offset = 0;
     for (size_t f = 0; f < poly.counts.size(); f++) {
@@ -358,6 +360,7 @@ MeshOut BuildMesh(const MeshIn& in)
                 if (poly.flip) std::swap(b, c);
                 for (size_t corner : { a, b, c }) out.indices.push_back(layout.at(corner, poly));
                 out.triangleFace.push_back(poly.baseFace[f]);
+                out.trianglePoly.push_back(int(f));
             }
             for (int i = 0; i < n; i++) start[size_t(std::min(poly.indices[offset + i], poly.indices[offset + (i + 1) % n])) + 2]++;
         }

@@ -43,6 +43,12 @@ public:
     std::string ListLayers() const;                                      // LayerInfo[]
     /// Bytes of a layer as "usda" or "usdc" text/binary, or the whole stage flattened ("flat").
     bool ExportLayer(const std::string& identifier, const std::string& format, std::string* bytes) const;
+    /// The stage flattened as shown, as usdc, with a variant set on each prim of `specJson` (ExportVariantsSpec in
+    /// protocol.ts): "original" keeps the prim's own look (or its whole shape), one variant per result authors
+    /// primvars and a material binding. Arrays are [offset, count] slices of `floats` and `ints`. `assets`: the
+    /// package-relative asset paths the layer now uses. Returns an error message, empty on success.
+    std::string ExportVariants(const std::string& specJson, const std::vector<float>& floats, const std::vector<int>& ints,
+        std::string* bytes, std::vector<std::string>* assets) const;
 
     // Each returns an Edit: {ok, error?, resynced, previous?, dirty}.
     std::string Reload();

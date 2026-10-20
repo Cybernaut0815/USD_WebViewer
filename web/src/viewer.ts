@@ -6,7 +6,7 @@ import type { LocalFile } from './files.ts';
 import { copyText, type MenuItem, showMenu } from './menu.ts';
 import { ACTIVE, HIGHLIGHT, TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
-import type { Path, PickResult, StageInfo } from './protocol.ts';
+import type { CameraParams, Path, PickResult, StageInfo } from './protocol.ts';
 import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
@@ -14,14 +14,14 @@ import { NavigateTool, SelectTool, type TransformMode, TransformTool, typing } f
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
 import type { DisplayMode, Item, SceneStats } from './scene.ts';
-import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, Viewport } from './viewport.ts';
+import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, type ViewState, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode | 'navigate';
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; cameraschange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event };
 export { DEFAULT_BACKGROUND };
-export type { CameraSettings };
+export type { CameraSettings, ViewState };
 /** Which panels around the viewport are shown. */
 export interface PanelState {
   hierarchy: boolean;
@@ -343,6 +343,23 @@ export class UsdViewerElement extends HTMLElement {
   }
   pause(): void {
     this.session.pause();
+  }
+
+  /**
+   * The stage's cameras: prim path, lens as Hydra gives it (apertures and focal length at 0.1 x the authored values, so
+   * in scene units) and the world matrix in stage space (16 numbers, THREE.Matrix4.elements order). `cameraschange`
+   * fires when the list may have changed.
+   */
+  get cameras(): { path: Path; params: CameraParams; matrix: number[] }[] {
+    return this.viewport.sync.cameras().map((c) => ({ path: c.path, params: c.params, matrix: c.matrix.toArray() }));
+  }
+  /** The free view in world space. Setting it leaves a stage camera; orbiting then goes on from the new view. */
+  get view(): ViewState {
+    return this.viewport.viewState;
+  }
+  set view(state: ViewState) {
+    if (this.camera !== null) this.camera = null;
+    this.viewport.viewState = state;
   }
 
   /** Path of the stage camera being looked through, or null for the free camera. */
@@ -683,6 +700,7 @@ export class UsdViewerElement extends HTMLElement {
     }
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
+      if (e.detail.cameras?.length || e.detail.removed?.length) this.dispatchEvent(new Event('cameraschange'));
       // The first page with meshes gets framed at once; stageloaded frames the complete stage.
       if (this.loading && !this.framed && e.detail.meshes?.length) {
         this.framed = true;
@@ -708,6 +726,7 @@ export class UsdViewerElement extends HTMLElement {
       this.updateStats();
       this.viewport.sync.clear();
       this.camera = null; // after the clear: the camera menu rebuilds from the empty scene
+      this.dispatchEvent(new Event('cameraschange')); // the clear sends no delta
       this.tree.clear();
       this.props.show(null);
     });

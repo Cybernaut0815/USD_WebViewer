@@ -492,6 +492,32 @@ test.describe('mock core', () => {
     expect(result).toMatchObject({ type: 'OrthographicCamera', hit: '/World/Cube', settings: 'orthographic' });
   });
 
+  test('a host sets the free view (perspective or orthographic) and orbiting goes on from it', async ({ page }) => {
+    await open(page, MOCK);
+    const round = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const r = (v: number[]) => v.map((x) => +x.toFixed(4));
+      viewer.view = { eye: [4, 3, 5], target: [0, 0.5, 0], fov: 30, projection: 'perspective', height: 1 };
+      const p = viewer.view;
+      viewer.view = { eye: [0, 10, 0.001], target: [0, 0, 0], fov: 30, projection: 'orthographic', height: 2.5 };
+      await viewer.idle();
+      const o = viewer.view;
+      return { p: [r(p.eye), r(p.target), +p.fov.toFixed(3), p.projection], o: [r(o.target), o.projection, +o.height.toFixed(3), viewer.three.camera.type] };
+    });
+    expect(round.p).toEqual([[4, 3, 5], [0, 0.5, 0], 30, 'perspective']);
+    expect(round.o).toEqual([[0, 0, 0], 'orthographic', 2.5, 'OrthographicCamera']);
+    // Back to perspective, then a drag orbits around the target that was set.
+    await page.evaluate(() => { (document.querySelector('usd-viewer') as UsdViewerElement).view = { eye: [4, 3, 5], target: [0, 0.5, 0], fov: 30, projection: 'perspective', height: 1 }; });
+    const box = (await page.locator('usd-viewer canvas').boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 120, box.y + box.height / 2, { steps: 6 });
+    await page.mouse.up();
+    const after = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view);
+    expect(after.target.map((x) => +x.toFixed(4))).toEqual([0, 0.5, 0]);
+    expect(after.eye.map((x) => +x.toFixed(4))).not.toEqual([4, 3, 5]);
+  });
+
   test('the timebar steps frames and a sky replaces the background', async ({ page }) => {
     await open(page, MOCK);
     await page.locator('usd-viewer canvas').focus();
@@ -785,6 +811,29 @@ test.describe('wasm core', () => {
       return { stage, colour, back: has(), lit: !!viewer.three.scene.environment };
     });
     expect(backgrounds).toEqual({ stage: true, colour: false, back: true, lit: true });
+  });
+
+  test('a host lists the stage cameras, hears when they change, and setting the view leaves a stage camera', async ({ page }) => {
+    await open(page, SHOWCASE);
+    const listed = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const c = viewer.cameras.find((x) => x.path === '/World/Camera')!;
+      viewer.camera = c.path;
+      await viewer.idle();
+      viewer.view = { eye: [1, 2, 3], target: [0, 0, 0], fov: 40, projection: 'perspective', height: 1 };
+      return { focal: +c.params.focalLength.toFixed(3), aperture: +c.params.verticalAperture.toFixed(3), at: c.matrix.slice(12, 15), camera: viewer.camera };
+    });
+    expect(listed).toEqual({ focal: 2.8, aperture: 2.4, at: [0, 2.5, 9], camera: null }); // Hydra's lens: 0.1 x the authored 28 / 24
+    const changed = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      let changes = 0;
+      viewer.addEventListener('cameraschange', () => changes++);
+      await viewer.open('samples/materialx.usda'); // no cameras: the showcase's camera goes away
+      await viewer.idle();
+      return { changes, cameras: viewer.cameras.length };
+    });
+    expect(changed.cameras).toBe(0);
+    expect(changed.changes).toBeGreaterThan(0);
   });
 
   test('the camera menu lists stage cameras and looks through them', async ({ page }) => {

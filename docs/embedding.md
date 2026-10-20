@@ -44,7 +44,7 @@ The element is a thin layout around two reusable parts:
 
 Host pages extend it in two ways:
 - **Panels:** add your own through the `toolbar`, `left`, `right` and `bottom` slots.
-- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more.
+- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more. The element adds its own: `camerachange`, `cameraschange`, `toolchange` and others.
 
 The rule for every module: change the stage through `viewer.usd`, then let the core's render delta move the three.js objects. Never edit three.js objects to represent stage state. `web/src/protocol.ts` is the contract between the page and the core.
 
@@ -59,7 +59,8 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 | `undo()`, `redo()`, `dirty` | Undo history, unsaved state |
 | `tool` | `'select' \| 'translate' \| 'rotate' \| 'scale' \| 'navigate'` |
 | `displayMode`, `sky`, `backgroundColor`, `cameraSettings`, `purposes`, `panels`, `exposure`, `toneMapping`, `autoLoadArrays` | View settings; `backgroundColor = 'transparent'` lets the page show through |
-| `time`, `play()`, `pause()`, `camera` | Animation and stage cameras |
+| `time`, `play()`, `pause()`, `camera` | Animation, and the stage camera looked through (`null`: the free camera) |
+| `cameras`, `view` | `cameras`: the stage's cameras (`path`, the lens as Hydra gives it, 0.1 x the authored focal length and apertures, and the stage-space world matrix); `cameraschange` fires when the list may have changed. `view` gets or sets the free view in world space (`{ eye, target, fov, projection, height }`: vertical fov in degrees, orthographic half-height); setting it leaves a stage camera and orbiting goes on from there |
 | `stats` | USD counts of what is drawn, plus `fps` / `frameMs` |
 | `three` | For hosts that draw on top: `renderer`, `scene`, `root` (the stage objects), `camera` (read it again each time: it changes with the projection and stage cameras); `overlay`, a group for host objects that are framed and clipped with the stage but never picked; `beforeRender`, a set of per-frame hooks; `items()`, the render items (`rid`, `path`, `kind`, `object`, `instances`); `objectsFor(path)`; `invalidate()` (the view renders on demand) |
 | `registerScheme(scheme, { gateway, getAuth })` | Route a URL scheme through an HTTP gateway (see below) |

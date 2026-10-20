@@ -21,6 +21,17 @@ export interface CameraSettings {
   near: number;
   far: number;
 }
+/**
+ * The free view in world space: the eye, the orbit target, the vertical field of view (degrees), the projection and the
+ * orthographic half-height. Up is world +Y, the orbit's own.
+ */
+export interface ViewState {
+  eye: [number, number, number];
+  target: [number, number, number];
+  fov: number;
+  projection: CameraSettings['projection'];
+  height: number;
+}
 const GATE = 24; // mm, vertical
 const focalToFov = (focal: number) => (2 * Math.atan(GATE / 2 / focal) * 180) / Math.PI;
 const fovToFocal = (fov: number) => GATE / 2 / Math.tan((fov * Math.PI) / 360);
@@ -190,6 +201,34 @@ export class Viewport {
       if (settings.far !== undefined) camera.far = settings.far;
       camera.updateProjectionMatrix();
     }
+    this.invalidate();
+  }
+
+  get viewState(): ViewState {
+    const view = this.view, target = this.controls.target, ortho = view === this.orthoCamera;
+    const height = ortho ? this.orthoCamera.top / this.orthoCamera.zoom : view.position.distanceTo(target) * Math.tan((this.freeCamera.fov * Math.PI) / 360);
+    return {
+      eye: [view.position.x, view.position.y, view.position.z], target: [target.x, target.y, target.z],
+      fov: this.freeCamera.fov, projection: ortho ? 'orthographic' : 'perspective', height,
+    };
+  }
+  /** Moves the free view (the orbit goes on from there); leaving a stage camera is the element's part. */
+  set viewState(state: ViewState) {
+    if (state.projection !== this.cameraSettings.projection) this.switchProjection(state.projection);
+    this.freeCamera.fov = Math.min(Math.max(state.fov, 0.01), 179);
+    this.freeCamera.updateProjectionMatrix();
+    const view = this.view;
+    view.position.fromArray(state.eye);
+    this.controls.target.fromArray(state.target);
+    if (view.position.distanceToSquared(this.controls.target) < 1e-18) this.controls.target.z -= 1; // no direction: look along -Z
+    if (view === this.orthoCamera) {
+      const half = Math.max(state.height, 1e-6);
+      this.orthoCamera.top = half;
+      this.orthoCamera.bottom = -half;
+      this.orthoCamera.zoom = 1;
+      this.resize();
+    }
+    this.controls.update();
     this.invalidate();
   }
 

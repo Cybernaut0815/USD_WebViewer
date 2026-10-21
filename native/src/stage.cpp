@@ -1578,7 +1578,7 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
     if (!specValue.IsObject()) return "invalid spec: " + parseError.reason;
     const JsObject& spec = specValue.GetJsObject();
     const std::string setName = Text(spec, "set"), selection = Text(spec, "selection");
-    if (!SdfPath::IsValidIdentifier(setName)) return "invalid variant set name " + setName;
+    if (!List(spec, "prims").empty() && !SdfPath::IsValidIdentifier(setName)) return "invalid variant set name " + setName;
     const SdfPath material(Text(spec, "material")), geometryRoot(Text(spec, "geometryRoot"));
 
     // [offset, count] slices of the two arrays, as the value of an attribute of that type.
@@ -1636,7 +1636,18 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
         prim->SetInfo(UsdTokens->apiSchemas, VtValue(SdfTokenListOp::Create({ TfToken("MaterialBindingAPI") })));
     };
 
-    const SdfLayerRefPtr layer = _stage->Flatten(/*addSourceFileComment=*/false);
+    // An overlay composes over the stage before it is flattened: a second stage on the same root layer whose session
+    // layer is the overlay over the live session layer (variant choices, hidden prims). Hydra never sees it.
+    UsdStageRefPtr stage = _stage;
+    if (const std::string text = Text(spec, "overlay"); !text.empty()) {
+        const SdfLayerRefPtr session = SdfLayer::CreateAnonymous("overlay.usda");
+        if (!session->ImportFromString(text)) return "invalid overlay usda";
+        session->InsertSubLayerPath(_stage->GetSessionLayer()->GetIdentifier());
+        stage = UsdStage::Open(_stage->GetRootLayer(), session, _stage->GetPathResolverContext(), UsdStage::LoadNone);
+        if (!stage) return "the overlay could not be composed";
+        stage->SetLoadRules(_stage->GetLoadRules());
+    }
+    const SdfLayerRefPtr layer = stage->Flatten(/*addSourceFileComment=*/false);
     if (!layer) return "the stage could not be flattened";
     {
         SdfChangeBlock block;
@@ -1723,6 +1734,7 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
             if (!error.empty()) return error;
         }
     }
+    if (Text(spec, "format") == "usda") return layer->ExportToString(bytes) ? "" : "the layer could not be written";
     // Binary through a scratch file in the memory filesystem of the module, as ExportLayer.
     static const std::string scratch = "/tmp/__variants.usdc";
     if (!layer->Export(scratch)) return "the layer could not be written";

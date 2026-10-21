@@ -91,7 +91,7 @@ export interface CoreApi {
   setEditTarget(identifier: string): Edit;
   /** A layer as usda text or usdc binary, or the whole stage flattened; null when unknown. */
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Uint8Array<ArrayBuffer> | null;
-  /** The stage flattened as shown (usdc) with a variant set per prim of the spec (JSON of ExportVariantsSpec). */
+  /** The stage flattened as shown (usdc, or usda) with a variant set per prim of the spec (JSON of ExportVariantsSpec). */
   exportVariants(specJson: string, floats: Float32Array, ints: Int32Array): ExportVariantsResult;
   /** Re-reads layers from their source (all non-anonymous used layers when empty), dropping local edits to them. */
   reloadLayers(identifiers: string[]): Edit;
@@ -242,13 +242,16 @@ export interface ExportAttribute { name: string; type: string; interpolation?: s
  * its primvars. `primvars` go once on the prim. With `geometry`, the variants show other polygons (a refined surface,
  * an implicit shape's mesh): those attributes go once into a class under `geometryRoot` that the variants reference,
  * with the primvars, and "original" keeps the whole shape. `usda`: extra prims (the material); `assets`: asset path
- * prefixes to replace (e.g. a mount directory with './').
+ * prefixes to replace (e.g. a mount directory with './'). `overlay`: a usda layer composed over the stage (stronger than
+ * its session layer, whose variant choices and hidden prims stay) before it is flattened: a look in place, without
+ * variant sets when `prims` is empty. `format`: the bytes as usdc (default) or usda text.
  */
 export interface ExportVariantsSpec {
   set: string; selection: string; material: Path; geometryRoot: Path; usda?: string; assets?: [string, string][];
+  overlay?: string; format?: 'usdc' | 'usda';
   prims: { path: Path; geometry?: ExportAttribute[]; primvars?: ExportAttribute[]; variants: { name: string; primvars: ExportAttribute[] }[] }[];
 }
-/** usdc bytes and the package-relative asset paths they use, or what went wrong. */
+/** usdc (or usda) bytes and the package-relative asset paths they use, or what went wrong. */
 export type ExportVariantsResult = { bytes: Uint8Array<ArrayBuffer>; assets: string[]; error?: undefined } | { error: string; bytes?: undefined; assets?: undefined };
 
 /* ---------- render delta ----------

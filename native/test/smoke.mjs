@@ -953,6 +953,58 @@ def Xform "World"
   noErrors();
 }
 
+{
+  // One flattened file: an overlay composed over the stage (the look in place, no variant sets), usda or usdc.
+  open('look.usda', `#usda 1.0
+(
+    upAxis = "Z"
+)
+def Xform "World"
+{
+    def Mesh "Quad"
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        rel material:binding = </World/Looks/Tex>
+    }
+    def Cube "Hidden"
+    {
+    }
+    def Scope "Looks"
+    {
+        def Material "Tex"
+        {
+            def Shader "Image"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @./tex.png@
+            }
+        }
+    }
+}`);
+  flush();
+  assert.ok(JSON.parse(core.sessionVisibility('hide', JSON.stringify(['/World/Hidden']))).ok);
+  const overlay = '#usda 1.0\nover "World"\n{\n    over "Quad"\n    {\n        color3f[] primvars:displayColor = [(1, 0, 0)]\n    }\n}\n';
+  const none = [new Float32Array(), new Int32Array()];
+  const flat = core.exportVariants(JSON.stringify({ prims: [], overlay, format: 'usda', assets: [['/tmp/', './']] }), ...none);
+  assert.ok(!flat.error, flat.error);
+  const text = new TextDecoder().decode(flat.bytes);
+  assert.ok(text.startsWith('#usda 1.0'), 'usda text');
+  assert.ok(text.includes('upAxis = "Z"'), 'the stage metadata stays');
+  assert.ok(text.includes('color3f[] primvars:displayColor = [(1, 0, 0)]'), 'the overlay is in');
+  assert.ok(!text.includes('variantSet'), 'no variant sets');
+  assert.match(text, /def Cube "Hidden"[^}]*token visibility = "invisible"/, 'hidden as shown');
+  assert.ok(text.includes('@./tex.png@'), 'asset paths from the mount directory');
+  assert.deepEqual(flat.assets, ['tex.png']);
+  assert.ok(!JSON.parse(core.primDetails('/World/Quad', NaN)).attributes.find((a) => a.name === 'primvars:displayColor')?.authored, 'the live stage is untouched');
+  const crate = core.exportVariants(JSON.stringify({ prims: [], overlay }), ...none);
+  assert.ok(!crate.error && String.fromCharCode(...crate.bytes.slice(0, 8)) === 'PXR-USDC', 'usdc by default');
+  assert.equal(core.exportVariants(JSON.stringify({ prims: [], overlay: 'not usda' }), ...none).error, 'invalid overlay usda');
+  core.takeDiagnostics(); // the parse error of the bad overlay
+  noErrors();
+}
+
 core.closeStage();
 console.log('smoke test passed');
 process.exit(0); // the thread pool keeps node alive otherwise

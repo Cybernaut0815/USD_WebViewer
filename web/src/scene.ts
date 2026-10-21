@@ -487,10 +487,16 @@ export class SceneSync {
     });
   }
 
-  private materialsFor(item: Item, vertexColors: boolean): THREE.Material | THREE.Material[] {
-    if (this.displayMode === 'wire') return HIDDEN;
+  /** The materials a mesh item draws with in the shaded view, whatever the view shows now (hosts exporting the look). */
+  shadedMaterials(rid: Rid): THREE.Material | THREE.Material[] | null {
+    const item = this.items.get(rid);
+    return item?.kind === 'mesh' && item.geometry ? this.materialsFor(item, !!item.geometry.attributes.color, 'shaded') : null;
+  }
+
+  private materialsFor(item: Item, vertexColors: boolean, mode: DisplayMode = this.displayMode): THREE.Material | THREE.Material[] {
+    if (mode === 'wire') return HIDDEN;
     const single = this.cullBackfaces && !item.doubleSided;
-    if (this.displayMode.startsWith('plain')) return item.flat ? (single ? PLAIN.flatSingle : PLAIN.flatDouble) : single ? PLAIN.single : PLAIN.double;
+    if (mode.startsWith('plain')) return item.flat ? (single ? PLAIN.flatSingle : PLAIN.flatDouble) : single ? PLAIN.single : PLAIN.double;
     const style = (material: THREE.Material) => {
       (material as any).flatShading = item.flat;
       material.side = single ? THREE.FrontSide : THREE.DoubleSide;

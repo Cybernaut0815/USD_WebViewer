@@ -222,6 +222,8 @@ export class UsdViewerElement extends HTMLElement {
     /** The render items, live. Instanced meshes: the prototype's (Hydra) path, stage-space instance matrices. */
     items(): readonly Readonly<Pick<Item, 'rid' | 'path' | 'kind' | 'object' | 'instances'>>[];
     objectsFor(path: Path): THREE.Object3D[];
+    /** A mesh item's materials as the shaded view draws them, also while another view mode shows (null: no mesh). */
+    materials(rid: number): THREE.Material | THREE.Material[] | null;
     invalidate(): void;
   } {
     const v = this.viewport;
@@ -234,6 +236,7 @@ export class UsdViewerElement extends HTMLElement {
       beforeRender: v.beforeRender,
       items: () => [...v.sync.items.values()],
       objectsFor: (path) => v.sync.objectsFor(path),
+      materials: (rid) => v.sync.shadedMaterials(rid),
       invalidate: () => v.invalidate(),
     };
   }

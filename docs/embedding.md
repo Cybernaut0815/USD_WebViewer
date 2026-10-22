@@ -35,6 +35,7 @@ Build the element with `npm run build:lib` (in `web/`). The output is `web/dist-
 | `panels="none"` | Viewport only: no toolbar, panels or overlays |
 | `readonly` | No edits from the view: of the keys only F and H / Shift+H / Alt+H work (hiding writes the session layer, never saved), the Move / Rotate / Scale tools are off, no prim menu, no drop-to-open. Selection and navigation stay. The panels still edit, so pair it with `panels="none"` |
 | `force-webgl` | Use the WebGL2 backend even where WebGPU is available |
+| `live` | URL of a [live-link](live.md) relay; empty means `live/` next to the page, which `npm run dev` provides |
 
 ## Structure
 
@@ -44,7 +45,7 @@ The element is a thin layout around two reusable parts:
 
 Host pages extend it in two ways:
 - **Panels:** add your own through the `toolbar`, `left`, `right` and `bottom` slots.
-- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `changedprims`, and more. The element adds its own: `camerachange`, `cameraschange`, `toolchange` and others.
+- **Events:** listen to the session's events, which the element mirrors: `stageopen`, `stageloaded` (every prim has been sent once; large stages appear page by page in between), `selectionchange`, `primschange`, `dirtychange`, `diskchange`, `livechange`, `changedprims`, and more. The element adds its own: `camerachange`, `cameraschange`, `toolchange` and others.
 
 The rule for every module: change the stage through `viewer.usd`, then let the core's render delta move the three.js objects. Never edit three.js objects to represent stage state. `web/src/protocol.ts` is the contract between the page and the core.
 
@@ -52,7 +53,8 @@ The rule for every module: change the stage through `viewer.usd`, then let the c
 
 | Member | Purpose |
 |---|---|
-| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `attributeHead`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `exportVariants`, `meshMap`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `attributeHead` only its first 16 values (`{ length, head }`), `bounds` the world bounds; `meshMap(rid)` maps a drawn mesh's triangles to the polygons they came from (its own faces, or a refined surface's); `exportVariants` writes the stage flattened as shown, as usdc, with a variant set of primvar and material overrides on chosen prims (`MeshMap`, `ExportVariantsSpec` in `protocol.ts`). |
+| `viewer.usd.*` | Stage queries and undoable edits: `children`, `prim`, `bounds`, `attribute`, `attributeHead`, `find`, `subtree`, `xformInfo(s)`, `setAttribute`, `clearAttribute`, `setXform(s)`, `setVisible`, `setVariant`, `setPayloadLoaded`, `setRefinement`, `hide`, `isolate`, `showAll`, `clearPrimEdits`, `layers`, `setEditTarget`, `exportLayer`, `exportPrim`, `exportVariants`, `meshMap`, `reload`. `prim` leaves numeric array values out (`null`); `attribute` fetches one, `attributeHead` only its first 16 values (`{ length, head }`), `bounds` the world bounds; `meshMap(rid)` maps a drawn mesh's triangles to the polygons they came from (its own faces, or a refined surface's); `exportVariants` writes the stage flattened as shown, as usdc, with a variant set of primvar and material overrides on chosen prims (`MeshMap`, `ExportVariantsSpec` in `protocol.ts`). `importLayer(name, usdaOrBytes)` replaces a layer's content in place (not undoable) |
+| `live` | The [live link](live.md): `connect(relayUrl)`, `disconnect()`, `connected`, `id` |
 | `open(source)`, `close()`, `save()` | Open a URL, files or a picked folder; save the dirty layers |
 | `select(paths, { active, reveal, frame })`, `selection`, `active`, `frame(paths)`, `pick(x, y)` | Selection and framing; `frame()` without paths frames the stage and the shown `three.overlay` objects, except those with `userData.frame = false` (a ground grid, say; they still count for the clip planes) |
 | `highlight = { color, opacity }` | Fill of the selected prims (`#rrggbb`, 0 to 1). Page-wide: every viewer on the page shares it |

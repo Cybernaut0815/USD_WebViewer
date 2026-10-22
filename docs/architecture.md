@@ -23,6 +23,8 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 
 **On the page:** three.js draws the deltas with WebGPU, falling back to WebGL2. Edits go back to the core as RPC calls and come back as new deltas.
 
+**From outside the page:** other programs push whole layers to a small relay (`web/live-relay.ts`, HTTP and server-sent events); the page fetches them and the core replaces the layer's content in place, which USD diffs so only changed prims resync. The viewer's edits go back the same way. See [Live link](live.md).
+
 ## Repository layout
 
 | Path | Contents |
@@ -31,6 +33,7 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 | `native/` | The core (`usdcore.js`, `usdcore.wasm`): stage queries and edits, Hydra bridge, geometry conversion, asset resolver; `native/test/smoke.mjs` |
 | `web/` | The viewer: `<usd-viewer>` element, three.js scene sync, panels, unit and browser tests |
 | `web/src/protocol.ts` | The contract between page and core |
+| `web/live-relay.ts` | Live-link relay: in-memory layer store with server-sent events, mounted at `/live/` by the dev server or run standalone |
 | `web/public/` | The core build output, the mock core, sample stages, skies |
 
 ## Status
@@ -46,6 +49,7 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 - **Inspecting:** the inspector (metadata, primvars, composition arcs), copying, locks, display modes with face-edge wireframes, statistics and skies.
 - **Selecting:** hiding and isolating, box selection.
 - **Editing:** gizmo editing with undo, change markers and Clear edits, saving, and reload-on-change.
+- **Live link:** layers pushed through the relay replace the open layer or add an overlay; viewer edits are published back.
 
 Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 MB, or 4 MB with brotli.
 

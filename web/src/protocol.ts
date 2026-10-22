@@ -95,6 +95,12 @@ export interface CoreApi {
   exportVariants(specJson: string, floats: Float32Array, ints: Int32Array): ExportVariantsResult;
   /** Re-reads layers from their source (all non-anonymous used layers when empty), dropping local edits to them. */
   reloadLayers(identifiers: string[]): Edit;
+  /**
+   * Live link: replaces a layer's content from usda text or usdc bytes. `name`: exact identifier, else a unique
+   * "/<name>" suffix, else a live overlay's display name; '' = root layer. Unknown names create an in-memory
+   * overlay (a sublayer of the session layer, never saved) when `create` is set. Only prims that differ resync.
+   */
+  importLayer(name: string, bytes: Uint8Array, format: 'usda' | 'usdc', create: boolean): Edit;
   /** Worker glue: replaces the files behind a mount directory (changed on disk). */
   remount(dir: string, files: { path: string; file: Blob }[]): void;
 }

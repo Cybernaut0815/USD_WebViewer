@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "build:lib": "vite build --mode lib",
     "preview": "vite preview",
+    "live": "node live-relay.ts",
     "e2e": "playwright test",
     "e2e:update": "playwright test --update-snapshots"
   },

@@ -766,12 +766,18 @@ test.describe('mock core', () => {
       await viewer.idle(); // drawn: the camera matrices are current
       const ndc = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
       const away = floor.getWorldPosition(floor.position.clone()).project(viewer.three.camera);
+      const distance = () => { const v = viewer.view; return Math.hypot(...v.eye.map((e, i) => e - v.target[i])); };
+      const wide = distance();
       viewer.style.width = '160px'; // narrower than tall: framing fits the width
       viewer.style.height = '600px';
       for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame); // resized
       viewer.frame();
       await viewer.idle();
       const narrow = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
+      viewer.style.width = '0px'; // no width (a collapsed column): framing fits the height, as for a wide one
+      for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+      viewer.frame();
+      const collapsed = Math.abs(distance() / wide - 1) < 1e-6;
       return {
         tool: viewer.tool,
         unframed: Math.abs(away.x) > 1 || Math.abs(away.y) > 1,
@@ -780,10 +786,11 @@ test.describe('mock core', () => {
         alpha: pixel.getImageData(0, 0, 1, 1).data[3],
         framed: Math.abs(ndc.x) < 1 && Math.abs(ndc.y) < 1,
         narrow: Math.abs(narrow.x) < 1 && Math.abs(narrow.y) < 1,
+        collapsed,
         bare: viewer.shadowRoot!.querySelector('canvas')!.clientWidth === viewer.clientWidth,
       };
     });
-    expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, narrow: true, bare: true });
+    expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, narrow: true, collapsed: true, bare: true });
   });
 
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {

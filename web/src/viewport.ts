@@ -273,14 +273,16 @@ export class Viewport {
     const radius = Math.max(sphere.radius, 1e-6);
     const view = this.view;
     const half = (this.freeCamera.fov * Math.PI) / 360; // half the vertical field of view
-    const fit = Math.min(half, Math.atan(Math.tan(half) * this.freeCamera.aspect)); // a canvas narrower than tall fits its width
+    // a canvas narrower than tall fits its width; one with no width (hidden, collapsed) its height, having none to fit
+    const aspect = this.canvas.clientWidth ? this.freeCamera.aspect : 1;
+    const fit = Math.min(half, Math.atan(Math.tan(half) * aspect));
     const distance = (radius / Math.sin(fit)) * 1.15;
     const direction = view.position.clone().sub(this.controls.target);
     if (direction.lengthSq() === 0) direction.set(1, 0.6, 1);
     this.controls.target.copy(sphere.center);
     view.position.copy(sphere.center).addScaledVector(direction.normalize(), distance);
     if (view === this.orthoCamera) {
-      view.zoom = Math.min(view.top, view.right) / (radius * 1.15); // right = top * aspect (resize)
+      view.zoom = (view.top * Math.min(1, aspect)) / (radius * 1.15); // the half-width is top * aspect (resize)
       view.updateProjectionMatrix();
     }
     this.controls.update();

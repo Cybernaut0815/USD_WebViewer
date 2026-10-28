@@ -272,13 +272,15 @@ export class Viewport {
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 1e-6);
     const view = this.view;
-    const distance = (radius / Math.sin((this.freeCamera.fov * Math.PI) / 360)) * 1.15;
+    const half = (this.freeCamera.fov * Math.PI) / 360; // half the vertical field of view
+    const fit = Math.min(half, Math.atan(Math.tan(half) * this.freeCamera.aspect)); // a canvas narrower than tall fits its width
+    const distance = (radius / Math.sin(fit)) * 1.15;
     const direction = view.position.clone().sub(this.controls.target);
     if (direction.lengthSq() === 0) direction.set(1, 0.6, 1);
     this.controls.target.copy(sphere.center);
     view.position.copy(sphere.center).addScaledVector(direction.normalize(), distance);
     if (view === this.orthoCamera) {
-      view.zoom = view.top / (radius * 1.15);
+      view.zoom = Math.min(view.top, view.right) / (radius * 1.15); // right = top * aspect (resize)
       view.updateProjectionMatrix();
     }
     this.controls.update();

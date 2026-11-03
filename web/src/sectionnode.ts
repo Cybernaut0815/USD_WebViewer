@@ -17,10 +17,21 @@ export const SECTIONS = new WeakMap<THREE.Scene, { rows: Float64Array; root: THR
 const VECTORS = Array.from({ length: ROWS }, () => new THREE.Vector4());
 const NONE = new Float64Array(4);
 const viewToStage = new THREE.Matrix4();
+/** Row i of the stage-space rows r times the view-to-stage matrix e (elements): the row tests view-space points. */
+const view = (r: Float64Array, e: number[], i: number) => {
+  const o = i * 4, a = r[o], b = r[o + 1], c = r[o + 2], d = r[o + 3];
+  VECTORS[i].set(
+    a * e[0] + b * e[1] + c * e[2] + d * e[3],
+    a * e[4] + b * e[5] + c * e[6] + d * e[7],
+    a * e[8] + b * e[9] + c * e[10] + d * e[11],
+    a * e[12] + b * e[13] + c * e[14] + d * e[15],
+  );
+};
 /**
  * The rows in view space for the render at hand, refilled once per render: each row times root⁻¹ · camera.matrixWorld
  * tests positionView directly. The header is always written, so a scene without a section draws whole whatever
- * another viewer on the page showed last. Only the Vector4s change: the array keeps its size and buffer.
+ * another viewer on the page showed last. Only the Vector4s change: the array keeps its size and buffer, and nothing
+ * is allocated.
  */
 const DATA = uniformArray<'vec4'>(VECTORS, 'vec4')
   .setGroup(renderGroup)
@@ -30,20 +41,11 @@ const DATA = uniformArray<'vec4'>(VECTORS, 'vec4')
     VECTORS[0].fromArray(r);
     if (!entry || !camera) return;
     const e = viewToStage.copy(entry.root.matrixWorld).invert().multiply(camera.matrixWorld).elements;
-    const view = (i: number) => {
-      const [a, b, c, d] = r.subarray(i * 4, i * 4 + 4);
-      VECTORS[i].set(
-        a * e[0] + b * e[1] + c * e[2] + d * e[3],
-        a * e[4] + b * e[5] + c * e[6] + d * e[7],
-        a * e[8] + b * e[9] + c * e[10] + d * e[11],
-        a * e[12] + b * e[13] + c * e[14] + d * e[15],
-      );
-    };
-    for (let i = 1; i <= r[0]; i++) view(i);
+    for (let i = 1; i <= r[0]; i++) view(r, e, i);
     for (let box = 0; box < r[1]; box++) {
       const at = 1 + MAX + box * 8;
       VECTORS[at].fromArray(r, at * 4); // meta: not a row
-      for (let k = 1; k < 8; k++) view(at + k);
+      for (let k = 1; k < 8; k++) view(r, e, at + k);
     }
   });
 

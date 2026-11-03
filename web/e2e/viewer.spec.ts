@@ -6,8 +6,8 @@ import type { UsdViewerElement } from '../src/viewer.ts';
 
 const MOCK = '/?core=mock-core/&forceWebGL=1&src=mock.usda';
 
-/** Goldens are of the 3D view; the stats overlay on top of it is checked as text. */
-const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats'), page.locator('usd-viewer .tools')] });
+/** Goldens are of the 3D view; the stats overlay on top of it is checked as text, and shot.css hides the Section button. */
+const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats'), page.locator('usd-viewer .tools')], stylePath: fileURLToPath(new URL('shot.css', import.meta.url)) });
 
 /** Opens the app and waits until the stage is drawn. */
 async function open(page: Page, url: string) {
@@ -849,6 +849,18 @@ test.describe('mock core', () => {
     await expect(canvas).toHaveScreenshot('mock-stage.png', shot(page));
     expect(await state()).toEqual(before);
     expect(await page.evaluate(() => (window as any).events)).toEqual(Array(6).fill(['sectionchange', { source: 'api' }]));
+    // Opening a stage clears the section before hosts hear stageopen: one a host sets there stays.
+    const plane = { point: [0, 0, 0], normal: [-1, 0, 0] } as Section['planes'][number];
+    const reopened = await page.evaluate(async (plane) => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const sources: string[] = [];
+      viewer.addEventListener('sectionchange', (e) => sources.push((e as CustomEvent).detail.source));
+      viewer.section = { on: true, planes: [{ ...plane, normal: [1, 0, 0] }], boxes: [] };
+      viewer.addEventListener('stageopen', () => (viewer.section = { on: true, planes: [plane], boxes: [] }), { once: true });
+      await viewer.open('mock.usda');
+      return { sources, section: viewer.section };
+    }, plane);
+    expect(reopened).toEqual({ sources: ['api', 'stage', 'api'], section: { on: true, planes: [plane], boxes: [] } });
     expect(errors).toEqual([]);
   });
 
@@ -1016,6 +1028,29 @@ test.describe('mock core', () => {
     expect(refused.corners[0][0]).toBeGreaterThan(x);
     expect(refused.corners[0][0]).toBeLessThan(1);
     expect([refused.bottom, refused.top, refused.corners.slice(1)]).toEqual([raised.bottom, raised.top, start.corners.slice(1)]);
+    // Attached afresh (the same entry: no event), every handle is chosen. Dragged up and across by the gizmo's middle,
+    // the footprint moves only in plan and the bottom and top rise together; no frame of the drag redraws the shadows.
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.sectionGizmo = { box: 0 };
+      let sun: any = null;
+      viewer.three.scene.traverse((o: any) => o.isDirectionalLight && o.castShadow && (sun = o));
+      (window as any).redraws = 0;
+      viewer.three.beforeRender.add(() => void (sun.shadow.needsUpdate && (window as any).redraws++));
+    });
+    const mean = [0, 2].map((i) => refused.corners.reduce((sum, c) => sum + c[i], 0) / 4);
+    const [grip] = await toScreen(page, [[mean[0], (refused.bottom + refused.top) / 2, mean[1]]]);
+    await page.mouse.move(...grip);
+    await page.mouse.down();
+    for (let d = 5; d <= 40; d += 5) await page.mouse.move(grip[0] + d, grip[1] - d);
+    await page.mouse.up();
+    const whole = await box();
+    const shift = whole.corners.map((c, k) => c.map((v, i) => v - refused.corners[k][i]));
+    expect(Math.hypot(shift[0][0], shift[0][2])).toBeGreaterThan(0.05);
+    for (const [dx, dy, dz] of shift) expect([dx - shift[0][0], dy, dz - shift[0][2]].map((v) => Math.abs(v) < 1e-9)).toEqual([true, true, true]);
+    expect(whole.bottom - refused.bottom).toBeGreaterThan(0.05);
+    expect(whole.top - refused.top).toBeCloseTo(whole.bottom - refused.bottom, 9);
+    expect(await page.evaluate(() => (window as any).redraws)).toBe(0);
     // Only the section changed, from the gizmo: no selection, no edit.
     const events = await page.evaluate(() => (window as any).events as [string, string | null][]);
     expect(events.slice(0, 2)).toEqual([['sectionchange', 'api'], ['sectiongizmochange', null]]);
@@ -1036,7 +1071,7 @@ test.describe('mock core', () => {
     await page.evaluate(() => {
       const v = document.querySelector('usd-viewer') as UsdViewerElement;
       v.setAttribute('readonly', '');
-      v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      v.section = { on: true, planes: [{ point: [0, 0, 40], normal: [-1, 0, 0] }], boxes: [] }; // its point far out of view
     });
     const without = await image();
     const view = await canvas.screenshot();
@@ -1044,8 +1079,10 @@ test.describe('mock core', () => {
     expect(await image()).toBe(without);
     await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).idle());
     expect((await canvas.screenshot()).equals(view)).toBe(false); // the view itself shows it
-    // Readonly: the plane still moves along its normal, the stage stays clean; Esc (no handles to clear) lets go.
-    await dragAxis(page, [0, 0, 0], [-1, 0, 0]);
+    // Readonly: the plane still moves along its normal, the stage stays clean; Esc (no handles to clear) lets go. The
+    // gizmo sits in the middle of the outline, where the stage's centre (the framed view's target) falls on the plane.
+    const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
+    await dragAxis(page, [0, y, z], [-1, 0, 0]);
     const dragged = await viewer();
     expect(dragged.plane.point[0]).toBeLessThan(-0.2);
     expect(dragged.plane.normal).toEqual([-1, 0, 0]);
@@ -1109,12 +1146,27 @@ test.describe('mock core', () => {
     await menu('Box 1: cut out');
     ({ section } = await state());
     expect([section.planes[0].normal[0], section.boxes[0].keep]).toEqual([1, 'outside']);
+    // Removing an entry before the edited one keeps the gizmo on its entry; removing the edited one lets go of it.
+    await menu('Plane Y');
     await menu('Remove plane 1');
     ({ section, gizmo } = await state());
-    expect([section.planes.length, section.boxes.length, gizmo]).toEqual([0, 1, { box: 0, rotate: false }]);
+    expect([section.planes.map((p) => p.normal), gizmo]).toEqual([[[0, -1, 0]], { plane: 0, rotate: false }]);
+    await menu('Remove plane 1');
+    ({ section, gizmo } = await state());
+    expect([section.planes.length, section.boxes.length, gizmo]).toEqual([0, 1, null]);
     await menu('Clear');
     expect(await state()).toEqual({ section: { on: true, planes: [], boxes: [] }, gizmo: null });
-    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(6).fill('ui'));
+    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(8).fill('ui'));
+    // 7 planes and 8 boxes: the menu stays in the window and scrolls, its first item at hand.
+    await page.evaluate(() => {
+      const box: Section['boxes'][number] = { keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -1, top: 1 };
+      (document.querySelector('usd-viewer') as UsdViewerElement).section = { on: true, planes: Array(7).fill({ point: [0, 0, 0], normal: [0, 1, 0] }), boxes: Array(8).fill(box) };
+    });
+    await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+    const popup = (await page.locator('usd-viewer .popup').boundingBox())!;
+    expect([popup.y >= 0, popup.y + popup.height <= page.viewportSize()!.height]).toEqual([true, true]);
+    await page.locator('usd-viewer .popup button', { hasText: 'Plane X' }).click();
+    expect((await state()).section.planes).toHaveLength(8);
     expect(errors).toEqual([]);
   });
 

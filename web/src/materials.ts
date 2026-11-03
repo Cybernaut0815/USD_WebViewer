@@ -211,7 +211,7 @@ async function buildPreviewSurface(
   if (!surface || surface.type !== 'UsdPreviewSurface') return null;
   const b = new PreviewBuilder(net, textures, host);
   const p = surface.params;
-  const m = section(new THREE.MeshPhysicalNodeMaterial({ side: THREE.DoubleSide }));
+  const m = new THREE.MeshPhysicalNodeMaterial({ side: THREE.DoubleSide });
 
   const diffuse = await b.connected(surface, 'diffuseColor');
   if (diffuse) m.colorNode = diffuse;
@@ -268,7 +268,7 @@ async function buildPreviewSurface(
   if (occlusion) m.aoNode = occlusion;
   // ponytail: displacement is ignored; add a positionNode offset when an asset needs it.
   m.userData.readsDisplayColor = b.readsDisplayColor;
-  return m;
+  return section(m); // only once built: one that throws half way is dropped, not kept registered
 }
 
 /* ---------- MaterialX ---------- */

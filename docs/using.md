@@ -124,7 +124,7 @@ The prim menu (right-click) also copies the prim's USD, either the composed subt
   - **Box around the selection** (around the stage when nothing is selected) shows only what is inside it.
   - At most 8 planes and 8 boxes. A point shows when every plane keeps it, no "cut out" box holds it, and, if there are "show inside" boxes, one of them holds it.
 - **Each entry.** Edit or Rotate it with the gizmo, Flip a plane, switch a box between "show inside" and "cut out", or Remove it. **Sections off** shows everything but keeps the entries; **Clear** removes them all.
-- **Planes.** The outline spans the stage, and its arrow points to the side that stays. Edit moves the plane along its normal; Rotate tilts it about its point.
+- **Planes.** The outline spans the stage, and its arrow points to the side that stays. Edit moves the plane along its normal; Rotate tilts it about the middle of the outline.
 - **Boxes** stand upright: a footprint of four corners between a bottom and a top height. The sides stay vertical, and the top and bottom stay level.
   - Edit shows a dot at the top and bottom of every corner, and one on the top and on the bottom face. A corner's two dots are one vertical edge: either one chooses that corner.
   - Click a dot to choose it alone. **Shift+click** or **Ctrl+click** adds or removes a dot. **Esc** clears the choice; pressed again, it stops editing.

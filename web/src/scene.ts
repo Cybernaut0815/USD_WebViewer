@@ -934,7 +934,7 @@ function dispose(proxy: THREE.Object3D): void {
  * geometry, until one of them fires 'dispose': objects drawn with shared materials (PLAIN, HIGHLIGHT) would keep
  * every closed stage's geometry alive.
  */
-function released(object: THREE.Object3D): void {
+export function released(object: THREE.Object3D): void {
   (object as unknown as THREE.EventDispatcher<{ dispose: object }>).dispatchEvent({ type: 'dispose' });
 }
 

@@ -3,6 +3,7 @@
 import * as THREE from 'three/webgpu';
 import { instancedBufferAttribute } from 'three/tsl';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { released } from './scene.ts';
 import { clean, equal, type Section, type SectionBox, type SectionPlane, separates, type Vec3 } from './section.ts';
 import type { Viewport } from './viewport.ts';
 
@@ -43,7 +44,8 @@ function write(attribute: THREE.BufferAttribute, points: Vec3[]): void {
 }
 
 /**
- * Edits one section entry. A plane moves along its normal, or with rotate tilts about its point. A box shows a dot at
+ * Edits one section entry. A plane moves along its normal, or with rotate tilts about the middle of its outline (where
+ * the stage's centre falls on it, so the gizmo is in view wherever the plane's own point lies). A box shows a dot at
  * the top and bottom of each corner (the pair is one vertical edge: one footprint corner) and one on each face; a click
  * chooses a handle, Shift or Ctrl+click adds or removes one. The translate gizmo in the middle of the chosen handles
  * moves corners in plan only and faces up and down only; every handle starts chosen, so at first it moves the whole
@@ -187,6 +189,7 @@ export class SectionTool {
     this.helpers.removeFromParent();
     this.lines.geometry.dispose();
     this.faint.geometry.dispose();
+    for (const lines of [this.lines, this.faint]) released(lines); // their materials (LINE, FAINT) are shared
     this.dots.material.dispose(); // not its geometry: every sprite shares that quad
     viewport.controls.enabled = viewport.cameraPath === null;
     viewport.invalidate();
@@ -209,7 +212,8 @@ export class SectionTool {
       return p;
     };
     if ('normal' in e) {
-      // A square on the plane as wide as the stage, around the stage's centre; the arrow points to the side kept.
+      // A square on the plane as wide as the stage, around the stage's centre, with the gizmo in its middle; the arrow
+      // points to the side kept.
       const n = new THREE.Vector3(...e.normal).normalize();
       const point = new THREE.Vector3(...e.point);
       const r = viewport.stageSphere.radius;
@@ -224,7 +228,7 @@ export class SectionTool {
       const points = [...square.flatMap((p, i) => [p, square[(i + 1) % 4]]), c, tip, ...[barb(a, 1), barb(a, -1), barb(b, 1), barb(b, -1)].flatMap((p) => [tip, p])];
       write(this.lines.geometry.attributes.position as THREE.BufferAttribute, points.map((p) => p.toArray()));
       if (!controls.dragging) {
-        proxy.position.copy(point);
+        proxy.position.copy(c);
         // Only when the normal changed: the twist a rotate drag left stays.
         if (Y.clone().applyQuaternion(proxy.quaternion).dot(n) < 1 - 1e-9) proxy.quaternion.setFromUnitVectors(Y, n);
         controls.attach(proxy);
@@ -273,8 +277,9 @@ export class SectionTool {
     const section = viewport.section;
     const up = viewport.sync.upAxis;
     if ('plane' in target) {
-      const { point, normal } = start.entry as SectionPlane;
-      section.planes[target.plane] = target.rotate ? { point, normal: Y.clone().applyQuaternion(proxy.quaternion).toArray() } : { point: proxy.position.toArray(), normal };
+      // The proxy stays on the plane, at the outline's middle: the point of the moved plane, the centre of a tilted one.
+      const { normal } = start.entry as SectionPlane;
+      section.planes[target.plane] = { point: proxy.position.toArray(), normal: target.rotate ? Y.clone().applyQuaternion(proxy.quaternion).toArray() : normal };
     } else {
       const box = structuredClone(start.entry) as SectionBox;
       if (target.rotate) {

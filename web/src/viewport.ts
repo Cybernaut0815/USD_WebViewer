@@ -363,6 +363,7 @@ export class Viewport {
 
   /** False where the section cuts a three-world point away. */
   keeps(point: THREE.Vector3): boolean {
+    if (!this.sectionRows[3]) return true; // no section on: nothing to convert (hosts ask per hover hit)
     const p = point.clone().applyMatrix4(this.sync.root.matrixWorld.clone().invert());
     return keeps(this.sectionRows, p.x, p.y, p.z);
   }
@@ -400,14 +401,14 @@ export class Viewport {
     this.sync.root.updateMatrixWorld(true);
     this.camera.updateMatrixWorld();
     const corner = new THREE.Vector3();
+    const cornerOf = (box: THREE.Box3, i: number) => corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
     const toStage = this.sync.root.matrixWorld.clone().invert();
-    const corners: Vec3[] = []; // in stage space, for the section
+    const stage = new THREE.Matrix4();
+    const corners = Array.from({ length: 8 }, (): Vec3 => [0, 0, 0]); // in stage space, for the section
     const inRect = (box: THREE.Box3, world: THREE.Matrix4): boolean => {
       let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
       for (let i = 0; i < 8; i++) {
-        corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).applyMatrix4(world);
-        corners[i] = corner.clone().applyMatrix4(toStage).toArray() as Vec3;
-        corner.project(this.camera);
+        cornerOf(box, i).applyMatrix4(world).project(this.camera);
         if (corner.z > 1) return false; // behind the camera
         const x = canvas.left + ((corner.x + 1) / 2) * canvas.width;
         const y = canvas.top + ((1 - corner.y) / 2) * canvas.height;
@@ -419,7 +420,10 @@ export class Viewport {
       const inside = contained
         ? left >= r.left && right <= r.right && top >= r.top && bottom <= r.bottom
         : left <= r.right && right >= r.left && top <= r.bottom && bottom >= r.top;
-      return inside && !boxClipped(this.sectionRows, corners);
+      if (!inside || !this.sectionRows[3]) return inside; // stage space only for what the section could hide
+      stage.multiplyMatrices(toStage, world);
+      for (let i = 0; i < 8; i++) cornerOf(box, i).applyMatrix4(stage).toArray(corners[i]);
+      return !boxClipped(this.sectionRows, corners);
     };
     const hits: { rid: Rid; instance: number }[] = [];
     const world = new THREE.Matrix4();

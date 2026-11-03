@@ -407,8 +407,9 @@ export class UsdViewerElement extends HTMLElement {
   /**
    * The gizmo editing one section entry in the view, or null. Setting attaches it afresh (a box with every handle
    * chosen: the whole box moves) and switches the tool to select; an index the section lacks detaches it, as do losing
-   * the entry and another tool. It changes only `section` (source 'gizmo'), also when readonly. Fires
-   * `sectiongizmochange` when the target changed.
+   * the entry and another tool. It keeps its index when the section is replaced: a host that removes an earlier entry
+   * sets it again. It changes only `section` (source 'gizmo'), also when readonly. Fires `sectiongizmochange` when the
+   * target changed.
    */
   get sectionGizmo(): SectionGizmo | null {
     return this.viewport.sectionGizmo;
@@ -724,6 +725,13 @@ export class UsdViewerElement extends HTMLElement {
       set({ ...s, planes: plane ? [...s.planes, plane] : s.planes, boxes: box ? [...s.boxes, box] : s.boxes });
       this.sectionGizmo = plane ? { plane: s.planes.length } : { box: s.boxes.length };
     };
+    /** Removes plane or box i: the gizmo lets go of it, or stays with the entry it edits (an index down). */
+    const remove = (kind: 'plane' | 'box', i: number) => {
+      const gizmo = this.sectionGizmo as { plane?: number; box?: number } | null;
+      const at = gizmo?.[kind] ?? -1;
+      if (at >= i) this.sectionGizmo = at === i ? null : ({ ...gizmo, [kind]: at - 1 } as SectionGizmo);
+      set(kind === 'plane' ? { ...s, planes: s.planes.toSpliced(i, 1) } : { ...s, boxes: s.boxes.toSpliced(i, 1) });
+    };
     /** Stage-space bounds of objects, of the whole stage by default: [min, max]. */
     const bounds = (objects?: THREE.Object3D[]) => {
       const box = v.bounds(objects).applyMatrix4(v.sync.root.matrixWorld.clone().invert());
@@ -764,13 +772,13 @@ export class UsdViewerElement extends HTMLElement {
         { label: `Edit plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i }) },
         { label: `Rotate plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i, rotate: true }) },
         { label: `Flip plane ${i + 1}`, action: () => set({ ...s, planes: s.planes.with(i, { point: p.point, normal: p.normal.map((n) => -n) as Vec3 }) }) },
-        { label: `Remove plane ${i + 1}`, action: () => set({ ...s, planes: s.planes.toSpliced(i, 1) }) },
+        { label: `Remove plane ${i + 1}`, action: () => remove('plane', i) },
       ]),
       ...s.boxes.flatMap((b, i) => [
         { label: `Edit box ${i + 1}`, action: () => (this.sectionGizmo = { box: i }) },
         { label: `Rotate box ${i + 1}`, action: () => (this.sectionGizmo = { box: i, rotate: true }) },
         { label: `Box ${i + 1}: ${b.keep === 'inside' ? 'cut out' : 'show inside'}`, action: () => set({ ...s, boxes: s.boxes.with(i, { ...b, keep: b.keep === 'inside' ? 'outside' : 'inside' }) }) },
-        { label: `Remove box ${i + 1}`, action: () => set({ ...s, boxes: s.boxes.toSpliced(i, 1) }) },
+        { label: `Remove box ${i + 1}`, action: () => remove('box', i) },
       ]),
       { label: s.on ? 'Sections off' : 'Sections on', action: () => set({ ...s, on: !s.on }), disabled: empty },
       { label: 'Clear', action: () => set(EMPTY), disabled: empty },
@@ -829,6 +837,17 @@ export class UsdViewerElement extends HTMLElement {
     const session = this.session;
     const on = <K extends keyof UsdSessionEventMap>(type: K, handler: (event: UsdSessionEventMap[K]) => void) =>
       session.addEventListener(type, handler as EventListener);
+    // Before the mirrored event: a host's stageopen listener sees the new up axis, and a section it sets there stays.
+    on('stageopen', (e) => {
+      // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
+      clearInterval(this.statsTimer);
+      this.statsTimer = window.setInterval(() => this.updateStats(), 500);
+      this.loading = true;
+      this.framed = false;
+      this.viewport.sync.setUpAxis(e.detail.upAxis);
+      this.viewport.setSection(EMPTY, 'stage'); // its numbers were in the last stage's space
+      this.tree.reset().catch(() => {});
+    });
     for (const type of MIRRORED) {
       on(type, (e) => this.dispatchEvent(new CustomEvent(type, { detail: (e as CustomEvent).detail })));
     }
@@ -843,16 +862,6 @@ export class UsdViewerElement extends HTMLElement {
         this.viewport.frame();
       }
       this.updateStats();
-    });
-    on('stageopen', (e) => {
-      // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
-      clearInterval(this.statsTimer);
-      this.statsTimer = window.setInterval(() => this.updateStats(), 500);
-      this.loading = true;
-      this.framed = false;
-      this.viewport.sync.setUpAxis(e.detail.upAxis);
-      this.viewport.setSection(EMPTY, 'stage'); // its numbers were in the last stage's space
-      this.tree.reset().catch(() => {});
     });
     on('stageloaded', () => {
       this.loading = false;

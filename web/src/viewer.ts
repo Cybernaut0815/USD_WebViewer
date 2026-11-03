@@ -8,6 +8,8 @@ import { copyText, type MenuItem, showMenu } from './menu.ts';
 import { ACTIVE, HIGHLIGHT, TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
 import type { CameraParams, Path, PickResult, StageInfo } from './protocol.ts';
+import { EMPTY, type Section, type SectionSource } from './section.ts';
+import { section } from './sectionnode.ts';
 import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
@@ -20,7 +22,7 @@ import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, type ViewSta
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode | 'navigate';
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; cameraschange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; cameraschange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event; sectionchange: CustomEvent<{ source: SectionSource }> };
 export { DEFAULT_BACKGROUND };
 export type { CameraSettings, ViewState };
 /** Which panels around the viewport are shown. */
@@ -232,6 +234,10 @@ export class UsdViewerElement extends HTMLElement {
     /** A mesh item's materials as the shaded view draws them, also while another view mode shows (null: no mesh). */
     materials(rid: number): THREE.Material | THREE.Material[] | null;
     invalidate(): void;
+    /** Registers a host material to be cut by the section, like the viewer's own, and returns it. NodeMaterials only. */
+    section<T extends THREE.Material>(material: T): T;
+    /** False where the section cuts this three-world point away: filters a host's own raycast hits. */
+    keeps(worldPoint: THREE.Vector3): boolean;
   } {
     const v = this.viewport;
     return {
@@ -245,6 +251,8 @@ export class UsdViewerElement extends HTMLElement {
       objectsFor: (path) => v.sync.objectsFor(path),
       materials: (rid) => v.sync.shadedMaterials(rid),
       invalidate: () => v.invalidate(),
+      section,
+      keeps: (point) => v.keeps(point),
     };
   }
 
@@ -370,6 +378,19 @@ export class UsdViewerElement extends HTMLElement {
   set view(state: ViewState) {
     if (this.camera !== null) this.camera = null;
     this.viewport.viewState = state;
+  }
+
+  /**
+   * Clipping planes and boxes, in stage space (stage units and axes; vertical is the stage's up axis). View only: the
+   * stage, its three.js objects and the shadows stay whole; pick() and the marquee follow it. Gets a copy; setting
+   * replaces the whole section, cleaned (see Section), and fires `sectionchange` when it changed. Opening a stage
+   * clears it.
+   */
+  get section(): Section {
+    return this.viewport.section;
+  }
+  set section(next: Section) {
+    this.viewport.setSection(next, 'api');
   }
 
   /** Path of the stage camera being looked through, or null for the free camera. */
@@ -708,6 +729,7 @@ export class UsdViewerElement extends HTMLElement {
     for (const type of MIRRORED) {
       on(type, (e) => this.dispatchEvent(new CustomEvent(type, { detail: (e as CustomEvent).detail })));
     }
+    this.viewport.onsection = (source) => this.dispatchEvent(new CustomEvent('sectionchange', { detail: { source } }));
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
       if (e.detail.cameras?.length || e.detail.removed?.length) this.dispatchEvent(new Event('cameraschange'));
@@ -725,6 +747,7 @@ export class UsdViewerElement extends HTMLElement {
       this.loading = true;
       this.framed = false;
       this.viewport.sync.setUpAxis(e.detail.upAxis);
+      this.viewport.setSection(EMPTY, 'stage'); // its numbers were in the last stage's space
       this.tree.reset().catch(() => {});
     });
     on('stageloaded', () => {

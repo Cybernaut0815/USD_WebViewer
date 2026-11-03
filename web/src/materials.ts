@@ -17,6 +17,7 @@ import {
   vec4,
 } from 'three/tsl';
 import type { AssetValue, Json, MaterialEntry, MaterialNetwork, MaterialNode } from './protocol.ts';
+import { section } from './sectionnode.ts';
 
 type Node = any; // TSL node objects; their static types add little here
 type Vec = number[];
@@ -210,7 +211,7 @@ async function buildPreviewSurface(
   if (!surface || surface.type !== 'UsdPreviewSurface') return null;
   const b = new PreviewBuilder(net, textures, host);
   const p = surface.params;
-  const m = new THREE.MeshPhysicalNodeMaterial({ side: THREE.DoubleSide });
+  const m = section(new THREE.MeshPhysicalNodeMaterial({ side: THREE.DoubleSide }));
 
   const diffuse = await b.connected(surface, 'diffuseColor');
   if (diffuse) m.colorNode = diffuse;
@@ -296,7 +297,7 @@ async function buildMaterialX(xml: string, textures: TextureCache, host: Materia
   const material = Object.values(result.materials ?? {})[0] as THREE.Material | undefined;
   if (!material) return null;
   material.side = THREE.DoubleSide;
-  return material;
+  return section(material);
 }
 
 /** Fallback chain: MaterialX, then UsdPreviewSurface, then null (display colour). */
@@ -329,7 +330,7 @@ export async function buildMaterial(
 
 /** Unbound geometry: displayColor / displayOpacity, optionally per vertex. */
 export function displayMaterial(color: Vec, opacity: number, vertexColors: boolean): THREE.Material {
-  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.5, metalness: 0, side: THREE.DoubleSide, vertexColors });
+  const m = section(new THREE.MeshStandardNodeMaterial({ roughness: 0.5, metalness: 0, side: THREE.DoubleSide, vertexColors }));
   if (!vertexColors) m.color.setRGB(color[0], color[1], color[2]);
   if (opacity < 1) {
     m.opacity = opacity;
@@ -344,7 +345,7 @@ export function displayMaterial(color: Vec, opacity: number, vertexColors: boole
  * in the vertex stage by the per-point width.
  */
 export function ribbonMaterial(color: Vec, vertexColors: boolean): THREE.Material {
-  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.6, metalness: 0, side: THREE.DoubleSide, vertexColors });
+  const m = section(new THREE.MeshStandardNodeMaterial({ roughness: 0.6, metalness: 0, side: THREE.DoubleSide, vertexColors }));
   if (!vertexColors) m.color.setRGB(color[0], color[1], color[2]);
   const tangent = attribute('curveTangent', 'vec3');
   const eye = modelWorldMatrixInverse.mul(vec4(cameraPosition, 1)).xyz;
@@ -355,7 +356,7 @@ export function ribbonMaterial(color: Vec, vertexColors: boolean): THREE.Materia
 }
 
 export function hairlineMaterial(color: Vec, vertexColors: boolean): THREE.Material {
-  const m = new THREE.LineBasicNodeMaterial({ vertexColors });
+  const m = section(new THREE.LineBasicNodeMaterial({ vertexColors }));
   if (!vertexColors) m.color.setRGB(color[0], color[1], color[2]);
   return m;
 }
@@ -367,7 +368,7 @@ export function pointsMaterial(
   colors: THREE.InstancedBufferAttribute | null,
   color: Vec,
 ): THREE.Material {
-  const m = new THREE.SpriteNodeMaterial({ sizeAttenuation: true });
+  const m = section(new THREE.SpriteNodeMaterial({ sizeAttenuation: true }));
   m.positionNode = instancedBufferAttribute(positions);
   m.scaleNode = widths ? instancedBufferAttribute(widths) : float(1);
   if (colors) m.colorNode = instancedBufferAttribute(colors) as any;
@@ -379,7 +380,7 @@ export function pointsMaterial(
 }
 
 /** "No materials" display mode: one grey material, single- and double-sided, and flat for meshes without normals. */
-const plain = (side: THREE.Side, flatShading: boolean) => new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side, flatShading });
+const plain = (side: THREE.Side, flatShading: boolean) => section(new THREE.MeshStandardNodeMaterial({ color: 0x9a9a9a, roughness: 0.6, metalness: 0, side, flatShading }));
 export const PLAIN = {
   double: plain(THREE.DoubleSide, false),
   single: plain(THREE.FrontSide, false),
@@ -388,33 +389,35 @@ export const PLAIN = {
 };
 
 /** Edges of the authored faces over the surface, and alone against the dark background. */
-export const LINE = new THREE.LineBasicNodeMaterial({ color: 0x1c1c1c });
-export const LINE_ALONE = new THREE.LineBasicNodeMaterial({ color: 0xa8acb3 });
+export const LINE = section(new THREE.LineBasicNodeMaterial({ color: 0x1c1c1c }));
+export const LINE_ALONE = section(new THREE.LineBasicNodeMaterial({ color: 0xa8acb3 }));
 /** Selection edges in the selection-wire modes; the active prim is brighter. */
-export const SELECTED_LINE = new THREE.LineBasicNodeMaterial({ color: 0xd01818 });
-export const ACTIVE_LINE = new THREE.LineBasicNodeMaterial({ color: 0xff6a6a });
-/** Wireframe mode: the surface is not drawn but stays pickable. */
+export const SELECTED_LINE = section(new THREE.LineBasicNodeMaterial({ color: 0xd01818 }));
+export const ACTIVE_LINE = section(new THREE.LineBasicNodeMaterial({ color: 0xff6a6a }));
+/** Wireframe mode: the surface is not drawn but stays pickable (never drawn, so never sectioned). */
 export const HIDDEN = new THREE.MeshBasicNodeMaterial({ visible: false });
 
 /** A copy of a line material that places instance i with the matrix at buffer[16i..16i+16] (draw with object.count = instances). */
 export function instancedLines(base: THREE.LineBasicNodeMaterial, buffer: THREE.InstancedInterleavedBuffer): THREE.Material {
-  const m = base.clone();
+  const m = section(base.clone());
   const column = (offset: number): Node => instancedBufferAttribute(buffer as any, 'vec4', 16, offset);
   m.positionNode = mat4(column(0), column(4), column(8), column(12)).mul(vec4(positionGeometry, 1)).xyz;
   return m;
 }
 
 const highlight = (color: number, opacity: number) =>
-  new THREE.MeshBasicNodeMaterial({
-    color,
-    transparent: true,
-    opacity,
-    depthWrite: false,
-    side: THREE.DoubleSide,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-  });
+  section(
+    new THREE.MeshBasicNodeMaterial({
+      color,
+      transparent: true,
+      opacity,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
 /** Selected prims; the active one is brighter. */
 export const HIGHLIGHT = highlight(0xffc400, 0.3);
 export const ACTIVE = highlight(0xfff0a0, 0.5);

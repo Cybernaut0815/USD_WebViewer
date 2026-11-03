@@ -5,6 +5,8 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
 import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
+import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
+import { arm, SECTIONS } from './sectionnode.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
@@ -74,6 +76,11 @@ export class Viewport {
   readonly overlay = new THREE.Group();
   /** Right click on a prim in the view (set by the element: its prim menu). */
   oncontext: (path: Path, x: number, y: number) => void = () => {};
+  /** The section changed (set by the element: its sectionchange event). */
+  onsection: (source: SectionSource) => void = () => {};
+  private sectionState = EMPTY;
+  /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
+  private sectionRows = rows(EMPTY, 'Y');
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
@@ -297,7 +304,33 @@ export class Viewport {
     this.resize();
   }
 
-  /** First render item under a client-space point. */
+  /** Clipping planes and boxes in stage space (see section.ts): a copy. */
+  get section(): Section {
+    return structuredClone(this.sectionState);
+  }
+
+  /**
+   * Cleans and applies a section at once, before any frame (a host's own render of a hidden page is cut too); a no-op
+   * when nothing changed. GPU only: the stage's objects stay as they are and the shadow map is not redrawn.
+   */
+  setSection(input: unknown, source: SectionSource): void {
+    const next = clean(input, this.sync.upAxis);
+    if (equal(next, this.sectionState)) return;
+    this.sectionState = next;
+    this.sectionRows = rows(next, this.sync.upAxis);
+    SECTIONS.set(this.scene, { rows: this.sectionRows, root: this.sync.root });
+    if (this.sectionRows[3]) arm();
+    this.invalidate(); // not SceneSync's: that one redraws the shadow map
+    this.onsection(source);
+  }
+
+  /** False where the section cuts a three-world point away. */
+  keeps(point: THREE.Vector3): boolean {
+    const p = point.clone().applyMatrix4(this.sync.root.matrixWorld.clone().invert());
+    return keeps(this.sectionRows, p.x, p.y, p.z);
+  }
+
+  /** First render item under a client-space point (where the section cuts it away, the one behind). */
   pick(clientX: number, clientY: number): { rid: Rid; instance: number } | null {
     const rect = this.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(
@@ -315,14 +348,14 @@ export class Viewport {
         visible &&= object.visible;
         rid ||= object.userData.rid ?? 0;
       }
-      if (visible && rid) return { rid, instance: hit.instanceId ?? -1 };
+      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? -1 };
     }
     return null;
   }
 
   /**
    * Render items (and instances) in a client-space rectangle: those whose screen bounds lie fully
-   * inside it, or with `touching` those whose screen bounds overlap it.
+   * inside it, or with `touching` those whose screen bounds overlap it; not those the section provably cuts away.
    * ponytail: bounding boxes, not silhouettes, so touching over-selects near corners; test vertices if that bites.
    */
   boxPick(r: { left: number; top: number; right: number; bottom: number }, contained: boolean): { rid: Rid; instance: number }[] {
@@ -330,11 +363,14 @@ export class Viewport {
     this.sync.root.updateMatrixWorld(true);
     this.camera.updateMatrixWorld();
     const corner = new THREE.Vector3();
+    const toStage = this.sync.root.matrixWorld.clone().invert();
+    const corners: Vec3[] = []; // in stage space, for the section
     const inRect = (box: THREE.Box3, world: THREE.Matrix4): boolean => {
       let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
       for (let i = 0; i < 8; i++) {
-        corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
-        corner.applyMatrix4(world).project(this.camera);
+        corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).applyMatrix4(world);
+        corners[i] = corner.clone().applyMatrix4(toStage).toArray() as Vec3;
+        corner.project(this.camera);
         if (corner.z > 1) return false; // behind the camera
         const x = canvas.left + ((corner.x + 1) / 2) * canvas.width;
         const y = canvas.top + ((1 - corner.y) / 2) * canvas.height;
@@ -343,9 +379,10 @@ export class Viewport {
         top = Math.min(top, y);
         bottom = Math.max(bottom, y);
       }
-      return contained
+      const inside = contained
         ? left >= r.left && right <= r.right && top >= r.top && bottom <= r.bottom
         : left <= r.right && right >= r.left && top <= r.bottom && bottom >= r.top;
+      return inside && !boxClipped(this.sectionRows, corners);
     };
     const hits: { rid: Rid; instance: number }[] = [];
     const world = new THREE.Matrix4();

@@ -1,6 +1,7 @@
 import { expect, type Page, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { Section } from '../src/section.ts';
 import type { UsdViewerElement } from '../src/viewer.ts';
 
 const MOCK = '/?core=mock-core/&forceWebGL=1&src=mock.usda';
@@ -791,6 +792,179 @@ test.describe('mock core', () => {
       };
     });
     expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, narrow: true, collapsed: true, bare: true });
+  });
+
+  test('sections cut the view with planes and boxes, and leave the stage and its objects alone', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    // What a section must not touch: the edit state, the render items and the counts.
+    const state = () =>
+      page.evaluate(() => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        const { meshes, points, faces, edges, materials, textures } = viewer.stats;
+        const ids = (objects: { uuid: string }[]) => objects.map((o) => o.uuid);
+        return { dirty: viewer.dirty, items: ids(viewer.three.items().flatMap((i) => i.object ?? [])), cube: ids(viewer.three.objectsFor('/World/Cube')), stats: [meshes, points, faces, edges, materials, textures] };
+      });
+    const before = await state();
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const events: unknown[] = ((window as any).events = []);
+      for (const type of ['primschange', 'dirtychange', 'sectionchange']) viewer.addEventListener(type, (e) => events.push([type, (e as CustomEvent).detail]));
+    });
+    const show = (section: Section) =>
+      page.evaluate(async (section) => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        viewer.section = section;
+        await viewer.idle();
+        return viewer.section;
+      }, section);
+    // A plane through the cube keeps x <= 0: the cut cube shows its grey inside.
+    await show({ on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] });
+    await expect(canvas).toHaveScreenshot('mock-section-plane.png', shot(page));
+    // A box that shows only its inside: a slab of the cube.
+    const slab = await show({ on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.25, top: 0.25 }] });
+    expect(slab.boxes[0].corners).toEqual([[-1, 0, -1], [-1, 0, 1], [1, 0, 1], [1, 0, -1]]); // counter-clockwise seen from above
+    await expect(canvas).toHaveScreenshot('mock-section-box.png', shot(page));
+    // A box cut out of the front and below, and a plane above the cube.
+    await show({ on: true, planes: [{ point: [0, 2, 0], normal: [0, -1, 0] }], boxes: [{ keep: 'outside', corners: [[-0.3, 0, 0], [3, 0, 0], [3, 0, 3], [-0.3, 0, 3]], bottom: -1, top: 0.2 }] });
+    await expect(canvas).toHaveScreenshot('mock-section-cut.png', shot(page));
+    // A concave footprint: an arrowhead whose notch leaves out the middle instance and the back of the cube.
+    const arrow: Section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-2.6, 0, 2.6], [0, 0, -0.8], [2.6, 0, 2.6], [0, 0, 1.2]], bottom: -1, top: 3 }] };
+    await show(arrow);
+    await expect(canvas).toHaveScreenshot('mock-section-concave.png', shot(page));
+    // Off keeps the entries and shows everything; cleared is the stage as before.
+    expect((await show({ ...arrow, on: false })).boxes).toHaveLength(1);
+    await expect(canvas).toHaveScreenshot('mock-stage.png', shot(page));
+    await show({ on: true, planes: [], boxes: [] });
+    await expect(canvas).toHaveScreenshot('mock-stage.png', shot(page));
+    expect(await state()).toEqual(before);
+    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(6).fill(['sectionchange', { source: 'api' }]));
+    expect(errors).toEqual([]);
+  });
+
+  test('picking goes through what a section cuts away, a marquee skips it, and hosts section their own materials', async ({ page }) => {
+    await open(page, MOCK);
+    const warnings: string[] = [];
+    page.on('console', (message) => message.type() === 'warning' && warnings.push(message.text()));
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      // Straight at the front: the middle instance stands in front of the cube.
+      viewer.view = { eye: [0, 0, 10], target: [0, 0, 0], fov: 30, projection: 'perspective', height: 1 };
+      await viewer.idle();
+      const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const centre = async () => (await viewer.pick(rect.left + rect.width / 2, rect.top + rect.height / 2))?.path ?? null;
+      const whole = await centre();
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'outside', corners: [[-0.75, 0, 1.25], [0.75, 0, 1.25], [0.75, 0, 2.75], [-0.75, 0, 2.75]], bottom: -1, top: 1 }] };
+      const behind = await centre();
+      const point = viewer.three.camera.position.clone();
+      const kept = [viewer.three.keeps(point.set(0, 0, 2)), viewer.three.keeps(point.set(0, 0, 0))];
+      viewer.section = { on: true, planes: [{ point: [0, 0, -1], normal: [0, 0, -1] }], boxes: [] };
+      const nothing = await centre();
+      // Host materials: a NodeMaterial is sectioned like the viewer's own; anything else comes back untouched.
+      const host = new ((viewer.three.objectsFor('/World/Cube')[0] as any).material.constructor)();
+      const registered = [Object.hasOwn(host, 'section'), viewer.three.section(host) === host && Object.hasOwn(host, 'section') && host.section];
+      const other = { type: 'MeshBasicMaterial' } as any;
+      return { whole, behind, kept, nothing, registered, refused: viewer.three.section(other) === other && !('section' in other) };
+    });
+    expect(result).toEqual({ whole: '/World/Instances', behind: '/World/Cube', kept: [false, true], nothing: null, registered: [false, true], refused: true });
+    expect(warnings.filter((w) => w.includes('only NodeMaterials can be sectioned'))).toHaveLength(1);
+    // A marquee over everything takes what is not provably cut away: first with a box cut out around the cube.
+    const selection = () => page.evaluate(() => [...(document.querySelector('usd-viewer') as UsdViewerElement).selection].sort());
+    const marquee = async () => {
+      const box = (await page.locator('usd-viewer canvas').boundingBox())!;
+      const at = (i: number) => [box.x + box.width - 4 - ((box.width - 8) * i) / 5, box.y + box.height - 4 - ((box.height - 8) * i) / 5] as const;
+      await page.keyboard.down('Shift');
+      await page.mouse.move(...at(0));
+      await page.mouse.down();
+      for (let i = 1; i <= 5; i++) await page.mouse.move(...at(i));
+      await page.mouse.up();
+      await page.keyboard.up('Shift');
+    };
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.view = { eye: [4, 3, 6], target: [0, 0.5, 0.5], fov: 50, projection: 'perspective', height: 1 };
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'outside', corners: [[-0.6, 0, -0.6], [0.6, 0, -0.6], [0.6, 0, 0.6], [-0.6, 0, 0.6]], bottom: -0.6, top: 0.6 }] };
+    });
+    await marquee();
+    await expect.poll(selection).toEqual(['/World/Instances']);
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.select(null);
+      viewer.section = { on: false, planes: [], boxes: [] };
+    });
+    await marquee();
+    await expect.poll(selection).toEqual(['/World/Cube', '/World/Instances']);
+  });
+
+  test('the first section arms every material once; later sections rebuild nothing and leave the shadow map alone', async ({ page }) => {
+    await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      const unsectioned = () => {
+        const missing: string[] = [];
+        viewer.three.root.traverse((o: any) => {
+          for (const m of [o.material ?? []].flat()) if (m.isNodeMaterial && !(Object.hasOwn(m, 'section') && m.section)) missing.push(`${o.type} ${m.type}`);
+        });
+        return missing;
+      };
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.select(['/World/Cube', '/World/Instances']);
+      const modes: Record<string, string[]> = {};
+      for (const mode of ['shaded', 'plain-wire', 'shaded-selwire'] as const) {
+        viewer.displayMode = mode;
+        await viewer.idle();
+        modes[mode] = unsectioned();
+      }
+      // Armed: from here on a section is a uniform write.
+      let built = 0;
+      renderer.debug.onNodeBuilderCreated = () => built++;
+      const pipelines = renderer._pipelines.caches.size;
+      let sun: any = null;
+      viewer.three.scene.traverse((o: any) => o.isDirectionalLight && o.castShadow && (sun = o));
+      const planes = Array.from({ length: 8 }, (_, i) => ({ point: [0, -2, 0], normal: [Math.cos(i), 0.2, Math.sin(i)] }));
+      const boxes = Array.from({ length: 8 }, (_, i) => ({ keep: i % 2 ? 'inside' : 'outside', corners: [[i - 4, 0, -1], [i - 3, 0, -1], [i - 3, 0, 1], [i - 4, 0, 1]], bottom: -1, top: 1 }));
+      const flip = (keep: string) => boxes.map((b) => ({ ...b, keep: keep === 'flip' ? (b.keep === 'inside' ? 'outside' : 'inside') : keep }));
+      const counts = (n: number) => ({ on: true, planes: planes.slice(0, n), boxes: boxes.slice(0, n) });
+      const steps = [
+        ...[0, 1, 2, 4, 8].map(counts),
+        ...['flip', 'inside', 'outside'].map((keep) => ({ on: true, planes, boxes: flip(keep) })),
+        ...[false, true, false, true].map((on) => ({ on, planes, boxes })),
+        ...[7, 6, 5, 4, 3, 2, 1, 0].map(counts),
+      ] as Section[];
+      let changes = 0;
+      let shadow = 0;
+      viewer.addEventListener('sectionchange', () => changes++);
+      for (const step of steps) {
+        viewer.section = step;
+        shadow += sun.shadow.needsUpdate ? 1 : 0;
+        await viewer.idle();
+      }
+      renderer.debug.onNodeBuilderCreated = null;
+      return { modes, steps: steps.length, changes, built, pipelines: renderer._pipelines.caches.size - pipelines, shadow };
+    });
+    expect(result).toEqual({ modes: { shaded: [], 'plain-wire': [], 'shaded-selwire': [] }, steps: 20, changes: 20, built: 0, pipelines: 0, shadow: 0 });
+  });
+
+  test('a section on one viewer leaves another viewer on the same page as it was', async ({ page }) => {
+    await open(page, MOCK);
+    const images = await page.evaluate(async () => {
+      const a = document.querySelector('usd-viewer') as UsdViewerElement;
+      const holder = document.createElement('div');
+      holder.innerHTML = '<usd-viewer core-url="mock-core/" force-webgl panels="none" src="mock.usda" style="height: 320px"></usd-viewer>';
+      const b = holder.firstElementChild as UsdViewerElement;
+      document.body.append(b);
+      await b.ready;
+      if (!b.stage) await new Promise((resolve) => b.addEventListener('stageopen', resolve, { once: true }));
+      await b.idle();
+      const image = async (viewer: UsdViewerElement) => new Uint8Array(await (await viewer.screenshot()).arrayBuffer()).join();
+      const before = [await image(a), await image(b)];
+      a.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      await a.idle();
+      const after = [await image(a), await image(b)];
+      return { a: before[0] === after[0], b: before[1] === after[1] };
+    });
+    expect(images).toEqual({ a: false, b: true });
   });
 
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {

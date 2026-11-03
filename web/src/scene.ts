@@ -32,6 +32,7 @@ import type {
   Rid,
   Subset,
 } from './protocol.ts';
+import { section } from './sectionnode.ts';
 import { hasAncestorIn } from './session.ts';
 import * as units from './units.ts';
 
@@ -102,6 +103,8 @@ export class SceneSync {
   /** Hide the back of meshes that are not authored doubleSided (off by default, like usdview). */
   cullBackfaces = false;
   displayMode: DisplayMode = 'shaded';
+  /** The stage's up axis; root turns Z up into three's Y up. */
+  upAxis: 'Y' | 'Z' = 'Y';
   private wires: THREE.Object3D[] = [];
   /** Bumped on every change, so callers can cache what they derive from the scene. */
   version = 0;
@@ -137,6 +140,7 @@ export class SceneSync {
   }
 
   setUpAxis(axis: 'Y' | 'Z'): void {
+    this.upAxis = axis;
     this.root.rotation.x = axis === 'Z' ? -Math.PI / 2 : 0;
     this.root.updateMatrixWorld(true);
   }
@@ -509,7 +513,7 @@ export class SceneSync {
       if (!item.flat && !single) return record.material;
       const key = `${item.flat}|${single}`;
       let variant = record.variants.get(key);
-      if (!variant) record.variants.set(key, (variant = style(record.material.clone())));
+      if (!variant) record.variants.set(key, (variant = style(section(record.material.clone()))));
       return variant;
     };
     const materials = item.subsets?.length ? item.subsets.map((s) => one(s.material)) : one(item.material);
@@ -690,7 +694,7 @@ export class SceneSync {
       item.geometry = new THREE.BufferGeometry();
       item.geometry.setAttribute('position', new THREE.BufferAttribute(points, 3));
       if (colors) item.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-      const material = new THREE.PointsNodeMaterial({ size: 3, sizeAttenuation: false, vertexColors: !!colors });
+      const material = section(new THREE.PointsNodeMaterial({ size: 3, sizeAttenuation: false, vertexColors: !!colors }));
       if (!colors) material.color.setRGB(item.displayColor[0], item.displayColor[1], item.displayColor[2]);
       item.own = material;
       this.attach(item, new THREE.Points(item.geometry, material));

@@ -19,7 +19,7 @@ export function showMenu(host: Node, x: number, y: number, items: MenuItem[]): v
     removeEventListener('keydown', escape, true);
   };
   const outside = (event: Event) => !event.composedPath().includes(menu) && close();
-  const escape = (event: KeyboardEvent) => event.key === 'Escape' && close();
+  const escape = (event: KeyboardEvent) => event.key === 'Escape' && (event.stopPropagation(), close()); // closing is all it does
   for (const item of items) {
     const button = h('button', { disabled: !!item.disabled }, item.label);
     button.addEventListener('click', () => {

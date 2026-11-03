@@ -29,27 +29,37 @@ async function open(page: Page, url: string) {
   return errors;
 }
 
-/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X. */
-async function dragAlongX(page: Page, path: string) {
-  const [center, alongX] = await page.evaluate(async (path) => {
+/** Client coordinates of world points in the view as drawn (the mock stage is Y up: its stage space is the world). */
+const toScreen = (page: Page, points: number[][]) =>
+  page.evaluate(async (points) => {
     const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
-    await viewer.idle(); // the gizmo sits on the selection and has been drawn
-    const object = viewer.three.objectsFor(path)[0];
+    await viewer.idle(); // gizmos sit where they belong and have been drawn
     const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
-    const world = object.getWorldPosition(object.position.clone());
-    const screen = (v: typeof world) => {
-      const p = v.clone().project(viewer.three.camera);
-      return [rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height];
-    };
-    return [screen(world), screen(world.clone().setX(world.x + 1))];
-  }, path);
-  const length = Math.hypot(alongX[0] - center[0], alongX[1] - center[1]);
-  const dir = [(alongX[0] - center[0]) / length, (alongX[1] - center[1]) / length];
+    return points.map((v) => {
+      const p = viewer.three.camera.position.clone().fromArray(v).project(viewer.three.camera);
+      return [rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height] as [number, number];
+    });
+  }, points);
+
+/** Drags a gizmo's handle on the axis through a world point along a world direction: grabbed 45 px out, moved px. */
+async function dragAxis(page: Page, from: number[], along: number[], px = 60) {
+  const [center, ahead] = await toScreen(page, [from, from.map((x, i) => x + along[i])]);
+  const length = Math.hypot(ahead[0] - center[0], ahead[1] - center[1]);
+  const dir = [(ahead[0] - center[0]) / length, (ahead[1] - center[1]) / length];
   const at = (d: number) => [center[0] + dir[0] * d, center[1] + dir[1] * d] as const;
   await page.mouse.move(...at(45));
   await page.mouse.down();
-  for (let d = 50; d <= 105; d += 5) await page.mouse.move(...at(d));
+  for (let d = 50; d <= 45 + px; d += 5) await page.mouse.move(...at(d));
   await page.mouse.up();
+}
+
+/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X. */
+async function dragAlongX(page: Page, path: string) {
+  const world = await page.evaluate((path) => {
+    const object = (document.querySelector('usd-viewer') as UsdViewerElement).three.objectsFor(path)[0];
+    return object.getWorldPosition(object.position.clone()).toArray();
+  }, path);
+  await dragAxis(page, world, [1, 0, 0]);
 }
 
 test.describe('mock core', () => {
@@ -965,6 +975,147 @@ test.describe('mock core', () => {
       return { a: before[0] === after[0], b: before[1] === after[1] };
     });
     expect(images).toEqual({ a: false, b: true });
+  });
+
+  test('the section gizmo moves box corners only across, faces only up and down, and refuses a crossing footprint', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const box = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).section.boxes[0]);
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const events: unknown[] = ((window as any).events = []);
+      for (const type of ['sectionchange', 'sectiongizmochange', 'selectionchange', 'primschange', 'dirtychange']) {
+        viewer.addEventListener(type, (e) => events.push([type, (e as CustomEvent).detail?.source ?? null]));
+      }
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
+      viewer.sectionGizmo = { box: 0 };
+    });
+    const start = await box(); // counter-clockwise seen from above: corner 0 stays at x -1, z -1, corner 3 is x 1, z -1
+    // Every handle starts chosen; Esc clears them, and a click on corner 0's top dot chooses that vertical edge alone.
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[-1, 0.5, -1]]))[0]);
+    await dragAxis(page, [-1, 0, -1], [1, 0, 0]); // the gizmo sits in the middle of the edge
+    const moved = await box();
+    expect(moved.corners[0][0]).toBeGreaterThan(-0.8);
+    expect([moved.corners[0][1], moved.bottom, moved.top]).toEqual([0, -0.5, 0.5]); // in plan only
+    expect(moved.corners.slice(1)).toEqual(start.corners.slice(1));
+    // The top face's dot sits on the footprint's middle: chosen alone, the gizmo moves it up only.
+    const middle = [0, 2].map((i) => moved.corners.reduce((sum, c) => sum + c[i], 0) / 4);
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[middle[0], 0.5, middle[1]]]))[0]);
+    await dragAxis(page, [middle[0], 0.5, middle[1]], [0, 1, 0]);
+    const raised = await box();
+    expect(raised.top).toBeGreaterThan(0.7);
+    expect([raised.bottom, raised.corners]).toEqual([-0.5, moved.corners]);
+    // Dragged far along +X, corner 0 would cross corner 3: it stops at the last footprint that worked.
+    const [x, , z] = raised.corners[0];
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[x, raised.top, z]]))[0]);
+    await dragAxis(page, [x, (raised.bottom + raised.top) / 2, z], [1, 0, 0], 200);
+    const refused = await box();
+    expect(refused.corners[0][0]).toBeGreaterThan(x);
+    expect(refused.corners[0][0]).toBeLessThan(1);
+    expect([refused.bottom, refused.top, refused.corners.slice(1)]).toEqual([raised.bottom, raised.top, start.corners.slice(1)]);
+    // Only the section changed, from the gizmo: no selection, no edit.
+    const events = await page.evaluate(() => (window as any).events as [string, string | null][]);
+    expect(events.slice(0, 2)).toEqual([['sectionchange', 'api'], ['sectiongizmochange', null]]);
+    expect(events.length).toBeGreaterThan(5);
+    expect(events.slice(2).filter(([type, source]) => type !== 'sectionchange' || source !== 'gizmo')).toEqual([]);
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).dirty)).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  test('the section gizmo stays out of screenshot(), works when readonly, and goes with its entry or another tool', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    const image = () => page.evaluate(async () => new Uint8Array(await (await (document.querySelector('usd-viewer') as UsdViewerElement).screenshot()).arrayBuffer()).join());
+    const viewer = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { gizmo: v.sectionGizmo, plane: v.section.planes[0], dirty: v.dirty };
+    });
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.setAttribute('readonly', '');
+      v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+    });
+    const without = await image();
+    const view = await canvas.screenshot();
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).sectionGizmo = { plane: 0 }));
+    expect(await image()).toBe(without);
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).idle());
+    expect((await canvas.screenshot()).equals(view)).toBe(false); // the view itself shows it
+    // Readonly: the plane still moves along its normal, the stage stays clean; Esc (no handles to clear) lets go.
+    await dragAxis(page, [0, 0, 0], [-1, 0, 0]);
+    const dragged = await viewer();
+    expect(dragged.plane.point[0]).toBeLessThan(-0.2);
+    expect(dragged.plane.normal).toEqual([-1, 0, 0]);
+    expect(dragged.dirty).toBe(false);
+    await canvas.focus();
+    await page.keyboard.press('Escape');
+    expect((await viewer()).gizmo).toBeNull();
+    const result = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      let changes = 0;
+      v.addEventListener('sectiongizmochange', () => changes++);
+      v.section = { ...v.section, boxes: [{ keep: 'outside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
+      v.tool = 'navigate';
+      v.sectionGizmo = { box: 0 }; // switches back to select
+      const tool = v.tool;
+      await v.idle();
+      const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const dot = v.three.camera.position.clone().set(-1, 0.5, -1).project(v.three.camera); // corner 0's top
+      const at = [v.sectionGizmoAt(rect.left + ((dot.x + 1) / 2) * rect.width, rect.top + ((1 - dot.y) / 2) * rect.height), v.sectionGizmoAt(rect.left + 2, rect.bottom - 2)];
+      v.tool = 'navigate';
+      const navigating = v.sectionGizmo;
+      v.sectionGizmo = { box: 0, rotate: true };
+      const rotating = v.sectionGizmo;
+      v.section = { ...v.section, boxes: [] }; // its entry goes
+      return { tool, at, navigating, rotating, gone: v.sectionGizmo, changes };
+    });
+    expect(result).toEqual({ tool: 'select', at: [true, false], navigating: null, rotating: { box: 0, rotate: true }, gone: null, changes: 4 });
+    expect(errors).toEqual([]);
+  });
+
+  test('the Section menu adds a plane and a box, then flips, switches, removes and clears them', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const state = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { section: v.section, gizmo: v.sectionGizmo };
+    });
+    const menu = async (item: string) => {
+      await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+      await page.locator('usd-viewer .popup button', { hasText: item }).click();
+    };
+    await page.evaluate(() => {
+      const events: string[] = ((window as any).events = []);
+      document.querySelector('usd-viewer')!.addEventListener('sectionchange', (e) => events.push((e as CustomEvent).detail.source));
+    });
+    // A plane across X through the stage's centre, keeping the -X side, edited at once.
+    await menu('Plane X');
+    let { section, gizmo } = await state();
+    expect(section.planes.map((p) => p.normal)).toEqual([[-1, 0, 0]]);
+    expect(section.planes[0].point.every(Number.isFinite)).toBe(true);
+    expect(gizmo).toEqual({ plane: 0, rotate: false });
+    // A box showing what is around the selected cube (a 1 % margin), its top and bottom on the up axis (Y).
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).select('/World/Cube'));
+    await menu('Box around the selection');
+    ({ section, gizmo } = await state());
+    const m = 0.5 + Math.sqrt(3) / 100;
+    expect(gizmo).toEqual({ box: 0, rotate: false });
+    expect(section.boxes[0].keep).toBe('inside');
+    expect([section.boxes[0].bottom, section.boxes[0].top].map((h) => +h.toFixed(6))).toEqual([-m, m].map((h) => +h.toFixed(6)));
+    expect(section.boxes[0].corners.map(([x, , z]) => [Math.abs(x), Math.abs(z)].map((v) => +v.toFixed(6)))).toEqual(Array(4).fill([m, m].map((v) => +v.toFixed(6))));
+    await menu('Flip plane 1');
+    await menu('Box 1: cut out');
+    ({ section } = await state());
+    expect([section.planes[0].normal[0], section.boxes[0].keep]).toEqual([1, 'outside']);
+    await menu('Remove plane 1');
+    ({ section, gizmo } = await state());
+    expect([section.planes.length, section.boxes.length, gizmo]).toEqual([0, 1, { box: 0, rotate: false }]);
+    await menu('Clear');
+    expect(await state()).toEqual({ section: { on: true, planes: [], boxes: [] }, gizmo: null });
+    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(6).fill('ui'));
+    expect(errors).toEqual([]);
   });
 
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {

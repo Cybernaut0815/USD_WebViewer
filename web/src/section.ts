@@ -46,7 +46,7 @@ const axes = (up: Up) => (up === 'Z' ? [0, 1, 2] : [2, 0, 1]);
 const vec = (v: unknown): Vec3 | null => (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite) ? [v[0], v[1], v[2]] : null);
 
 /** True when the diagonal from corner k to k + 2 has the other two corners on opposite sides, clear of it. */
-function separates(c: readonly Vec3[], k: number, up: Up): boolean {
+export function separates(c: readonly Vec3[], k: number, up: Up): boolean {
   const [U, V] = axes(up);
   const a = c[k], du = c[k + 2][U] - a[U], dv = c[k + 2][V] - a[V];
   const side = (p: Vec3) => du * (p[V] - a[V]) - dv * (p[U] - a[U]);

@@ -4,6 +4,7 @@ export type { LocalFile } from './files.ts';
 export { LiveLink } from './live.ts';
 export type * from './protocol.ts';
 export type { Section, SectionBox, SectionPlane, SectionSource } from './section.ts';
+export type { SectionGizmo } from './sectiontool.ts';
 export { type Command, History, modifySelect, type OpenOptions, type SchemeOptions, selectUpWithSubtree, type SelectionSource, type SelectMode, type UsdSessionEventMap, UsdSession, type UsdStageApi } from './session.ts';
 export { SelectTool, type Tool, type TransformMode, TransformTool } from './tools.ts';
 export type { CameraSettings, OpenSource, ToolName, UsdViewerEventMap, ViewState } from './viewer.ts';

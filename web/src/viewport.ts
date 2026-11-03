@@ -7,6 +7,7 @@ import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
 import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
 import { arm, SECTIONS } from './sectionnode.ts';
+import { entry, HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
@@ -64,7 +65,8 @@ export class Viewport {
   private dirty = false;
   private frameRequest = 0;
   private presented: (() => void)[] = [];
-  private stageSphere = new THREE.Sphere();
+  /** World bounds of the stage, refreshed before the first frame after it changed. */
+  readonly stageSphere = new THREE.Sphere();
   private stageVersion = -1;
   private activeTool: Tool | null = null;
   private frameTimes: number[] = []; // when the frames of the last second were drawn
@@ -78,12 +80,16 @@ export class Viewport {
   oncontext: (path: Path, x: number, y: number) => void = () => {};
   /** The section changed (set by the element: its sectionchange event). */
   onsection: (source: SectionSource) => void = () => {};
+  /** The section gizmo was attached, detached or retargeted (set by the element: its sectiongizmochange event). */
+  onsectiongizmo: () => void = () => {};
   private sectionState = EMPTY;
   /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
   private sectionRows = rows(EMPTY, 'Y');
+  private sectionTool: SectionTool | null = null;
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
+    for (const camera of [this.freeCamera, this.orthoCamera]) camera.layers.enable(HELPERS);
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL });
     this.renderer.setClearColor(DEFAULT_BACKGROUND);
     this.renderer.toneMapping = THREE.NeutralToneMapping;
@@ -321,7 +327,38 @@ export class Viewport {
     SECTIONS.set(this.scene, { rows: this.sectionRows, root: this.sync.root });
     if (this.sectionRows[3]) arm();
     this.invalidate(); // not SceneSync's: that one redraws the shadow map
+    if (this.sectionTool && !entry(next, this.sectionTool.target)) this.sectionGizmo = null; // its entry went
     this.onsection(source);
+  }
+
+  /** The entry the section gizmo edits, null when it is not attached. */
+  get sectionGizmo(): SectionGizmo | null {
+    return this.sectionTool && { ...this.sectionTool.target };
+  }
+  /** Attaches the section gizmo afresh (every box handle chosen); null, or an entry the section lacks, detaches it. */
+  set sectionGizmo(target: SectionGizmo | null) {
+    const before = JSON.stringify(this.sectionGizmo);
+    this.sectionTool?.dispose();
+    this.sectionTool = null;
+    const { plane, box, rotate } = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown };
+    const next = Number.isInteger(plane) ? { plane: plane as number, rotate: rotate === true } : Number.isInteger(box) ? { box: box as number, rotate: rotate === true } : null;
+    if (next && entry(this.sectionState, next)) this.sectionTool = new SectionTool(this, next);
+    if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo();
+  }
+
+  /** True while a section gizmo handle is under the pointer or dragged: the tools leave the pointer alone then. */
+  gizmoGrabbed(): boolean {
+    return this.sectionTool?.grabbed() ?? false;
+  }
+
+  /** True over a section gizmo handle or axis at a client point (hosts' pointer arbitration). */
+  sectionGizmoAt(clientX: number, clientY: number): boolean {
+    return this.sectionTool?.at(clientX, clientY) ?? false;
+  }
+
+  /** Esc: drops the chosen box handles, or with none chosen detaches the section gizmo. */
+  escapeSectionGizmo(): void {
+    if (this.sectionTool && !this.sectionTool.clear()) this.sectionGizmo = null;
   }
 
   /** False where the section cuts a three-world point away. */
@@ -413,14 +450,22 @@ export class Viewport {
 
   async screenshot(type = 'image/png', quality?: number): Promise<Blob> {
     await this.nextFrame();
-    // Read back in the same task as a render, before the drawing buffer is cleared.
-    this.renderer.render(this.scene, this.camera);
+    // Read back in the same task as a render, before the drawing buffer is cleared; without the helpers.
+    this.camera.layers.disable(HELPERS);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      this.camera.layers.enable(HELPERS);
+    }
+    if (this.sectionTool) this.invalidate(); // back on screen
     return new Promise((resolve, reject) =>
       this.canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('screenshot failed'))), type, quality),
     );
   }
 
   dispose(): void {
+    this.sectionTool?.dispose();
+    this.sectionTool = null;
     this.tool = null;
     cancelAnimationFrame(this.frameRequest);
     this.resizer.disconnect();
@@ -482,6 +527,7 @@ export class Viewport {
     const world = new THREE.Matrix4().multiplyMatrices(this.sync.root.matrixWorld, matrix);
     world.decompose(camera.position, camera.quaternion, new THREE.Vector3());
     camera.updateMatrixWorld();
+    camera.layers.enable(HELPERS);
     this.camera = camera;
   }
 }

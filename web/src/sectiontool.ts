@@ -7,8 +7,11 @@ import { released } from './scene.ts';
 import { clean, equal, type Section, type SectionBox, type SectionPlane, separates, type Vec3 } from './section.ts';
 import type { Viewport } from './viewport.ts';
 
-/** The entry the gizmo edits (an index into the section's planes or boxes); rotate turns it instead of moving it. */
-export type SectionGizmo = { plane: number; rotate?: boolean } | { box: number; rotate?: boolean };
+/**
+ * The entry the gizmo edits (an index into the section's planes or boxes); rotate turns it instead of moving it. A box's
+ * handles are the chosen ones (0-3 the footprint corners, 4 the bottom, 5 the top); without them every one is chosen.
+ */
+export type SectionGizmo = { plane: number; rotate?: boolean } | { box: number; rotate?: boolean; handles?: number[] };
 
 /** The layer of the viewer's helpers: the view's cameras draw it, screenshot() and new cameras (layer 0 only) do not. */
 export const HELPERS = 31;
@@ -48,9 +51,10 @@ function write(attribute: THREE.BufferAttribute, points: Vec3[]): void {
  * the stage's centre falls on it, so the gizmo is in view wherever the plane's own point lies). A box shows a dot at
  * the top and bottom of each corner (the pair is one vertical edge: one footprint corner) and one on each face; a click
  * chooses a handle, Shift or Ctrl+click adds or removes one. The translate gizmo in the middle of the chosen handles
- * moves corners in plan only and faces up and down only; every handle starts chosen, so at first it moves the whole
- * box. With rotate the footprint turns about the up axis through its middle. Each drag step is applied from the drag's
- * start through Viewport.setSection (source 'gizmo'); a step the box could not be drawn after is refused.
+ * moves corners in plan only and faces up and down only; every handle starts chosen (unless the viewport passes the
+ * ones a host gave), so at first it moves the whole box. A change of the choice fires Viewport.onsectiongizmo. With
+ * rotate the footprint turns about the up axis through its middle. Each drag step is applied from the drag's start
+ * through Viewport.setSection (source 'gizmo'); a step the box could not be drawn after is refused.
  */
 export class SectionTool {
   readonly target: SectionGizmo;
@@ -74,9 +78,11 @@ export class SectionTool {
   private readonly abort = new AbortController();
   private readonly follow = () => this.update();
 
-  constructor(viewport: Viewport, target: SectionGizmo) {
+  /** handles: the box handles chosen at first (every one without). */
+  constructor(viewport: Viewport, target: SectionGizmo, handles?: number[]) {
     this.viewport = viewport;
     this.target = target;
+    if (handles) this.chosen = new Set(handles);
     const plane = 'plane' in target;
     this.lines = segments(LINE, plane ? 9 : 12);
     this.faint = segments(FAINT, 2);
@@ -174,11 +180,17 @@ export class SectionTool {
     return this.controls.axis !== null || this.dotAt(clientX, clientY) >= 0;
   }
 
+  /** The target, with a box's chosen handles (sorted) unless it rotates. */
+  get value(): SectionGizmo {
+    return this.dots.visible ? { ...this.target, handles: [...this.chosen].sort((a, b) => a - b) } : { ...this.target };
+  }
+
   /** Esc: drops the chosen box handles; false when there were none (planes and rotate have none). */
   clear(): boolean {
     if (!this.dots.visible || !this.chosen.size) return false;
     this.chosen.clear();
     this.viewport.invalidate();
+    this.viewport.onsectiongizmo();
     return true;
   }
 
@@ -308,9 +320,11 @@ export class SectionTool {
 
   /** A click on a dot: chooses its handle alone, or with toggle adds or removes it. */
   private choose(handle: number, toggle: boolean): void {
+    const before = [...this.chosen].join();
     if (!toggle) this.chosen = new Set([handle]);
     else if (!this.chosen.delete(handle)) this.chosen.add(handle);
     this.viewport.invalidate();
+    if ([...this.chosen].join() !== before) this.viewport.onsectiongizmo();
   }
 
   /** The box handle whose dot is under a client point (-1: none), from the dots as last drawn. */

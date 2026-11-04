@@ -405,11 +405,12 @@ export class UsdViewerElement extends HTMLElement {
   }
 
   /**
-   * The gizmo editing one section entry in the view, or null. Setting attaches it afresh (a box with every handle
-   * chosen: the whole box moves) and switches the tool to select; an index the section lacks detaches it, as do losing
-   * the entry and another tool. It keeps its index when the section is replaced: a host that removes an earlier entry
-   * sets it again. It changes only `section` (source 'gizmo'), also when readonly. Fires `sectiongizmochange` when the
-   * target changed.
+   * The gizmo editing one section entry in the view, or null; a box's value has its chosen `handles` unless it rotates.
+   * Setting attaches it afresh (a box with the handles given, or every one chosen: the whole box moves), so a value read
+   * earlier brings the same choice back, and switches the tool to select; an index the section lacks detaches it, as do
+   * losing the entry and another tool. It keeps its index when the section is replaced: a host that removes an earlier
+   * entry sets it again. It changes only `section` (source 'gizmo'), also when readonly. Fires `sectiongizmochange`
+   * when the value changed, a click or Esc that changes the chosen handles included.
    */
   get sectionGizmo(): SectionGizmo | null {
     return this.viewport.sectionGizmo;

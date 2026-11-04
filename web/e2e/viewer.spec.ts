@@ -1094,8 +1094,9 @@ test.describe('mock core', () => {
     await page.evaluate(() => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       const events: unknown[] = ((window as any).events = []);
+      const handles = () => (viewer.sectionGizmo as { handles?: number[] } | null)?.handles ?? null; // null: detached
       for (const type of ['sectionchange', 'sectiongizmochange', 'selectionchange', 'primschange', 'dirtychange']) {
-        viewer.addEventListener(type, (e) => events.push([type, (e as CustomEvent).detail?.source ?? null]));
+        viewer.addEventListener(type, (e) => events.push([type, type === 'sectiongizmochange' ? handles() : ((e as CustomEvent).detail?.source ?? null)]));
       }
       viewer.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
       viewer.sectionGizmo = { box: 0 };
@@ -1105,6 +1106,18 @@ test.describe('mock core', () => {
     await page.locator('usd-viewer canvas').focus();
     await page.keyboard.press('Escape');
     await page.mouse.click(...(await toScreen(page, [[-1, 0.5, -1]]))[0]);
+    // The value carries the choice; set after null, the value read brings it back, so the drag moves that edge alone.
+    // A value set keeps only the integers 0-5 of its handles, once each.
+    const values = await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const read = viewer.sectionGizmo;
+      viewer.sectionGizmo = { box: 0, handles: [5, 2, 5, 9, -1, 1.5, '3' as any] };
+      const odd = viewer.sectionGizmo;
+      viewer.sectionGizmo = null;
+      viewer.sectionGizmo = read;
+      return [read, odd];
+    });
+    expect(values).toEqual([{ box: 0, rotate: false, handles: [0] }, { box: 0, rotate: false, handles: [2, 5] }]);
     await dragAxis(page, [-1, 0, -1], [1, 0, 0]); // the gizmo sits in the middle of the edge
     const moved = await box();
     expect(moved.corners[0][0]).toBeGreaterThan(-0.8);
@@ -1127,8 +1140,8 @@ test.describe('mock core', () => {
     expect(refused.corners[0][0]).toBeGreaterThan(x);
     expect(refused.corners[0][0]).toBeLessThan(1);
     expect([refused.bottom, refused.top, refused.corners.slice(1)]).toEqual([raised.bottom, raised.top, start.corners.slice(1)]);
-    // Attached afresh (the same entry: no event), every handle is chosen. Dragged up and across by the gizmo's middle,
-    // the footprint moves only in plan and the bottom and top rise together; no frame of the drag redraws the shadows.
+    // Attached afresh, every handle is chosen again. Dragged up and across by the gizmo's middle, the footprint moves
+    // only in plan and the bottom and top rise together; no frame of the drag redraws the shadows.
     await page.evaluate(() => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       viewer.sectionGizmo = { box: 0 };
@@ -1150,11 +1163,14 @@ test.describe('mock core', () => {
     expect(whole.bottom - refused.bottom).toBeGreaterThan(0.05);
     expect(whole.top - refused.top).toBeCloseTo(whole.bottom - refused.bottom, 9);
     expect(await page.evaluate(() => (window as any).redraws)).toBe(0);
-    // Only the section changed, from the gizmo: no selection, no edit.
-    const events = await page.evaluate(() => (window as any).events as [string, string | null][]);
-    expect(events.slice(0, 2)).toEqual([['sectionchange', 'api'], ['sectiongizmochange', null]]);
-    expect(events.length).toBeGreaterThan(5);
-    expect(events.slice(2).filter(([type, source]) => type !== 'sectionchange' || source !== 'gizmo')).toEqual([]);
+    // Only the section changed, from the gizmo: no selection, no edit. sectiongizmochange also came with each change of
+    // the chosen handles (each Esc and click, the values set, attaching afresh), and the value had them by then.
+    const events = await page.evaluate(() => (window as any).events as [string, unknown][]);
+    const all = [0, 1, 2, 3, 4, 5];
+    expect(events.slice(0, 2)).toEqual([['sectionchange', 'api'], ['sectiongizmochange', all]]);
+    expect(events.filter(([type]) => type === 'sectiongizmochange').map(([, handles]) => handles)).toEqual([all, [], [0], [2, 5], null, [0], [], [5], [], [0], all]);
+    expect(events.filter(([, source]) => source === 'gizmo').length).toBeGreaterThan(5);
+    expect(events.slice(2).filter(([type, source]) => type !== 'sectiongizmochange' && (type !== 'sectionchange' || source !== 'gizmo'))).toEqual([]);
     expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).dirty)).toBe(false);
     expect(errors).toEqual([]);
   });
@@ -1243,7 +1259,7 @@ test.describe('mock core', () => {
     await menu('Box around the selection');
     ({ section, gizmo } = await state());
     const m = 0.5 + Math.sqrt(3) / 100;
-    expect(gizmo).toEqual({ box: 0, rotate: false });
+    expect(gizmo).toEqual({ box: 0, rotate: false, handles: [0, 1, 2, 3, 4, 5] });
     expect(section.boxes[0].keep).toBe('inside');
     expect([section.boxes[0].bottom, section.boxes[0].top].map((h) => +h.toFixed(6))).toEqual([-m, m].map((h) => +h.toFixed(6)));
     expect(section.boxes[0].corners.map(([x, , z]) => [Math.abs(x), Math.abs(z)].map((v) => +v.toFixed(6)))).toEqual(Array(4).fill([m, m].map((v) => +v.toFixed(6))));

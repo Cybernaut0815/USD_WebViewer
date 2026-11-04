@@ -82,7 +82,7 @@ export class Viewport {
   oncontext: (path: Path, x: number, y: number) => void = () => {};
   /** The section changed (set by the element: its sectionchange event). */
   onsection: (source: SectionSource) => void = () => {};
-  /** The section gizmo was attached, detached or retargeted (set by the element: its sectiongizmochange event). */
+  /** The section gizmo was attached, detached, retargeted or given other handles (set by the element: sectiongizmochange). */
   onsectiongizmo: () => void = () => {};
   private sectionState = EMPTY;
   /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
@@ -179,7 +179,8 @@ export class Viewport {
    * there the next frame builds them at once.
    */
   private readonly warm = (): void => {
-    if (!this.backend || typeof globalThis.scheduler?.yield !== 'function') return;
+    // Not globalThis.scheduler: the DOM lib of TypeScript before 7 does not declare it, and hosts check this source.
+    if (!this.backend || typeof (globalThis as { scheduler?: { yield?: unknown } }).scheduler?.yield !== 'function') return;
     // ponytail: three r186's compileAsync queues what the view draws at once and builds it later, one object per
     // yield, which takes two workarounds; drop them once three handles both. It would build a transparent double-sided
     // material's two passes (back, then front) as one variant, which draws them a little differently until the
@@ -373,18 +374,22 @@ export class Viewport {
     this.onsection(source);
   }
 
-  /** The entry the section gizmo edits, null when it is not attached. */
+  /** The entry the section gizmo edits, with a box's chosen handles; null when it is not attached. */
   get sectionGizmo(): SectionGizmo | null {
-    return this.sectionTool && { ...this.sectionTool.target };
+    return this.sectionTool?.value ?? null;
   }
-  /** Attaches the section gizmo afresh (every box handle chosen); null, or an entry the section lacks, detaches it. */
+  /**
+   * Attaches the section gizmo afresh, a box with the handles given (integers 0-5; anything else is ignored) or every
+   * one chosen; null, or an entry the section lacks, detaches it.
+   */
   set sectionGizmo(target: SectionGizmo | null) {
     const before = JSON.stringify(this.sectionGizmo);
     this.sectionTool?.dispose();
     this.sectionTool = null;
-    const { plane, box, rotate } = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown };
+    const { plane, box, rotate, handles } = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown; handles?: unknown };
     const next = Number.isInteger(plane) ? { plane: plane as number, rotate: rotate === true } : Number.isInteger(box) ? { box: box as number, rotate: rotate === true } : null;
-    if (next && entry(this.sectionState, next)) this.sectionTool = new SectionTool(this, next);
+    const chosen = Array.isArray(handles) ? handles.filter((h) => Number.isInteger(h) && h >= 0 && h <= 5) : undefined;
+    if (next && entry(this.sectionState, next)) this.sectionTool = new SectionTool(this, next, chosen);
     if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo();
   }
 

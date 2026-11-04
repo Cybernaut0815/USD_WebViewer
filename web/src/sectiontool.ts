@@ -161,10 +161,11 @@ export class SectionTool {
     };
     canvas.addEventListener('pointerup', release, { signal });
     canvas.addEventListener('pointercancel', release, { signal });
-    // Placed now, not in the next frame (the first section's warm-up holds frames back): until then the dots would sit
-    // at the stage origin and the attached axes, unplaced, at the world origin, and both take the pointer there.
-    this.update();
-    controls.getHelper().updateMatrixWorld();
+    // Placed now, not in the next frame, and so again whenever the section or the chosen handles change (place()): the
+    // first section's warm-up holds frames back while the pointer still works. Until a frame the dots and the attached
+    // axes would stay where they were (at first the dots at the stage origin, the axes unplaced at the world origin) and
+    // take the pointer there, and a plane dragged from there would jump back toward its old place.
+    this.place();
     viewport.invalidate();
   }
 
@@ -192,6 +193,7 @@ export class SectionTool {
   clear(): boolean {
     if (!this.dots.visible || !this.chosen.size) return false;
     this.chosen.clear();
+    this.place();
     this.viewport.invalidate();
     this.viewport.onsectiongizmo();
     return true;
@@ -212,6 +214,12 @@ export class SectionTool {
     this.dots.material.dispose(); // not its geometry: every sprite shares that quad
     viewport.controls.enabled = viewport.cameraPath === null;
     viewport.invalidate();
+  }
+
+  /** Puts the outline, dots and gizmo on the entry and the chosen handles as they are now (see the constructor). */
+  place(): void {
+    this.update();
+    this.controls.getHelper().updateMatrixWorld();
   }
 
   /** Before each frame: follows the camera and stage space, draws the entry as it is, and puts the gizmo on it. */
@@ -326,8 +334,10 @@ export class SectionTool {
     const before = [...this.chosen].join();
     if (!toggle) this.chosen = new Set([handle]);
     else if (!this.chosen.delete(handle)) this.chosen.add(handle);
+    if ([...this.chosen].join() === before) return;
+    this.place();
     this.viewport.invalidate();
-    if ([...this.chosen].join() !== before) this.viewport.onsectiongizmo();
+    this.viewport.onsectiongizmo();
   }
 
   /** The box handle whose dot is under a client point (-1: none), from the dots as last drawn. */

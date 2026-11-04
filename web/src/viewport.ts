@@ -371,6 +371,7 @@ export class Viewport {
     if (this.sectionRows[3]) arm();
     this.invalidate(); // not SceneSync's: that one redraws the shadow map
     if (this.sectionTool && !entry(next, this.sectionTool.target)) this.sectionGizmo = null; // its entry went
+    this.sectionTool?.place(); // the gizmo follows at once too (see SectionTool's constructor)
     this.onsection(source);
   }
 

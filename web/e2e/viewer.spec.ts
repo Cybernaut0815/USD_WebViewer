@@ -1259,18 +1259,22 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
-  test('a section gizmo drag in the warm-up of the first section, before any frame, goes as far as one after it', async ({ page }) => {
+  test('a section gizmo drag in the warm-up of the first section, before any frame, goes as far as one after it, and the gizmo follows each change at once', async ({ page }) => {
     const errors = await open(page, MOCK);
     const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
-    /** Plane 0 across X, its gizmo attached afresh and its arrow dragged: where the plane went, and frames drawn since. */
+    /**
+     * Plane 0 across X, its gizmo attached afresh, the plane moved 0.3 on along its normal by the host and its arrow
+     * dragged from there: where the plane went, and frames drawn since.
+     */
     const drag = async (settle: boolean) => {
       await page.evaluate(() => {
         const v = document.querySelector('usd-viewer') as UsdViewerElement;
         v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
         v.sectionGizmo = { plane: 0 };
+        v.section = { on: true, planes: [{ point: [-0.3, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
         (window as any).drawn = 0;
       });
-      await dragAxis(page, [0, y, z], [-1, 0, 0], 60, { settle });
+      await dragAxis(page, [-0.3, y, z], [-1, 0, 0], 60, { settle });
       return page.evaluate(() => [(document.querySelector('usd-viewer') as UsdViewerElement).section.planes[0].point[0], (window as any).drawn as number]);
     };
     // The page's first section warms up through scheduler.yield: held at its first yield, it lets no frame be drawn.
@@ -1282,15 +1286,30 @@ test.describe('mock core', () => {
       scheduler.yield = () => gate.then(next);
     });
     const [held, drawn] = await drag(false);
+    // Still held: a click on corner 3's top dot chooses that corner alone, and the gizmo leaves the box's middle for the
+    // corner's at once.
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [-1, 0, 1], [1, 0, 1], [1, 0, -1]], bottom: -1, top: 1 }] };
+      v.sectionGizmo = { box: 0 };
+    });
+    const [dot, arrow, middle] = await toScreen(page, [[1, 1, -1], [1.3, 0, -1], [0, 0, 0]], false);
+    await page.mouse.click(...dot);
+    const chosen = await page.evaluate(([arrow, middle]) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return [v.sectionGizmo, v.sectionGizmoAt(...arrow), v.sectionGizmoAt(...middle), (window as any).drawn];
+    }, [arrow, middle]);
     await page.evaluate(() => {
       (window as any).openGate();
       return (document.querySelector('usd-viewer') as UsdViewerElement).idle();
     });
     const [after] = await drag(true);
-    // The view looks along X in part: pressed on a drag plane still facing the camera, the arrow would move it less.
+    // The view looks along X in part: pressed on a drag plane still facing the camera, the arrow would move it less;
+    // pressed on the gizmo where the plane was before the host moved it, it would put the plane back near there.
     expect(drawn).toBe(0);
-    expect(after).toBeLessThan(-0.2);
+    expect(after).toBeLessThan(-0.5);
     expect(held).toBeCloseTo(after, 6);
+    expect(chosen).toEqual([{ box: 0, rotate: false, handles: [3] }, true, false, 0]);
     expect(errors).toEqual([]);
   });
 

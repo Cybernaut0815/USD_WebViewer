@@ -126,7 +126,10 @@ export class SectionTool {
       viewport.controls.enabled = !e.value && viewport.cameraPath === null;
       viewport.invalidate();
     });
-    controls.addEventListener('axis-changed', () => viewport.invalidate());
+    controls.addEventListener('axis-changed', () => {
+      controls.getHelper().updateMatrixWorld();
+      viewport.invalidate();
+    });
     controls.addEventListener('mouseDown', () => {
       this.start = { position: this.proxy.position.clone(), quaternion: this.proxy.quaternion.clone(), entry: entry(viewport.section, target)! };
     });

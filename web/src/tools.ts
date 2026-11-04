@@ -344,6 +344,9 @@ export class TransformTool extends SelectTool {
     viewport.sync.root.add(this.proxy);
     viewport.beforeRender.add(this.follow);
     controls.addEventListener('change', () => viewport.invalidate());
+    // The drag plane follows the axis only when the helper updates, and a press can come before the next frame: frames
+    // can be held back (the first section's warm-up), and a touch press sets the axis in the same handler as the press.
+    controls.addEventListener('axis-changed', () => controls.getHelper().updateMatrixWorld());
     controls.addEventListener('dragging-changed', (e) => (viewport.controls.enabled = !e.value && viewport.cameraPath === null));
     controls.addEventListener('mouseDown', () => this.grab());
     controls.addEventListener('objectChange', () => this.moved());

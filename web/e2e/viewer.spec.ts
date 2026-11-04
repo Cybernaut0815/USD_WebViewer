@@ -31,20 +31,23 @@ async function open(page: Page, url: string) {
 }
 
 /** Client coordinates of world points in the view as drawn (the mock stage is Y up: its stage space is the world). */
-const toScreen = (page: Page, points: number[][]) =>
-  page.evaluate(async (points) => {
+const toScreen = (page: Page, points: number[][], settle = true) =>
+  page.evaluate(async ({ points, settle }) => {
     const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
-    await viewer.idle(); // gizmos sit where they belong and have been drawn
+    if (settle) await viewer.idle(); // gizmos sit where they belong and have been drawn
     const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
     return points.map((v) => {
       const p = viewer.three.camera.position.clone().fromArray(v).project(viewer.three.camera);
       return [rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height] as [number, number];
     });
-  }, points);
+  }, { points, settle });
 
-/** Drags a gizmo's handle on the axis through a world point along a world direction: grabbed 45 px out, moved px. */
-async function dragAxis(page: Page, from: number[], along: number[], px = 60) {
-  const [center, ahead] = await toScreen(page, [from, from.map((x, i) => x + along[i])]);
+/**
+ * Drags a gizmo's handle on the axis through a world point along a world direction: grabbed 45 px out, moved px. With
+ * settle false it starts at once, not after idle() (which waits for a frame).
+ */
+async function dragAxis(page: Page, from: number[], along: number[], px = 60, settle = true) {
+  const [center, ahead] = await toScreen(page, [from, from.map((x, i) => x + along[i])], settle);
   const length = Math.hypot(ahead[0] - center[0], ahead[1] - center[1]);
   const dir = [(ahead[0] - center[0]) / length, (ahead[1] - center[1]) / length];
   const at = (d: number) => [center[0] + dir[0] * d, center[1] + dir[1] * d] as const;
@@ -1231,6 +1234,41 @@ test.describe('mock core', () => {
       return { tool, early, at, navigating, rotating, gone: v.sectionGizmo, changes };
     });
     expect(result).toEqual({ tool: 'select', early: [true, false], at: [true, false], navigating: null, rotating: { box: 0, rotate: true }, gone: null, changes: 4 });
+    expect(errors).toEqual([]);
+  });
+
+  test('a section gizmo drag in the warm-up of the first section, before any frame, goes as far as one after it', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
+    /** Plane 0 across X, its gizmo attached afresh and its arrow dragged: where the plane went, and frames drawn since. */
+    const drag = async (settle: boolean) => {
+      await page.evaluate(() => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+        v.sectionGizmo = { plane: 0 };
+        (window as any).drawn = 0;
+      });
+      await dragAxis(page, [0, y, z], [-1, 0, 0], 60, settle);
+      return page.evaluate(() => [(document.querySelector('usd-viewer') as UsdViewerElement).section.planes[0].point[0], (window as any).drawn as number]);
+    };
+    // The page's first section warms up through scheduler.yield: held at its first yield, it lets no frame be drawn.
+    await page.evaluate(() => {
+      const w = window as any;
+      (document.querySelector('usd-viewer') as UsdViewerElement).three.beforeRender.add(() => w.drawn++);
+      const next = scheduler.yield.bind(scheduler);
+      const gate = new Promise<void>((resolve) => (w.openGate = resolve));
+      scheduler.yield = () => gate.then(next);
+    });
+    const [held, drawn] = await drag(false);
+    await page.evaluate(() => {
+      (window as any).openGate();
+      return (document.querySelector('usd-viewer') as UsdViewerElement).idle();
+    });
+    const [after] = await drag(true);
+    // The view looks along X in part: pressed on a drag plane still facing the camera, the arrow would move it less.
+    expect(drawn).toBe(0);
+    expect(after).toBeLessThan(-0.2);
+    expect(held).toBeCloseTo(after, 6);
     expect(errors).toEqual([]);
   });
 

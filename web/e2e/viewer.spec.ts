@@ -44,26 +44,35 @@ const toScreen = (page: Page, points: number[][], settle = true) =>
 
 /**
  * Drags a gizmo's handle on the axis through a world point along a world direction: grabbed 45 px out, moved px. With
- * settle false it starts at once, not after idle() (which waits for a frame).
+ * settle false it starts at once, not after idle() (which waits for a frame). With touch a finger drags it, pressing
+ * with no hover before (CDP touch events, which need no hasTouch context).
  */
-async function dragAxis(page: Page, from: number[], along: number[], px = 60, settle = true) {
+async function dragAxis(page: Page, from: number[], along: number[], px = 60, { settle = true, touch = false } = {}) {
   const [center, ahead] = await toScreen(page, [from, from.map((x, i) => x + along[i])], settle);
   const length = Math.hypot(ahead[0] - center[0], ahead[1] - center[1]);
   const dir = [(ahead[0] - center[0]) / length, (ahead[1] - center[1]) / length];
   const at = (d: number) => [center[0] + dir[0] * d, center[1] + dir[1] * d] as const;
+  if (touch) {
+    const cdp = await page.context().newCDPSession(page);
+    const finger = (type: 'touchStart' | 'touchMove', d: number) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: [{ x: at(d)[0], y: at(d)[1] }] });
+    await finger('touchStart', 45);
+    for (let d = 50; d <= 45 + px; d += 5) await finger('touchMove', d);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    return cdp.detach();
+  }
   await page.mouse.move(...at(45));
   await page.mouse.down();
   for (let d = 50; d <= 45 + px; d += 5) await page.mouse.move(...at(d));
   await page.mouse.up();
 }
 
-/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X. */
-async function dragAlongX(page: Page, path: string) {
+/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X, with a finger if touch. */
+async function dragAlongX(page: Page, path: string, touch = false) {
   const world = await page.evaluate((path) => {
     const object = (document.querySelector('usd-viewer') as UsdViewerElement).three.objectsFor(path)[0];
     return object.getWorldPosition(object.position.clone()).toArray();
   }, path);
-  await dragAxis(page, world, [1, 0, 0]);
+  await dragAxis(page, world, [1, 0, 0], 60, { touch });
 }
 
 test.describe('mock core', () => {
@@ -619,10 +628,22 @@ test.describe('mock core', () => {
     expect(result.dirty).toBe(true);
   });
 
-  test('the move gizmo drags the selected prim and keeps one undo step', async ({ page }) => {
+  test('the move gizmo drags the selected prim, as far by finger as by mouse, and keeps one undo step', async ({ page }) => {
     await open(page, MOCK);
     await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
     await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).tool = 'translate'));
+    // A finger presses with no hover before it: the gizmo takes the axis in the press, and its drag plane must turn to it
+    // there, not in the next frame. This drag goes first, as after an X drag the plane stays turned for X and a finger
+    // drag would go right without that.
+    await dragAlongX(page, '/World/Cube', true);
+    const touched = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      await viewer.idle();
+      const x = viewer.three.objectsFor('/World/Cube')[0].matrix.elements[12];
+      await viewer.undo();
+      await viewer.idle();
+      return x;
+    });
     await dragAlongX(page, '/World/Cube');
     const result = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
@@ -635,6 +656,7 @@ test.describe('mock core', () => {
       return { moved, canUndo, after: cube.matrix.elements[12], selection: viewer.selection };
     });
     expect(result.moved).toBeGreaterThan(0.2);
+    expect(touched).toBeCloseTo(result.moved, 6);
     expect(result.canUndo).toBe(true);
     expect(result.after).toBeCloseTo(0, 3);
     expect(result.selection).toEqual(['/World/Cube']);
@@ -1248,7 +1270,7 @@ test.describe('mock core', () => {
         v.sectionGizmo = { plane: 0 };
         (window as any).drawn = 0;
       });
-      await dragAxis(page, [0, y, z], [-1, 0, 0], 60, settle);
+      await dragAxis(page, [0, y, z], [-1, 0, 0], 60, { settle });
       return page.evaluate(() => [(document.querySelector('usd-viewer') as UsdViewerElement).section.planes[0].point[0], (window as any).drawn as number]);
     };
     // The page's first section warms up through scheduler.yield: held at its first yield, it lets no frame be drawn.

@@ -106,6 +106,8 @@ proto.setupOutput = function (this: Sectionable, builder, outputNode) {
 
 const registered = new Set<Sectionable>();
 let armed = false;
+/** Called by arm() once every material is flagged: each viewport builds what it draws off-frame. */
+export const WARM_UPS = new Set<() => void>();
 
 /**
  * Registers a material for sectioning and returns it. From the first section any viewer on the page shows, it runs
@@ -128,9 +130,11 @@ export function section<T extends THREE.Material>(material: T): T {
   return material;
 }
 
-// ponytail: arming recompiles every drawn material on the next frame; prewarm with compileAsync if that hitch measures
-// over ~250 ms. Planes could use hardware clip distances, fully cut objects could be culled (never through
-// object.visible) and cut edges smoothed under MSAA: each only once a measurement asks for it.
+// ponytail: the warm-up builds what each view draws when the section arrives. Objects outside the view or in other
+// display modes still build synchronously when first drawn, and transparent double-sided materials build in the first
+// frame (Viewport.warm). The section shows about as late as before, a little later on big stages; the freeze goes.
+// Hardware clip distances, culling fully cut objects (never through object.visible) and MSAA-smoothed cut edges still
+// wait for a measurement that asks for them.
 /** Sections every registered material from now on. Page-wide and never undone: undoing would recompile them all again. */
 export function arm(): void {
   if (armed) return;
@@ -139,4 +143,5 @@ export function arm(): void {
     m.section = true;
     m.needsUpdate = true;
   }
+  for (const warm of WARM_UPS) warm();
 }

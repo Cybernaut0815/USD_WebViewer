@@ -1,6 +1,7 @@
 import { expect, type Page, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { DisplayMode } from '../src/scene.ts';
 import type { Section } from '../src/section.ts';
 import type { UsdViewerElement } from '../src/viewer.ts';
 
@@ -920,20 +921,23 @@ test.describe('mock core', () => {
 
   test('the first section arms every material once; later sections rebuild nothing and leave the shadow map alone', async ({ page }) => {
     await open(page, MOCK);
-    const result = await page.evaluate(async () => {
+    // Every display mode (the type keeps the list complete), shaded-selwire last: the sections below are drawn in it.
+    const none: Record<DisplayMode, string[]> = { shaded: [], 'shaded-wire': [], plain: [], 'plain-wire': [], 'plain-selwire': [], wire: [], 'shaded-selwire': [] };
+    const result = await page.evaluate(async (list) => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       const renderer = viewer.three.renderer as any;
+      // Materials never drawn (wire's surface, HIDDEN) are not sectioned.
       const unsectioned = () => {
         const missing: string[] = [];
         viewer.three.root.traverse((o: any) => {
-          for (const m of [o.material ?? []].flat()) if (m.isNodeMaterial && !(Object.hasOwn(m, 'section') && m.section)) missing.push(`${o.type} ${m.type}`);
+          for (const m of [o.material ?? []].flat()) if (m.isNodeMaterial && m.visible && !(Object.hasOwn(m, 'section') && m.section)) missing.push(`${o.type} ${m.type}`);
         });
         return missing;
       };
       viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
       viewer.select(['/World/Cube', '/World/Instances']);
       const modes: Record<string, string[]> = {};
-      for (const mode of ['shaded', 'plain-wire', 'shaded-selwire'] as const) {
+      for (const mode of list) {
         viewer.displayMode = mode;
         await viewer.idle();
         modes[mode] = unsectioned();
@@ -964,8 +968,62 @@ test.describe('mock core', () => {
       }
       renderer.debug.onNodeBuilderCreated = null;
       return { modes, steps: steps.length, changes, built, pipelines: renderer._pipelines.caches.size - pipelines, shadow };
+    }, Object.keys(none) as DisplayMode[]);
+    expect(result).toEqual({ modes: none, steps: 20, changes: 20, built: 0, pipelines: 0, shadow: 0 });
+  });
+
+  test('the first section on a page is built off-frame: no frame builds a shader, then the view shows the section', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const built = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      const render = renderer.render;
+      const built = { inRender: 0, all: 0 };
+      let depth = 0; // a shadow pass renders inside a render
+      renderer.render = (...args: unknown[]) => {
+        depth++;
+        try {
+          return render.apply(renderer, args);
+        } finally {
+          depth--;
+        }
+      };
+      renderer.debug.onNodeBuilderCreated = () => (built.all++, depth && built.inRender++);
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      await viewer.idle();
+      delete renderer.render;
+      renderer.debug.onNodeBuilderCreated = null;
+      return built;
     });
-    expect(result).toEqual({ modes: { shaded: [], 'plain-wire': [], 'shaded-selwire': [] }, steps: 20, changes: 20, built: 0, pipelines: 0, shadow: 0 });
+    expect(built.inRender).toBe(0);
+    expect(built.all).toBeGreaterThan(0); // the warm-up built them
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-section-plane.png', shot(page));
+    expect(errors).toEqual([]);
+  });
+
+  test('a transparent double-sided material in view at the first section draws as one built in a frame', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const same = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      // A lit see-through shell around the cube: three draws its back faces, then its front faces.
+      const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
+      const shell = cube.clone();
+      shell.material = viewer.three.section(cube.material.clone());
+      Object.assign(shell.material, { transparent: true, opacity: 0.5, side: 2 }); // DoubleSide
+      cube.getWorldPosition(shell.position);
+      shell.scale.setScalar(1.3);
+      viewer.three.overlay.add(shell);
+      await viewer.idle();
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      await viewer.idle();
+      const image = async () => new Uint8Array(await (await viewer.screenshot()).arrayBuffer()).join();
+      const warmed = await image();
+      shell.material.needsUpdate = true; // built again in a frame, pass by pass
+      await viewer.idle();
+      return warmed === (await image());
+    });
+    expect(same).toBe(true);
+    expect(errors).toEqual([]);
   });
 
   test('a section on one viewer leaves another viewer on the same page as it was', async ({ page }) => {

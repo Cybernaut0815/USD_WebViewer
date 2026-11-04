@@ -6,7 +6,7 @@ import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTextu
 import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
 import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
-import { arm, SECTIONS } from './sectionnode.ts';
+import { arm, SECTIONS, WARM_UPS } from './sectionnode.ts';
 import { entry, HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
@@ -65,6 +65,8 @@ export class Viewport {
   private dirty = false;
   private frameRequest = 0;
   private presented: (() => void)[] = [];
+  /** The first section's materials building off-frame (warm()); no frame is drawn meanwhile. */
+  private warming: Promise<void> | null = null;
   /** World bounds of the stage, refreshed before the first frame after it changed. */
   readonly stageSphere = new THREE.Sphere();
   private stageVersion = -1;
@@ -106,6 +108,7 @@ export class Viewport {
     this.freeCamera.position.set(3, 2, 4);
     this.resizer = new ResizeObserver(() => this.resize());
     this.resizer.observe(canvas);
+    WARM_UPS.add(this.warm);
   }
 
   async init(): Promise<void> {
@@ -128,13 +131,14 @@ export class Viewport {
     next?.activate(this);
   }
 
-  /** Requests one render on the next animation frame. */
+  /** Requests one render on the next animation frame (after the warm-up, while one runs). */
   invalidate(): void {
     this.dirty = true;
     if (this.frameRequest) return;
     this.frameRequest = requestAnimationFrame(() => {
       this.frameRequest = 0;
-      if (!this.dirty || !this.backend) return;
+      // While warming the canvas keeps its last frame: a render would build the rest at once, the freeze again.
+      if (!this.dirty || !this.backend || this.warming) return;
       this.dirty = false;
       this.refreshBounds();
       if (this.cameraPath) this.followStageCamera();
@@ -168,6 +172,28 @@ export class Viewport {
       this.invalidate();
     });
   }
+
+  /**
+   * Builds what the view draws with the newly sectioned materials off-frame: three yields between objects. Without
+   * scheduler.yield it would wait a frame per object (about 30 s for 1,800 meshes, and never in a hidden tab), so
+   * there the next frame builds them at once.
+   */
+  private readonly warm = (): void => {
+    if (!this.backend || typeof globalThis.scheduler?.yield !== 'function') return;
+    this.warming = this.renderer
+      .compileAsync(this.scene, this.camera)
+      .catch(() => {}) // a failed warm-up only means the next frame builds them
+      .finally(() => {
+        this.warming = null;
+        // ponytail: three r186 warms a transparent double-sided material's two passes (back, then front) as one
+        // variant, which draws them a little differently, so those build again in the next frame (on WebGL2 that
+        // frame compiles their programs at once). Drop this once compileAsync keeps each pass's side.
+        this.scene.traverse((o) => {
+          for (const m of [(o as THREE.Mesh).material ?? []].flat()) if (m.transparent && m.side === THREE.DoubleSide && !m.forceSinglePass) m.needsUpdate = true;
+        });
+        if (WARM_UPS.has(this.warm)) this.invalidate(); // not once disposed
+      });
+  };
 
   get background(): string {
     return this.renderer.getClearAlpha() ? `#${this.renderer.getClearColor(new THREE.Color()).getHexString()}` : 'transparent';
@@ -468,6 +494,7 @@ export class Viewport {
   }
 
   dispose(): void {
+    WARM_UPS.delete(this.warm);
     this.sectionTool?.dispose();
     this.sectionTool = null;
     this.tool = null;

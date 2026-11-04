@@ -152,6 +152,10 @@ export class SectionTool {
     };
     canvas.addEventListener('pointerup', release, { signal });
     canvas.addEventListener('pointercancel', release, { signal });
+    // Placed now, not in the next frame (the first section's warm-up holds frames back): until then the dots would sit
+    // at the stage origin and the attached axes, unplaced, at the world origin, and both take the pointer there.
+    this.update();
+    controls.getHelper().updateMatrixWorld();
     viewport.invalidate();
   }
 

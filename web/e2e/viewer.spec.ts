@@ -1001,7 +1001,7 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
-  test('a transparent double-sided material in view at the first section draws as one built in a frame', async ({ page }) => {
+  test('a transparent double-sided material in view at the first section draws as one built in a frame, also after leaving the scene meanwhile', async ({ page }) => {
     const errors = await open(page, MOCK);
     const same = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
@@ -1015,6 +1015,9 @@ test.describe('mock core', () => {
       viewer.three.overlay.add(shell);
       await viewer.idle();
       viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.three.overlay.remove(shell); // out of the scene until the section is built and shown
+      await viewer.idle();
+      viewer.three.overlay.add(shell);
       await viewer.idle();
       const image = async () => new Uint8Array(await (await viewer.screenshot()).arrayBuffer()).join();
       const warmed = await image();
@@ -1023,6 +1026,44 @@ test.describe('mock core', () => {
       return warmed === (await image());
     });
     expect(same).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  test('what goes for good while the first section builds off-frame is not built and kept', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      // Render objects of objects out of the scene (the renderer's own ones: background, output, environment), and
+      // the geometries three holds.
+      const count = () => {
+        let out = 0;
+        for (const { object } of renderer._objects._renderObjects) {
+          let o = object;
+          while (o && o !== viewer.three.scene) o = o.parent;
+          if (!o) out++;
+        }
+        return { out, geometries: renderer.info.memory.geometries };
+      };
+      // The viewer's edge and highlight proxies, and a host mesh with its own geometry.
+      viewer.displayMode = 'shaded-wire';
+      viewer.select(['/World/Cube', '/World/Instances']);
+      const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
+      const paint = new cube.constructor(cube.geometry.clone(), viewer.three.section(cube.material.clone()));
+      viewer.three.overlay.add(paint);
+      await viewer.idle();
+      const before = count();
+      // In the first section's task, so all of them are queued for its build: the viewer releases the proxies, the
+      // host drops its mesh for good.
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.displayMode = 'shaded';
+      paint.removeFromParent();
+      paint.geometry.dispose();
+      paint.dispatchEvent({ type: 'dispose' });
+      await viewer.idle();
+      return { before, after: count() };
+    });
+    expect(result.after).toEqual({ out: result.before.out, geometries: result.before.geometries - 1 });
     expect(errors).toEqual([]);
   });
 
@@ -1152,22 +1193,28 @@ test.describe('mock core', () => {
       const v = document.querySelector('usd-viewer') as UsdViewerElement;
       let changes = 0;
       v.addEventListener('sectiongizmochange', () => changes++);
-      v.section = { ...v.section, boxes: [{ keep: 'outside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
+      // Around the right-hand instance, off the stage origin.
+      v.section = { ...v.section, boxes: [{ keep: 'outside', corners: [[1.5, 0, 1.5], [2.5, 0, 1.5], [2.5, 0, 2.5], [1.5, 0, 2.5]], bottom: -0.5, top: 0.5 }] };
       v.tool = 'navigate';
       v.sectionGizmo = { box: 0 }; // switches back to select
       const tool = v.tool;
-      await v.idle();
       const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
-      const dot = v.three.camera.position.clone().set(-1, 0.5, -1).project(v.three.camera); // corner 0's top
-      const at = [v.sectionGizmoAt(rect.left + ((dot.x + 1) / 2) * rect.width, rect.top + ((1 - dot.y) / 2) * rect.height), v.sectionGizmoAt(rect.left + 2, rect.bottom - 2)];
+      const gizmoAt = (x: number, y: number, z: number) => {
+        const p = v.three.camera.position.clone().set(x, y, z).project(v.three.camera);
+        return v.sectionGizmoAt(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      };
+      // In place as soon as it is attached, before any frame: corner 0's top dot, and nothing at the stage origin.
+      const early = [gizmoAt(1.5, 0.5, 1.5), gizmoAt(0, 0, 0)];
+      await v.idle();
+      const at = [gizmoAt(1.5, 0.5, 1.5), v.sectionGizmoAt(rect.left + 2, rect.bottom - 2)];
       v.tool = 'navigate';
       const navigating = v.sectionGizmo;
       v.sectionGizmo = { box: 0, rotate: true };
       const rotating = v.sectionGizmo;
       v.section = { ...v.section, boxes: [] }; // its entry goes
-      return { tool, at, navigating, rotating, gone: v.sectionGizmo, changes };
+      return { tool, early, at, navigating, rotating, gone: v.sectionGizmo, changes };
     });
-    expect(result).toEqual({ tool: 'select', at: [true, false], navigating: null, rotating: { box: 0, rotate: true }, gone: null, changes: 4 });
+    expect(result).toEqual({ tool: 'select', early: [true, false], at: [true, false], navigating: null, rotating: { box: 0, rotate: true }, gone: null, changes: 4 });
     expect(errors).toEqual([]);
   });
 

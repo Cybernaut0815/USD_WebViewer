@@ -1299,6 +1299,20 @@ test.describe('mock core', () => {
       const v = document.querySelector('usd-viewer') as UsdViewerElement;
       return [v.sectionGizmo, v.sectionGizmoAt(...arrow), v.sectionGizmoAt(...middle), (window as any).drawn];
     }, [arrow, middle]);
+    // Still held: corner 0 alone, dragged along +X past corner 3, where the footprint would cross itself. The last steps
+    // are refused, and as the drag ends the gizmo goes back to the corner, away from where the pointer let go.
+    await page.evaluate(() => {
+      addEventListener('pointerup', (e) => ((window as any).up = e));
+      (document.querySelector('usd-viewer') as UsdViewerElement).sectionGizmo = { box: 0, handles: [0] };
+    });
+    await dragAxis(page, [-1, 0, -1], [1, 0, 0], 400, { settle: false });
+    const x = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).section.boxes[0].corners[0][0]);
+    const [corner] = await toScreen(page, [[x + 0.3, 0, -1]], false);
+    const ended = await page.evaluate((corner) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const { up, drawn } = window as any;
+      return [v.sectionGizmoAt(...corner), v.sectionGizmoAt(up.clientX, up.clientY), drawn];
+    }, corner);
     await page.evaluate(() => {
       (window as any).openGate();
       return (document.querySelector('usd-viewer') as UsdViewerElement).idle();
@@ -1310,6 +1324,8 @@ test.describe('mock core', () => {
     expect(after).toBeLessThan(-0.5);
     expect(held).toBeCloseTo(after, 6);
     expect(chosen).toEqual([{ box: 0, rotate: false, handles: [3] }, true, false, 0]);
+    expect([x > 0.5, x < 1]).toEqual([true, true]);
+    expect(ended).toEqual([true, false, 0]);
     expect(errors).toEqual([]);
   });
 

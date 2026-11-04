@@ -124,6 +124,9 @@ export class SectionTool {
     viewport.beforeRender.add(this.follow);
     controls.addEventListener('dragging-changed', (e) => {
       viewport.controls.enabled = !e.value && viewport.cameraPath === null;
+      // At a drag's end (dragging is false by now) back on the entry, which the drag can have left: a refused last step,
+      // corners chosen with a face (their mean moves less than the gizmo), a tilt (the outline's middle moves).
+      if (!e.value) this.place();
       viewport.invalidate();
     });
     controls.addEventListener('axis-changed', () => {
@@ -161,10 +164,10 @@ export class SectionTool {
     };
     canvas.addEventListener('pointerup', release, { signal });
     canvas.addEventListener('pointercancel', release, { signal });
-    // Placed now, not in the next frame, and so again whenever the section or the chosen handles change (place()): the
-    // first section's warm-up holds frames back while the pointer still works. Until a frame the dots and the attached
-    // axes would stay where they were (at first the dots at the stage origin, the axes unplaced at the world origin) and
-    // take the pointer there, and a plane dragged from there would jump back toward its old place.
+    // Placed now, not in the next frame, and so again whenever the section or the chosen handles change and when a drag
+    // ends (place()): the first section's warm-up holds frames back while the pointer still works. Until a frame the
+    // dots and the attached axes would stay where they were (at first the dots at the stage origin, the axes unplaced at
+    // the world origin) and take the pointer there, and a plane dragged from there would jump back toward its old place.
     this.place();
     viewport.invalidate();
   }

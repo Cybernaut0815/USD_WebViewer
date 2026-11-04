@@ -179,7 +179,7 @@ export class Viewport {
    * there the next frame builds them at once.
    */
   private readonly warm = (): void => {
-    // Not globalThis.scheduler: the DOM lib of TypeScript before 7 does not declare it, and hosts check this source.
+    // Not globalThis.scheduler: the DOM lib of TypeScript before 6 does not declare it, and hosts check this source.
     if (!this.backend || typeof (globalThis as { scheduler?: { yield?: unknown } }).scheduler?.yield !== 'function') return;
     // ponytail: three r186's compileAsync queues what the view draws at once and builds it later, one object per
     // yield, which takes two workarounds; drop them once three handles both. It would build a transparent double-sided

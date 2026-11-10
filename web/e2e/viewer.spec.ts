@@ -675,14 +675,13 @@ test.describe('mock core', () => {
     await page.keyboard.press('e');
     await page.keyboard.press('r');
     const before = await camera();
+    const ahead = async () => (await camera()).position.reduce((sum, p, i) => sum + (p - before.position[i]) * before.forward[i], 0);
     await page.keyboard.down('w');
-    await page.waitForTimeout(300);
+    // Held until it has flown, not for a fixed time: a step counts at most 0.1 s, and slow runners draw slower than that.
+    await expect.poll(ahead).toBeGreaterThan(0.1);
     await page.keyboard.up('w');
-    const after = await camera();
-    const ahead = after.position.reduce((sum, p, i) => sum + (p - before.position[i]) * before.forward[i], 0);
     expect(before.tool).toBe('navigate');
-    expect(after.tool).toBe('navigate');
-    expect(ahead).toBeGreaterThan(0.1);
+    expect((await camera()).tool).toBe('navigate');
     await page.keyboard.press('n');
     expect((await camera()).tool).toBe('select');
   });

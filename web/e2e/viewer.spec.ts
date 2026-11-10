@@ -1540,12 +1540,15 @@ test.describe('wasm core', () => {
     await expect(refinement).toContainText('auto');
     await refinement.locator('input[type=checkbox]').check();
     // Null-safe: the mesh object is swapped while its index count changes.
-    const count = (n: number) =>
-      page.waitForFunction((n) => (document.querySelector('usd-viewer') as any).three.objectsFor('/World/SubdivCube')[0]?.geometry?.index?.count === n, n);
-    await count(36); // override on at level 0; the panel has been rebuilt by now
-    await refinement.locator('input[type=number]').fill('3');
-    await refinement.locator('input[type=number]').dispatchEvent('change');
-    await count(2304);
+    const count = (n: number, timeout?: number) =>
+      page.waitForFunction((n) => (document.querySelector('usd-viewer') as any).three.objectsFor('/World/SubdivCube')[0]?.geometry?.index?.count === n, n, { timeout });
+    await count(36); // override on at level 0
+    // A slow runner can rebuild the panel after that, and a level typed into the old input is lost: type it again.
+    await expect(async () => {
+      await refinement.locator('input[type=number]').fill('3');
+      await refinement.locator('input[type=number]').dispatchEvent('change');
+      await count(2304, 5_000);
+    }).toPass({ timeout: 40_000 });
     const authored = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).usd.exportPrim('/World/SubdivCube', 'authored'));
     expect(authored).toContain('custom int refinementLevel = 3');
   });

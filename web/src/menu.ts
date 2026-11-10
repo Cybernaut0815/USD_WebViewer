@@ -11,7 +11,6 @@ export interface MenuItem {
 export function showMenu(host: Node, x: number, y: number, items: MenuItem[]): void {
   const menu = h('div', { className: 'popup', popover: 'manual' });
   menu.style.left = `${Math.min(x, innerWidth - 240)}px`;
-  menu.style.top = `${Math.min(y, innerHeight - items.length * 28 - 8)}px`;
   const close = () => {
     menu.hidePopover();
     menu.remove();
@@ -19,7 +18,7 @@ export function showMenu(host: Node, x: number, y: number, items: MenuItem[]): v
     removeEventListener('keydown', escape, true);
   };
   const outside = (event: Event) => !event.composedPath().includes(menu) && close();
-  const escape = (event: KeyboardEvent) => event.key === 'Escape' && close();
+  const escape = (event: KeyboardEvent) => event.key === 'Escape' && (event.stopPropagation(), close()); // closing is all it does
   for (const item of items) {
     const button = h('button', { disabled: !!item.disabled }, item.label);
     button.addEventListener('click', () => {
@@ -30,6 +29,8 @@ export function showMenu(host: Node, x: number, y: number, items: MenuItem[]): v
   }
   host.appendChild(menu);
   menu.showPopover();
+  // Placed once its height is known; one taller than the window (viewer.css caps it) fills it from the top and scrolls.
+  menu.style.top = `${Math.min(y, innerHeight - menu.offsetHeight - 8)}px`;
   addEventListener('pointerdown', outside, true);
   addEventListener('keydown', escape, true);
 }

@@ -153,6 +153,7 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .tools { position: absolute; top: 8px; left: 8px; display: flex; gap: 2px; pointer-events: none; }
 .tools button { pointer-events: auto; padding: 2px 6px; background: #000a; border-color: transparent; }
 .tools button.on { border-color: var(--accent); color: var(--accent); }
+.tools .section { margin-left: 4px; } /* the Section menu, apart from the tools */
 .fly-speed { position: absolute; top: 36px; left: 8px; padding: 2px 8px; background: #000a; border-radius: 3px; font-family: ui-monospace, monospace; }
 .bare .tools { display: none; }
 .stats span { color: var(--dim); }
@@ -197,7 +198,7 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .lock { border: none; background: none; padding: 0 2px; color: var(--dim); opacity: 0.35; font-size: 11px; }
 .lock.on, .row:hover .lock { opacity: 1; }
 .eye { margin-right: 4px; border: none; background: none; padding: 0 4px; color: var(--dim); }
-.popup { position: fixed; inset: auto; margin: 0; padding: 4px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 4px 16px #0008; }
+.popup { position: fixed; inset: auto; margin: 0; padding: 4px; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 4px 16px #0008; box-sizing: border-box; max-height: calc(100vh - 16px); overflow-y: auto; }
 .popup button { display: block; width: 100%; text-align: left; border: none; background: none; padding: 4px 10px; white-space: nowrap; }
 .popup button:hover { background: #ffffff14; }
 .props table table { margin: 0; }

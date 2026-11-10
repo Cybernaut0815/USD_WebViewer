@@ -114,6 +114,25 @@ The prim menu (right-click) also copies the prim's USD, either the composed subt
   - **Auto budget** (View ▸ Subdivision): defaults to this machine's value, taken from its memory and CPU threads, between about 1.5 and 6 million triangles. It can be set by hand from 0.5 to 8 million and is remembered in the browser. The upper limit protects the core's 4 GB WebAssembly heap. One mesh never refines past two thirds of the budget.
   - **Per-mesh override**: the custom attributes `refinementEnableOverride` / `refinementLevel`, edited in the property panel's Refinement section. They travel with the file and win over the global level and Auto.
 
+## Sections
+
+**Section**, after the tool buttons at the top left of the view, cuts the view open with clipping planes and boxes. It changes only what is drawn: the stage, its files and the shadows stay whole, and picking goes through to what is behind a cut.
+
+- **Adding.** Each new plane or box is edited at once (see below).
+  - **Plane X / Y / Z** through the stage's centre keeps its negative side: below the horizontal one, which the menu marks.
+  - **Plane facing the view** goes through the orbit target and keeps what lies beyond it.
+  - **Box around the selection** (around the stage when nothing is selected) shows only what is inside it.
+  - At most 8 planes and 8 boxes. A point shows when every plane keeps it, no "cut out" box holds it, and, if there are "show inside" boxes, one of them holds it.
+- **Each entry.** Edit or Rotate it with the gizmo, Flip a plane, switch a box between "show inside" and "cut out", or Remove it. **Sections off** shows everything but keeps the entries; **Clear** removes them all.
+- **Planes.** The outline spans the stage, and its arrow points to the side that stays. Edit moves the plane along its normal; Rotate tilts it about the middle of the outline.
+- **Boxes** stand upright: a footprint of four corners between a bottom and a top height. The sides stay vertical, and the top and bottom stay level.
+  - Edit shows a dot at the top and bottom of every corner, and one on the top and on the bottom face. A corner's two dots are one vertical edge: either one chooses that corner.
+  - Click a dot to choose it alone. **Shift+click** or **Ctrl+click** adds or removes a dot. **Esc** clears the choice; pressed again, it stops editing.
+  - The arrows sit in the middle of the chosen dots. Corners move only across, in plan; the top and bottom move only up and down. Editing starts with every dot chosen, so at first the arrows move the whole box.
+  - A move that would make the footprint cross itself, or bring the top below the bottom, stops at the last shape that worked.
+  - Rotate turns the footprint about the vertical through its middle.
+- Move, Rotate, Scale and Navigate (`W` `E` `R` `N`) stop editing, and so does **Stop editing** in the menu.
+
 ## Statistics
 
 The box at the top right of the viewport shows the visible meshes' **vertices, faces and edges as authored in USD**:

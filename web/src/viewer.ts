@@ -8,6 +8,9 @@ import { copyText, type MenuItem, showMenu } from './menu.ts';
 import { ACTIVE, HIGHLIGHT, TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
 import type { CameraParams, Path, PickResult, StageInfo } from './protocol.ts';
+import { EMPTY, MAX, type Section, type SectionBox, type SectionPlane, type SectionSource, type Vec3 } from './section.ts';
+import { section } from './sectionnode.ts';
+import type { SectionGizmo } from './sectiontool.ts';
 import { modifySelect, selectUpWithSubtree, type OpenOptions, type SchemeOptions, type UsdSessionEventMap, type UsdStageApi, UsdSession } from './session.ts';
 import { timeline } from './timeline.ts';
 import { toolbar } from './toolbar.ts';
@@ -20,7 +23,7 @@ import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, type ViewSta
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
 export type ToolName = 'select' | TransformMode | 'navigate';
 export type { OpenOptions, SchemeOptions, UsdStageApi };
-export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; cameraschange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event };
+export type UsdViewerEventMap = UsdSessionEventMap & { toolchange: Event; displaymodechange: Event; skychange: Event; panelschange: Event; camerachange: Event; cameraschange: Event; backgroundchange: Event; refinebudgetchange: Event; autoloadchange: Event; sectionchange: CustomEvent<{ source: SectionSource }>; sectiongizmochange: Event };
 export { DEFAULT_BACKGROUND };
 export type { CameraSettings, ViewState };
 /** Which panels around the viewport are shown. */
@@ -90,6 +93,15 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['H', 'Hide the selection (session layer, not saved)'],
       ['Shift+H', 'Hide everything but the selection'],
       ['Alt+H', 'Show what H and Shift+H hid'],
+    ],
+  ],
+  [
+    'Section',
+    [
+      ['Section (view)', 'Clipping planes and boxes: add, edit, flip, remove'],
+      ['Click a box handle', 'Choose a corner (its vertical edge), the top or the bottom'],
+      ['Shift / Ctrl+click a handle', 'Add or remove it'],
+      ['Esc', 'Clear the handles chosen; again: stop editing'],
     ],
   ],
   ['Time', [['Space', 'Play / pause'], [', and .', 'Previous / next frame']]],
@@ -232,6 +244,10 @@ export class UsdViewerElement extends HTMLElement {
     /** A mesh item's materials as the shaded view draws them, also while another view mode shows (null: no mesh). */
     materials(rid: number): THREE.Material | THREE.Material[] | null;
     invalidate(): void;
+    /** Registers a host material to be cut by the section, like the viewer's own, and returns it. NodeMaterials only. */
+    section<T extends THREE.Material>(material: T): T;
+    /** False where the section cuts this three-world point away: filters a host's own raycast hits. */
+    keeps(worldPoint: THREE.Vector3): boolean;
   } {
     const v = this.viewport;
     return {
@@ -245,6 +261,8 @@ export class UsdViewerElement extends HTMLElement {
       objectsFor: (path) => v.sync.objectsFor(path),
       materials: (rid) => v.sync.shadedMaterials(rid),
       invalidate: () => v.invalidate(),
+      section,
+      keeps: (point) => v.keeps(point),
     };
   }
 
@@ -296,6 +314,7 @@ export class UsdViewerElement extends HTMLElement {
   set tool(name: ToolName) {
     if (name === this.toolName || (this.hasAttribute('readonly') && name !== 'select' && name !== 'navigate')) return; // readonly: no transform tools
     this.toolName = name;
+    if (name !== 'select') this.sectionGizmo = null; // it shares the pointer with select only
     const current = this.viewport.tool;
     if (name === 'select') this.viewport.tool = new SelectTool(this.session);
     else if (name === 'navigate') this.viewport.tool = new NavigateTool(this.session);
@@ -370,6 +389,39 @@ export class UsdViewerElement extends HTMLElement {
   set view(state: ViewState) {
     if (this.camera !== null) this.camera = null;
     this.viewport.viewState = state;
+  }
+
+  /**
+   * Clipping planes and boxes, in stage space (stage units and axes; vertical is the stage's up axis). View only: the
+   * stage, its three.js objects and the shadows stay whole; pick() and the marquee follow it. Gets a copy; setting
+   * replaces the whole section, cleaned (see Section), and fires `sectionchange` when it changed. Opening a stage
+   * clears it.
+   */
+  get section(): Section {
+    return this.viewport.section;
+  }
+  set section(next: Section) {
+    this.viewport.setSection(next, 'api');
+  }
+
+  /**
+   * The gizmo editing one section entry in the view, or null; a box's value has its chosen `handles` unless it rotates.
+   * Setting attaches it afresh (a box with the handles given, or every one chosen: the whole box moves), so a value read
+   * earlier brings the same choice back, and switches the tool to select; an index the section lacks detaches it, as do
+   * losing the entry and another tool. It keeps its index when the section is replaced: a host that removes an earlier
+   * entry sets it again. It changes only `section` (source 'gizmo'), also when readonly. Fires `sectiongizmochange`
+   * when the value changed, a click or Esc that changes the chosen handles included.
+   */
+  get sectionGizmo(): SectionGizmo | null {
+    return this.viewport.sectionGizmo;
+  }
+  set sectionGizmo(target: SectionGizmo | null) {
+    this.viewport.sectionGizmo = target;
+    if (this.viewport.sectionGizmo) this.tool = 'select';
+  }
+  /** True over a section gizmo handle or axis at a client point: a host's own pointer handling yields there. */
+  sectionGizmoAt(clientX: number, clientY: number): boolean {
+    return this.viewport.sectionGizmoAt(clientX, clientY);
   }
 
   /** Path of the stage camera being looked through, or null for the free camera. */
@@ -581,6 +633,11 @@ export class UsdViewerElement extends HTMLElement {
       });
     }
     this.toggles.time.addEventListener('click', () => (this.panels = { timeline: !this.layout.timeline }));
+    const sectionButton = h('button', { className: 'section', title: 'Section: clipping planes and boxes (view only)' }, 'Section');
+    sectionButton.addEventListener('click', () => {
+      const r = sectionButton.getBoundingClientRect();
+      this.sectionMenu(r.left, r.bottom + 4);
+    });
     const tools = h(
       'div',
       { className: 'tools' },
@@ -589,6 +646,7 @@ export class UsdViewerElement extends HTMLElement {
         button.addEventListener('click', () => (this.tool = name));
         return button;
       }),
+      sectionButton,
     );
     const syncTools = () => tools.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.value === this.tool));
     this.addEventListener('toolchange', syncTools);
@@ -611,8 +669,10 @@ export class UsdViewerElement extends HTMLElement {
       const target = e.composedPath()[0] as HTMLElement;
       const key = e.key.toLowerCase();
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-      // readonly: F and the H keys only (hiding writes the session layer, never saved; the Help window lists editing keys)
-      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH') return;
+      const gizmo = e.key === 'Escape' && this.viewport.sectionGizmo !== null;
+      // readonly: F and the H keys only (hiding writes the session layer, never saved; the Help window lists editing
+      // keys), and Esc for the section gizmo (it edits the view only)
+      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH' && !gizmo) return;
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();
@@ -629,6 +689,7 @@ export class UsdViewerElement extends HTMLElement {
       } else if (e.key === ' ' && plain && target.tagName !== 'BUTTON') this.session.playing ? this.session.pause() : this.session.play();
       else if ((e.key === ',' || e.key === '.') && !e.ctrlKey && !e.metaKey && this.stage?.hasTimeRange) this.step(e.key === '.' ? 1 : -1);
       else if (e.key === 'F1' || e.key === '?') this.showHelp();
+      else if (gizmo) this.viewport.escapeSectionGizmo();
       else return;
       e.preventDefault();
     });
@@ -653,6 +714,78 @@ export class UsdViewerElement extends HTMLElement {
     const now = Number.isNaN(this.time) ? stage.startTimeCode : this.time;
     this.pause();
     this.time = Math.min(Math.max(direction > 0 ? Math.floor(now) + 1 : Math.ceil(now) - 1, stage.startTimeCode), stage.endTimeCode);
+  }
+
+  /** The Section menu at a client point: adds planes and boxes (then edited with the gizmo), edits, flips and removes them. */
+  private sectionMenu(x: number, y: number): void {
+    const v = this.viewport;
+    const s = this.section;
+    const up = v.sync.upAxis === 'Z' ? 2 : 1;
+    const set = (next: Section) => v.setSection(next, 'ui');
+    const add = (plane: SectionPlane | null, box: SectionBox | null) => {
+      set({ ...s, planes: plane ? [...s.planes, plane] : s.planes, boxes: box ? [...s.boxes, box] : s.boxes });
+      this.sectionGizmo = plane ? { plane: s.planes.length } : { box: s.boxes.length };
+    };
+    /** Removes plane or box i: the gizmo lets go of it, or stays with the entry it edits (an index down). */
+    const remove = (kind: 'plane' | 'box', i: number) => {
+      const gizmo = this.sectionGizmo as { plane?: number; box?: number } | null;
+      const at = gizmo?.[kind] ?? -1;
+      if (at >= i) this.sectionGizmo = at === i ? null : ({ ...gizmo, [kind]: at - 1 } as SectionGizmo);
+      set(kind === 'plane' ? { ...s, planes: s.planes.toSpliced(i, 1) } : { ...s, boxes: s.boxes.toSpliced(i, 1) });
+    };
+    /** Stage-space bounds of objects, of the whole stage by default: [min, max]. */
+    const bounds = (objects?: THREE.Object3D[]) => {
+      const box = v.bounds(objects).applyMatrix4(v.sync.root.matrixWorld.clone().invert());
+      return [box.min.toArray(), box.max.toArray()];
+    };
+    const centred = (axis: number) => () => {
+      const [lo, hi] = bounds();
+      const normal: Vec3 = [0, 0, 0];
+      normal[axis] = -1; // the negative side stays: below a horizontal plane
+      add({ point: lo.map((l, i) => (l + hi[i]) / 2) as Vec3, normal }, null);
+    };
+    const facing = () => {
+      const toStage = v.sync.root.matrixWorld.clone().invert();
+      const point = v.controls.target.clone().applyMatrix4(toStage).toArray();
+      add({ point, normal: v.camera.getWorldDirection(v.controls.target.clone()).transformDirection(toStage).toArray() }, null); // keeps what lies beyond
+    };
+    const around = () => {
+      const objects = this.selection.flatMap((p) => v.sync.objectsFor(p));
+      const [lo, hi] = bounds(objects.length ? objects : undefined);
+      const margin = Math.hypot(...hi.map((h, i) => h - lo[i])) / 100; // the selection's own faces stay clear of the box's
+      const a = lo.map((l) => l - margin);
+      const b = hi.map((h) => h + margin);
+      const [P, Q] = [0, 1, 2].filter((i) => i !== up);
+      const corner = (p: number[], q: number[]) => {
+        const c = [...a] as Vec3;
+        c[P] = p[P];
+        c[Q] = q[Q];
+        return c;
+      };
+      add(null, { keep: 'inside', corners: [corner(a, a), corner(b, a), corner(b, b), corner(a, b)], bottom: a[up], top: b[up] });
+    };
+    const empty = !s.planes.length && !s.boxes.length;
+    const items: MenuItem[] = [
+      ...['X', 'Y', 'Z'].map((name, axis) => ({ label: `Plane ${name}${axis === up ? ' (horizontal)' : ''}`, action: centred(axis), disabled: s.planes.length >= MAX })),
+      { label: 'Plane facing the view', action: facing, disabled: s.planes.length >= MAX },
+      { label: this.selection.length ? 'Box around the selection' : 'Box around the stage', action: around, disabled: s.boxes.length >= MAX },
+      ...s.planes.flatMap((p, i) => [
+        { label: `Edit plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i }) },
+        { label: `Rotate plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i, rotate: true }) },
+        { label: `Flip plane ${i + 1}`, action: () => set({ ...s, planes: s.planes.with(i, { point: p.point, normal: p.normal.map((n) => -n) as Vec3 }) }) },
+        { label: `Remove plane ${i + 1}`, action: () => remove('plane', i) },
+      ]),
+      ...s.boxes.flatMap((b, i) => [
+        { label: `Edit box ${i + 1}`, action: () => (this.sectionGizmo = { box: i }) },
+        { label: `Rotate box ${i + 1}`, action: () => (this.sectionGizmo = { box: i, rotate: true }) },
+        { label: `Box ${i + 1}: ${b.keep === 'inside' ? 'cut out' : 'show inside'}`, action: () => set({ ...s, boxes: s.boxes.with(i, { ...b, keep: b.keep === 'inside' ? 'outside' : 'inside' }) }) },
+        { label: `Remove box ${i + 1}`, action: () => remove('box', i) },
+      ]),
+      { label: s.on ? 'Sections off' : 'Sections on', action: () => set({ ...s, on: !s.on }), disabled: empty },
+      { label: 'Clear', action: () => set(EMPTY), disabled: empty },
+    ];
+    if (this.sectionGizmo) items.push({ label: 'Stop editing', action: () => (this.sectionGizmo = null) });
+    showMenu(this.shadowRoot!, x, y, items);
   }
 
   /** A draggable border between a side panel and the viewport, with a tab in its middle that shows or hides the panel. */
@@ -705,9 +838,22 @@ export class UsdViewerElement extends HTMLElement {
     const session = this.session;
     const on = <K extends keyof UsdSessionEventMap>(type: K, handler: (event: UsdSessionEventMap[K]) => void) =>
       session.addEventListener(type, handler as EventListener);
+    // Before the mirrored event: a host's stageopen listener sees the new up axis, and a section it sets there stays.
+    on('stageopen', (e) => {
+      // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
+      clearInterval(this.statsTimer);
+      this.statsTimer = window.setInterval(() => this.updateStats(), 500);
+      this.loading = true;
+      this.framed = false;
+      this.viewport.sync.setUpAxis(e.detail.upAxis);
+      this.viewport.setSection(EMPTY, 'stage'); // its numbers were in the last stage's space
+      this.tree.reset().catch(() => {});
+    });
     for (const type of MIRRORED) {
       on(type, (e) => this.dispatchEvent(new CustomEvent(type, { detail: (e as CustomEvent).detail })));
     }
+    this.viewport.onsection = (source) => this.dispatchEvent(new CustomEvent('sectionchange', { detail: { source } }));
+    this.viewport.onsectiongizmo = () => this.dispatchEvent(new Event('sectiongizmochange'));
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
       if (e.detail.cameras?.length || e.detail.removed?.length) this.dispatchEvent(new Event('cameraschange'));
@@ -717,15 +863,6 @@ export class UsdViewerElement extends HTMLElement {
         this.viewport.frame();
       }
       this.updateStats();
-    });
-    on('stageopen', (e) => {
-      // FPS changes without deltas, so the overlay also refreshes on a timer while a stage is open.
-      clearInterval(this.statsTimer);
-      this.statsTimer = window.setInterval(() => this.updateStats(), 500);
-      this.loading = true;
-      this.framed = false;
-      this.viewport.sync.setUpAxis(e.detail.upAxis);
-      this.tree.reset().catch(() => {});
     });
     on('stageloaded', () => {
       this.loading = false;

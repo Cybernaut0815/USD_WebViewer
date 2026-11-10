@@ -5,6 +5,9 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
 import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
+import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
+import { arm, SECTIONS, WARM_UPS } from './sectionnode.ts';
+import { entry, HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
@@ -62,7 +65,10 @@ export class Viewport {
   private dirty = false;
   private frameRequest = 0;
   private presented: (() => void)[] = [];
-  private stageSphere = new THREE.Sphere();
+  /** The first section's materials building off-frame (warm()); no frame is drawn meanwhile. */
+  private warming: Promise<void> | null = null;
+  /** World bounds of the stage, refreshed before the first frame after it changed. */
+  readonly stageSphere = new THREE.Sphere();
   private stageVersion = -1;
   private activeTool: Tool | null = null;
   private frameTimes: number[] = []; // when the frames of the last second were drawn
@@ -74,9 +80,18 @@ export class Viewport {
   readonly overlay = new THREE.Group();
   /** Right click on a prim in the view (set by the element: its prim menu). */
   oncontext: (path: Path, x: number, y: number) => void = () => {};
+  /** The section changed (set by the element: its sectionchange event). */
+  onsection: (source: SectionSource) => void = () => {};
+  /** The section gizmo was attached, detached, retargeted or given other handles (set by the element: sectiongizmochange). */
+  onsectiongizmo: () => void = () => {};
+  private sectionState = EMPTY;
+  /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
+  private sectionRows = rows(EMPTY, 'Y');
+  private sectionTool: SectionTool | null = null;
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
+    for (const camera of [this.freeCamera, this.orthoCamera]) camera.layers.enable(HELPERS);
     this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL });
     this.renderer.setClearColor(DEFAULT_BACKGROUND);
     this.renderer.toneMapping = THREE.NeutralToneMapping;
@@ -93,6 +108,7 @@ export class Viewport {
     this.freeCamera.position.set(3, 2, 4);
     this.resizer = new ResizeObserver(() => this.resize());
     this.resizer.observe(canvas);
+    WARM_UPS.add(this.warm);
   }
 
   async init(): Promise<void> {
@@ -115,13 +131,14 @@ export class Viewport {
     next?.activate(this);
   }
 
-  /** Requests one render on the next animation frame. */
+  /** Requests one render on the next animation frame (after the warm-up, while one runs). */
   invalidate(): void {
     this.dirty = true;
     if (this.frameRequest) return;
     this.frameRequest = requestAnimationFrame(() => {
       this.frameRequest = 0;
-      if (!this.dirty || !this.backend) return;
+      // While warming the canvas keeps its last frame: a render would build the rest at once, the freeze again.
+      if (!this.dirty || !this.backend || this.warming) return;
       this.dirty = false;
       this.refreshBounds();
       if (this.cameraPath) this.followStageCamera();
@@ -155,6 +172,45 @@ export class Viewport {
       this.invalidate();
     });
   }
+
+  /**
+   * Builds what the view draws with the newly sectioned materials off-frame: three yields between objects. Without
+   * scheduler.yield it would wait a frame per object (about 30 s for 1,800 meshes, and never in a hidden tab), so
+   * there the next frame builds them at once.
+   */
+  private readonly warm = (): void => {
+    // Not globalThis.scheduler: the DOM lib of TypeScript before 6 does not declare it, and hosts check this source.
+    if (!this.backend || typeof (globalThis as { scheduler?: { yield?: unknown } }).scheduler?.yield !== 'function') return;
+    // ponytail: three r186's compileAsync queues what the view draws at once and builds it later, one object per
+    // yield, which takes two workarounds; drop them once three handles both. It would build a transparent double-sided
+    // material's two passes (back, then front) as one variant, which draws them a little differently until the
+    // material changes: such materials stay out of the queue (hidden while it is made) and build in the first frame.
+    // And it builds what is disposed meanwhile all the same, and keeps it: the 'dispose' events heard meanwhile fire
+    // again once it is done, so three frees what it built for them. A stage closed meanwhile still shows its last frame
+    // until the queue is built (up to the whole warm-up); end the hold on stageclose if that matters.
+    type Disposable = THREE.EventDispatcher<{ dispose: object }>;
+    const drawn = new Set<Disposable>(), gone = new Set<Disposable>(), twoPass = new Set<THREE.Material>();
+    const heard = ({ target }: { target: Disposable }) => void gone.add(target);
+    this.scene.traverseVisible((o) => {
+      const { geometry, material } = o as THREE.Mesh;
+      if (!geometry) return;
+      for (const t of [o, geometry, ...[material ?? []].flat()]) drawn.add(t as unknown as Disposable);
+      for (const m of [material ?? []].flat()) if (m.visible && m.transparent && m.side === THREE.DoubleSide && !m.forceSinglePass) twoPass.add(m);
+    });
+    for (const m of twoPass) m.visible = false;
+    const queued = this.renderer.compileAsync(this.scene, this.camera); // queues before its first await
+    for (const m of twoPass) m.visible = true;
+    for (const t of drawn) t.addEventListener('dispose', heard);
+    this.warming = queued
+      .catch(() => {}) // a failed warm-up only means the next frame builds them
+      .finally(() => {
+        this.warming = null;
+        for (const t of drawn) t.removeEventListener('dispose', heard);
+        if (!WARM_UPS.has(this.warm)) return; // disposed: no frame, and the renderer went with what it built
+        this.invalidate();
+        for (const t of gone) t.dispatchEvent({ type: 'dispose' });
+      });
+  };
 
   get background(): string {
     return this.renderer.getClearAlpha() ? `#${this.renderer.getClearColor(new THREE.Color()).getHexString()}` : 'transparent';
@@ -272,13 +328,17 @@ export class Viewport {
     const sphere = box.getBoundingSphere(new THREE.Sphere());
     const radius = Math.max(sphere.radius, 1e-6);
     const view = this.view;
-    const distance = (radius / Math.sin((this.freeCamera.fov * Math.PI) / 360)) * 1.15;
+    const half = (this.freeCamera.fov * Math.PI) / 360; // half the vertical field of view
+    // a canvas narrower than tall fits its width; one with no width (hidden, collapsed) its height, having none to fit
+    const aspect = this.canvas.clientWidth ? this.freeCamera.aspect : 1;
+    const fit = Math.min(half, Math.atan(Math.tan(half) * aspect));
+    const distance = (radius / Math.sin(fit)) * 1.15;
     const direction = view.position.clone().sub(this.controls.target);
     if (direction.lengthSq() === 0) direction.set(1, 0.6, 1);
     this.controls.target.copy(sphere.center);
     view.position.copy(sphere.center).addScaledVector(direction.normalize(), distance);
     if (view === this.orthoCamera) {
-      view.zoom = view.top / (radius * 1.15);
+      view.zoom = (view.top * Math.min(1, aspect)) / (radius * 1.15); // the half-width is top * aspect (resize)
       view.updateProjectionMatrix();
     }
     this.controls.update();
@@ -293,7 +353,70 @@ export class Viewport {
     this.resize();
   }
 
-  /** First render item under a client-space point. */
+  /** Clipping planes and boxes in stage space (see section.ts): a copy. */
+  get section(): Section {
+    return structuredClone(this.sectionState);
+  }
+
+  /**
+   * Cleans and applies a section at once, before any frame (a host's own render of a hidden page is cut too); a no-op
+   * when nothing changed. GPU only: the stage's objects stay as they are and the shadow map is not redrawn.
+   */
+  setSection(input: unknown, source: SectionSource): void {
+    const next = clean(input, this.sync.upAxis);
+    if (equal(next, this.sectionState)) return;
+    this.sectionState = next;
+    this.sectionRows = rows(next, this.sync.upAxis);
+    SECTIONS.set(this.scene, { rows: this.sectionRows, root: this.sync.root });
+    if (this.sectionRows[3]) arm();
+    this.invalidate(); // not SceneSync's: that one redraws the shadow map
+    if (this.sectionTool && !entry(next, this.sectionTool.target)) this.sectionGizmo = null; // its entry went
+    this.sectionTool?.place(); // the gizmo follows at once too (see SectionTool's constructor)
+    this.onsection(source);
+  }
+
+  /** The entry the section gizmo edits, with a box's chosen handles; null when it is not attached. */
+  get sectionGizmo(): SectionGizmo | null {
+    return this.sectionTool?.value ?? null;
+  }
+  /**
+   * Attaches the section gizmo afresh, a box with the handles given (integers 0-5; anything else is ignored) or every
+   * one chosen; null, or an entry the section lacks, detaches it.
+   */
+  set sectionGizmo(target: SectionGizmo | null) {
+    const before = JSON.stringify(this.sectionGizmo);
+    this.sectionTool?.dispose();
+    this.sectionTool = null;
+    const { plane, box, rotate, handles } = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown; handles?: unknown };
+    const next = Number.isInteger(plane) ? { plane: plane as number, rotate: rotate === true } : Number.isInteger(box) ? { box: box as number, rotate: rotate === true } : null;
+    const chosen = Array.isArray(handles) ? handles.filter((h) => Number.isInteger(h) && h >= 0 && h <= 5) : undefined;
+    if (next && entry(this.sectionState, next)) this.sectionTool = new SectionTool(this, next, chosen);
+    if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo();
+  }
+
+  /** True while a section gizmo handle is under the pointer or dragged: the tools leave the pointer alone then. */
+  gizmoGrabbed(): boolean {
+    return this.sectionTool?.grabbed() ?? false;
+  }
+
+  /** True over a section gizmo handle or axis at a client point (hosts' pointer arbitration). */
+  sectionGizmoAt(clientX: number, clientY: number): boolean {
+    return this.sectionTool?.at(clientX, clientY) ?? false;
+  }
+
+  /** Esc: drops the chosen box handles, or with none chosen detaches the section gizmo. */
+  escapeSectionGizmo(): void {
+    if (this.sectionTool && !this.sectionTool.clear()) this.sectionGizmo = null;
+  }
+
+  /** False where the section cuts a three-world point away. */
+  keeps(point: THREE.Vector3): boolean {
+    if (!this.sectionRows[3]) return true; // no section on: nothing to convert (hosts ask per hover hit)
+    const p = point.clone().applyMatrix4(this.sync.root.matrixWorld.clone().invert());
+    return keeps(this.sectionRows, p.x, p.y, p.z);
+  }
+
+  /** First render item under a client-space point (where the section cuts it away, the one behind). */
   pick(clientX: number, clientY: number): { rid: Rid; instance: number } | null {
     const rect = this.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(
@@ -311,14 +434,14 @@ export class Viewport {
         visible &&= object.visible;
         rid ||= object.userData.rid ?? 0;
       }
-      if (visible && rid) return { rid, instance: hit.instanceId ?? -1 };
+      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? -1 };
     }
     return null;
   }
 
   /**
    * Render items (and instances) in a client-space rectangle: those whose screen bounds lie fully
-   * inside it, or with `touching` those whose screen bounds overlap it.
+   * inside it, or with `touching` those whose screen bounds overlap it; not those the section provably cuts away.
    * ponytail: bounding boxes, not silhouettes, so touching over-selects near corners; test vertices if that bites.
    */
   boxPick(r: { left: number; top: number; right: number; bottom: number }, contained: boolean): { rid: Rid; instance: number }[] {
@@ -326,11 +449,14 @@ export class Viewport {
     this.sync.root.updateMatrixWorld(true);
     this.camera.updateMatrixWorld();
     const corner = new THREE.Vector3();
+    const cornerOf = (box: THREE.Box3, i: number) => corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+    const toStage = this.sync.root.matrixWorld.clone().invert();
+    const stage = new THREE.Matrix4();
+    const corners = Array.from({ length: 8 }, (): Vec3 => [0, 0, 0]); // in stage space, for the section
     const inRect = (box: THREE.Box3, world: THREE.Matrix4): boolean => {
       let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
       for (let i = 0; i < 8; i++) {
-        corner.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
-        corner.applyMatrix4(world).project(this.camera);
+        cornerOf(box, i).applyMatrix4(world).project(this.camera);
         if (corner.z > 1) return false; // behind the camera
         const x = canvas.left + ((corner.x + 1) / 2) * canvas.width;
         const y = canvas.top + ((1 - corner.y) / 2) * canvas.height;
@@ -339,9 +465,13 @@ export class Viewport {
         top = Math.min(top, y);
         bottom = Math.max(bottom, y);
       }
-      return contained
+      const inside = contained
         ? left >= r.left && right <= r.right && top >= r.top && bottom <= r.bottom
         : left <= r.right && right >= r.left && top <= r.bottom && bottom >= r.top;
+      if (!inside || !this.sectionRows[3]) return inside; // stage space only for what the section could hide
+      stage.multiplyMatrices(toStage, world);
+      for (let i = 0; i < 8; i++) cornerOf(box, i).applyMatrix4(stage).toArray(corners[i]);
+      return !boxClipped(this.sectionRows, corners);
     };
     const hits: { rid: Rid; instance: number }[] = [];
     const world = new THREE.Matrix4();
@@ -372,14 +502,23 @@ export class Viewport {
 
   async screenshot(type = 'image/png', quality?: number): Promise<Blob> {
     await this.nextFrame();
-    // Read back in the same task as a render, before the drawing buffer is cleared.
-    this.renderer.render(this.scene, this.camera);
+    // Read back in the same task as a render, before the drawing buffer is cleared; without the helpers.
+    this.camera.layers.disable(HELPERS);
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      this.camera.layers.enable(HELPERS);
+    }
+    if (this.sectionTool) this.invalidate(); // back on screen
     return new Promise((resolve, reject) =>
       this.canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('screenshot failed'))), type, quality),
     );
   }
 
   dispose(): void {
+    WARM_UPS.delete(this.warm);
+    this.sectionTool?.dispose();
+    this.sectionTool = null;
     this.tool = null;
     cancelAnimationFrame(this.frameRequest);
     this.resizer.disconnect();
@@ -441,6 +580,7 @@ export class Viewport {
     const world = new THREE.Matrix4().multiplyMatrices(this.sync.root.matrixWorld, matrix);
     world.decompose(camera.position, camera.quaternion, new THREE.Vector3());
     camera.updateMatrixWorld();
+    camera.layers.enable(HELPERS);
     this.camera = camera;
   }
 }

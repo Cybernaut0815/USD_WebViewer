@@ -46,7 +46,7 @@ export class SelectTool implements Tool {
       'pointerdown',
       (e) => {
         down = null;
-        if (e.button !== 0 || this.grabbed()) return;
+        if (e.button !== 0 || this.grabbed(viewport)) return;
         const ctrl = this.marquee && (e.ctrlKey || e.metaKey);
         const shift = this.marquee && e.shiftKey;
         const mode: SelectMode | 'subtree' = shift && e.altKey ? 'subtree' : shift && ctrl ? 'up' : shift ? 'add' : ctrl ? 'remove' : 'replace';
@@ -122,9 +122,9 @@ export class SelectTool implements Tool {
     this.abort = null;
   }
 
-  /** True when something else (a gizmo handle) took the pointer down. */
-  protected grabbed(): boolean {
-    return false;
+  /** True when something else (a gizmo handle) took the pointer down: here the section gizmo's. */
+  protected grabbed(viewport: Viewport): boolean {
+    return viewport.gizmoGrabbed();
   }
 }
 
@@ -254,7 +254,7 @@ export class NavigateTool extends SelectTool {
     canvas.addEventListener(
       'pointerdown',
       (e) => {
-        if ((e.button !== 0 && e.button !== 2) || viewport.cameraPath !== null) return;
+        if ((e.button !== 0 && e.button !== 2) || viewport.cameraPath !== null || this.grabbed(viewport)) return;
         looking = e.pointerId;
         canvas.setPointerCapture(e.pointerId); // keeps looking when the pointer leaves the canvas
       },
@@ -344,6 +344,9 @@ export class TransformTool extends SelectTool {
     viewport.sync.root.add(this.proxy);
     viewport.beforeRender.add(this.follow);
     controls.addEventListener('change', () => viewport.invalidate());
+    // The drag plane follows the axis only when the helper updates, and a press can come before the next frame: frames
+    // can be held back (the first section's warm-up), and a touch press sets the axis in the same handler as the press.
+    controls.addEventListener('axis-changed', () => controls.getHelper().updateMatrixWorld());
     controls.addEventListener('dragging-changed', (e) => (viewport.controls.enabled = !e.value && viewport.cameraPath === null));
     controls.addEventListener('mouseDown', () => this.grab());
     controls.addEventListener('objectChange', () => this.moved());

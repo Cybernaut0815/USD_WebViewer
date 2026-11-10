@@ -1,12 +1,14 @@
 import { expect, type Page, test } from '@playwright/test';
 import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import type { DisplayMode } from '../src/scene.ts';
+import type { Section } from '../src/section.ts';
 import type { UsdViewerElement } from '../src/viewer.ts';
 
 const MOCK = '/?core=mock-core/&forceWebGL=1&src=mock.usda';
 
-/** Goldens are of the 3D view; the stats overlay on top of it is checked as text. */
-const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats'), page.locator('usd-viewer .tools')] });
+/** Goldens are of the 3D view; the stats overlay on top of it is checked as text, and shot.css hides the Section button. */
+const shot = (page: Page) => ({ mask: [page.locator('usd-viewer .stats'), page.locator('usd-viewer .tools')], stylePath: fileURLToPath(new URL('shot.css', import.meta.url)) });
 
 /** Opens the app and waits until the stage is drawn. */
 async function open(page: Page, url: string) {
@@ -28,27 +30,49 @@ async function open(page: Page, url: string) {
   return errors;
 }
 
-/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X. */
-async function dragAlongX(page: Page, path: string) {
-  const [center, alongX] = await page.evaluate(async (path) => {
+/** Client coordinates of world points in the view as drawn (the mock stage is Y up: its stage space is the world). */
+const toScreen = (page: Page, points: number[][], settle = true) =>
+  page.evaluate(async ({ points, settle }) => {
     const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
-    await viewer.idle(); // the gizmo sits on the selection and has been drawn
-    const object = viewer.three.objectsFor(path)[0];
+    if (settle) await viewer.idle(); // gizmos sit where they belong and have been drawn
     const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
-    const world = object.getWorldPosition(object.position.clone());
-    const screen = (v: typeof world) => {
-      const p = v.clone().project(viewer.three.camera);
-      return [rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height];
-    };
-    return [screen(world), screen(world.clone().setX(world.x + 1))];
-  }, path);
-  const length = Math.hypot(alongX[0] - center[0], alongX[1] - center[1]);
-  const dir = [(alongX[0] - center[0]) / length, (alongX[1] - center[1]) / length];
+    return points.map((v) => {
+      const p = viewer.three.camera.position.clone().fromArray(v).project(viewer.three.camera);
+      return [rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height] as [number, number];
+    });
+  }, { points, settle });
+
+/**
+ * Drags a gizmo's handle on the axis through a world point along a world direction: grabbed 45 px out, moved px. With
+ * settle false it starts at once, not after idle() (which waits for a frame). With touch a finger drags it, pressing
+ * with no hover before (CDP touch events, which need no hasTouch context).
+ */
+async function dragAxis(page: Page, from: number[], along: number[], px = 60, { settle = true, touch = false } = {}) {
+  const [center, ahead] = await toScreen(page, [from, from.map((x, i) => x + along[i])], settle);
+  const length = Math.hypot(ahead[0] - center[0], ahead[1] - center[1]);
+  const dir = [(ahead[0] - center[0]) / length, (ahead[1] - center[1]) / length];
   const at = (d: number) => [center[0] + dir[0] * d, center[1] + dir[1] * d] as const;
+  if (touch) {
+    const cdp = await page.context().newCDPSession(page);
+    const finger = (type: 'touchStart' | 'touchMove', d: number) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: [{ x: at(d)[0], y: at(d)[1] }] });
+    await finger('touchStart', 45);
+    for (let d = 50; d <= 45 + px; d += 5) await finger('touchMove', d);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    return cdp.detach();
+  }
   await page.mouse.move(...at(45));
   await page.mouse.down();
-  for (let d = 50; d <= 105; d += 5) await page.mouse.move(...at(d));
+  for (let d = 50; d <= 45 + px; d += 5) await page.mouse.move(...at(d));
   await page.mouse.up();
+}
+
+/** Drags the move gizmo's X handle of a prim by 60 px along the screen direction of world +X, with a finger if touch. */
+async function dragAlongX(page: Page, path: string, touch = false) {
+  const world = await page.evaluate((path) => {
+    const object = (document.querySelector('usd-viewer') as UsdViewerElement).three.objectsFor(path)[0];
+    return object.getWorldPosition(object.position.clone()).toArray();
+  }, path);
+  await dragAxis(page, world, [1, 0, 0], 60, { touch });
 }
 
 test.describe('mock core', () => {
@@ -604,10 +628,22 @@ test.describe('mock core', () => {
     expect(result.dirty).toBe(true);
   });
 
-  test('the move gizmo drags the selected prim and keeps one undo step', async ({ page }) => {
+  test('the move gizmo drags the selected prim, as far by finger as by mouse, and keeps one undo step', async ({ page }) => {
     await open(page, MOCK);
     await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
     await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).tool = 'translate'));
+    // A finger presses with no hover before it: the gizmo takes the axis in the press, and its drag plane must turn to it
+    // there, not in the next frame. This drag goes first, as after an X drag the plane stays turned for X and a finger
+    // drag would go right without that.
+    await dragAlongX(page, '/World/Cube', true);
+    const touched = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      await viewer.idle();
+      const x = viewer.three.objectsFor('/World/Cube')[0].matrix.elements[12];
+      await viewer.undo();
+      await viewer.idle();
+      return x;
+    });
     await dragAlongX(page, '/World/Cube');
     const result = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
@@ -620,6 +656,7 @@ test.describe('mock core', () => {
       return { moved, canUndo, after: cube.matrix.elements[12], selection: viewer.selection };
     });
     expect(result.moved).toBeGreaterThan(0.2);
+    expect(touched).toBeCloseTo(result.moved, 6);
     expect(result.canUndo).toBe(true);
     expect(result.after).toBeCloseTo(0, 3);
     expect(result.selection).toEqual(['/World/Cube']);
@@ -638,14 +675,13 @@ test.describe('mock core', () => {
     await page.keyboard.press('e');
     await page.keyboard.press('r');
     const before = await camera();
+    const ahead = async () => (await camera()).position.reduce((sum, p, i) => sum + (p - before.position[i]) * before.forward[i], 0);
     await page.keyboard.down('w');
-    await page.waitForTimeout(300);
+    // Held until it has flown, not for a fixed time: a step counts at most 0.1 s, and slow runners draw slower than that.
+    await expect.poll(ahead).toBeGreaterThan(0.1);
     await page.keyboard.up('w');
-    const after = await camera();
-    const ahead = after.position.reduce((sum, p, i) => sum + (p - before.position[i]) * before.forward[i], 0);
     expect(before.tool).toBe('navigate');
-    expect(after.tool).toBe('navigate');
-    expect(ahead).toBeGreaterThan(0.1);
+    expect((await camera()).tool).toBe('navigate');
     await page.keyboard.press('n');
     expect((await camera()).tool).toBe('select');
   });
@@ -766,6 +802,18 @@ test.describe('mock core', () => {
       await viewer.idle(); // drawn: the camera matrices are current
       const ndc = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
       const away = floor.getWorldPosition(floor.position.clone()).project(viewer.three.camera);
+      const distance = () => { const v = viewer.view; return Math.hypot(...v.eye.map((e, i) => e - v.target[i])); };
+      const wide = distance();
+      viewer.style.width = '160px'; // narrower than tall: framing fits the width
+      viewer.style.height = '600px';
+      for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame); // resized
+      viewer.frame();
+      await viewer.idle();
+      const narrow = far.getWorldPosition(far.position.clone()).project(viewer.three.camera);
+      viewer.style.width = '0px'; // no width (a collapsed column): framing fits the height, as for a wide one
+      for (let i = 0; i < 2; i++) await new Promise(requestAnimationFrame);
+      viewer.frame();
+      const collapsed = Math.abs(distance() / wide - 1) < 1e-6;
       return {
         tool: viewer.tool,
         unframed: Math.abs(away.x) > 1 || Math.abs(away.y) > 1,
@@ -773,10 +821,568 @@ test.describe('mock core', () => {
         background: viewer.backgroundColor,
         alpha: pixel.getImageData(0, 0, 1, 1).data[3],
         framed: Math.abs(ndc.x) < 1 && Math.abs(ndc.y) < 1,
+        narrow: Math.abs(narrow.x) < 1 && Math.abs(narrow.y) < 1,
+        collapsed,
         bare: viewer.shadowRoot!.querySelector('canvas')!.clientWidth === viewer.clientWidth,
       };
     });
-    expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, bare: true });
+    expect(result).toEqual({ tool: 'select', unframed: true, meshes: ['/World/Cube', '/World/Instances/Proto'], background: 'transparent', alpha: 0, framed: true, narrow: true, collapsed: true, bare: true });
+  });
+
+  test('sections cut the view with planes and boxes, and leave the stage and its objects alone', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    // What a section must not touch: the edit state, the render items and the counts.
+    const state = () =>
+      page.evaluate(() => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        const { meshes, points, faces, edges, materials, textures } = viewer.stats;
+        const ids = (objects: { uuid: string }[]) => objects.map((o) => o.uuid);
+        return { dirty: viewer.dirty, items: ids(viewer.three.items().flatMap((i) => i.object ?? [])), cube: ids(viewer.three.objectsFor('/World/Cube')), stats: [meshes, points, faces, edges, materials, textures] };
+      });
+    const before = await state();
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const events: unknown[] = ((window as any).events = []);
+      for (const type of ['primschange', 'dirtychange', 'sectionchange']) viewer.addEventListener(type, (e) => events.push([type, (e as CustomEvent).detail]));
+    });
+    const show = (section: Section) =>
+      page.evaluate(async (section) => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        viewer.section = section;
+        await viewer.idle();
+        return viewer.section;
+      }, section);
+    // A plane through the cube keeps x <= 0: the cut cube shows its grey inside.
+    await show({ on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] });
+    await expect(canvas).toHaveScreenshot('mock-section-plane.png', shot(page));
+    // A box that shows only its inside: a slab of the cube.
+    const slab = await show({ on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.25, top: 0.25 }] });
+    expect(slab.boxes[0].corners).toEqual([[-1, 0, -1], [-1, 0, 1], [1, 0, 1], [1, 0, -1]]); // counter-clockwise seen from above
+    await expect(canvas).toHaveScreenshot('mock-section-box.png', shot(page));
+    // A box cut out of the front and below, and a plane above the cube.
+    await show({ on: true, planes: [{ point: [0, 2, 0], normal: [0, -1, 0] }], boxes: [{ keep: 'outside', corners: [[-0.3, 0, 0], [3, 0, 0], [3, 0, 3], [-0.3, 0, 3]], bottom: -1, top: 0.2 }] });
+    await expect(canvas).toHaveScreenshot('mock-section-cut.png', shot(page));
+    // A concave footprint: an arrowhead whose notch leaves out the middle instance and the back of the cube.
+    const arrow: Section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-2.6, 0, 2.6], [0, 0, -0.8], [2.6, 0, 2.6], [0, 0, 1.2]], bottom: -1, top: 3 }] };
+    await show(arrow);
+    await expect(canvas).toHaveScreenshot('mock-section-concave.png', shot(page));
+    // Off keeps the entries and shows everything; cleared is the stage as before.
+    expect((await show({ ...arrow, on: false })).boxes).toHaveLength(1);
+    await expect(canvas).toHaveScreenshot('mock-stage.png', shot(page));
+    await show({ on: true, planes: [], boxes: [] });
+    await expect(canvas).toHaveScreenshot('mock-stage.png', shot(page));
+    expect(await state()).toEqual(before);
+    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(6).fill(['sectionchange', { source: 'api' }]));
+    // Opening a stage clears the section before hosts hear stageopen: one a host sets there stays.
+    const plane = { point: [0, 0, 0], normal: [-1, 0, 0] } as Section['planes'][number];
+    const reopened = await page.evaluate(async (plane) => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const sources: string[] = [];
+      viewer.addEventListener('sectionchange', (e) => sources.push((e as CustomEvent).detail.source));
+      viewer.section = { on: true, planes: [{ ...plane, normal: [1, 0, 0] }], boxes: [] };
+      viewer.addEventListener('stageopen', () => (viewer.section = { on: true, planes: [plane], boxes: [] }), { once: true });
+      await viewer.open('mock.usda');
+      return { sources, section: viewer.section };
+    }, plane);
+    expect(reopened).toEqual({ sources: ['api', 'stage', 'api'], section: { on: true, planes: [plane], boxes: [] } });
+    expect(errors).toEqual([]);
+  });
+
+  test('picking goes through what a section cuts away, a marquee skips it, and hosts section their own materials', async ({ page }) => {
+    await open(page, MOCK);
+    const warnings: string[] = [];
+    page.on('console', (message) => message.type() === 'warning' && warnings.push(message.text()));
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      // Straight at the front: the middle instance stands in front of the cube.
+      viewer.view = { eye: [0, 0, 10], target: [0, 0, 0], fov: 30, projection: 'perspective', height: 1 };
+      await viewer.idle();
+      const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const centre = async () => (await viewer.pick(rect.left + rect.width / 2, rect.top + rect.height / 2))?.path ?? null;
+      const whole = await centre();
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'outside', corners: [[-0.75, 0, 1.25], [0.75, 0, 1.25], [0.75, 0, 2.75], [-0.75, 0, 2.75]], bottom: -1, top: 1 }] };
+      const behind = await centre();
+      const point = viewer.three.camera.position.clone();
+      const kept = [viewer.three.keeps(point.set(0, 0, 2)), viewer.three.keeps(point.set(0, 0, 0))];
+      viewer.section = { on: true, planes: [{ point: [0, 0, -1], normal: [0, 0, -1] }], boxes: [] };
+      const nothing = await centre();
+      // Host materials: a NodeMaterial is sectioned like the viewer's own; anything else comes back untouched.
+      const host = new ((viewer.three.objectsFor('/World/Cube')[0] as any).material.constructor)();
+      const registered = [Object.hasOwn(host, 'section'), viewer.three.section(host) === host && Object.hasOwn(host, 'section') && host.section];
+      const other = { type: 'MeshBasicMaterial' } as any;
+      return { whole, behind, kept, nothing, registered, refused: viewer.three.section(other) === other && !('section' in other) };
+    });
+    expect(result).toEqual({ whole: '/World/Instances', behind: '/World/Cube', kept: [false, true], nothing: null, registered: [false, true], refused: true });
+    expect(warnings.filter((w) => w.includes('only NodeMaterials can be sectioned'))).toHaveLength(1);
+    // A marquee over everything takes what is not provably cut away: first with a box cut out around the cube.
+    const selection = () => page.evaluate(() => [...(document.querySelector('usd-viewer') as UsdViewerElement).selection].sort());
+    const marquee = async () => {
+      const box = (await page.locator('usd-viewer canvas').boundingBox())!;
+      const at = (i: number) => [box.x + box.width - 4 - ((box.width - 8) * i) / 5, box.y + box.height - 4 - ((box.height - 8) * i) / 5] as const;
+      await page.keyboard.down('Shift');
+      await page.mouse.move(...at(0));
+      await page.mouse.down();
+      for (let i = 1; i <= 5; i++) await page.mouse.move(...at(i));
+      await page.mouse.up();
+      await page.keyboard.up('Shift');
+    };
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.view = { eye: [4, 3, 6], target: [0, 0.5, 0.5], fov: 50, projection: 'perspective', height: 1 };
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'outside', corners: [[-0.6, 0, -0.6], [0.6, 0, -0.6], [0.6, 0, 0.6], [-0.6, 0, 0.6]], bottom: -0.6, top: 0.6 }] };
+    });
+    await marquee();
+    await expect.poll(selection).toEqual(['/World/Instances']);
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.select(null);
+      viewer.section = { on: false, planes: [], boxes: [] };
+    });
+    await marquee();
+    await expect.poll(selection).toEqual(['/World/Cube', '/World/Instances']);
+  });
+
+  test('the first section arms every material once; later sections rebuild nothing and leave the shadow map alone', async ({ page }) => {
+    await open(page, MOCK);
+    // Every display mode (the type keeps the list complete), shaded-selwire last: the sections below are drawn in it.
+    const none: Record<DisplayMode, string[]> = { shaded: [], 'shaded-wire': [], plain: [], 'plain-wire': [], 'plain-selwire': [], wire: [], 'shaded-selwire': [] };
+    const result = await page.evaluate(async (list) => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      // Materials never drawn (wire's surface, HIDDEN) are not sectioned.
+      const unsectioned = () => {
+        const missing: string[] = [];
+        viewer.three.root.traverse((o: any) => {
+          for (const m of [o.material ?? []].flat()) if (m.isNodeMaterial && m.visible && !(Object.hasOwn(m, 'section') && m.section)) missing.push(`${o.type} ${m.type}`);
+        });
+        return missing;
+      };
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.select(['/World/Cube', '/World/Instances']);
+      const modes: Record<string, string[]> = {};
+      for (const mode of list) {
+        viewer.displayMode = mode;
+        await viewer.idle();
+        modes[mode] = unsectioned();
+      }
+      // Armed: from here on a section is a uniform write.
+      let built = 0;
+      renderer.debug.onNodeBuilderCreated = () => built++;
+      const pipelines = renderer._pipelines.caches.size;
+      let sun: any = null;
+      viewer.three.scene.traverse((o: any) => o.isDirectionalLight && o.castShadow && (sun = o));
+      const planes = Array.from({ length: 8 }, (_, i) => ({ point: [0, -2, 0], normal: [Math.cos(i), 0.2, Math.sin(i)] }));
+      const boxes = Array.from({ length: 8 }, (_, i) => ({ keep: i % 2 ? 'inside' : 'outside', corners: [[i - 4, 0, -1], [i - 3, 0, -1], [i - 3, 0, 1], [i - 4, 0, 1]], bottom: -1, top: 1 }));
+      const flip = (keep: string) => boxes.map((b) => ({ ...b, keep: keep === 'flip' ? (b.keep === 'inside' ? 'outside' : 'inside') : keep }));
+      const counts = (n: number) => ({ on: true, planes: planes.slice(0, n), boxes: boxes.slice(0, n) });
+      const steps = [
+        ...[0, 1, 2, 4, 8].map(counts),
+        ...['flip', 'inside', 'outside'].map((keep) => ({ on: true, planes, boxes: flip(keep) })),
+        ...[false, true, false, true].map((on) => ({ on, planes, boxes })),
+        ...[7, 6, 5, 4, 3, 2, 1, 0].map(counts),
+      ] as Section[];
+      let changes = 0;
+      let shadow = 0;
+      viewer.addEventListener('sectionchange', () => changes++);
+      for (const step of steps) {
+        viewer.section = step;
+        shadow += sun.shadow.needsUpdate ? 1 : 0;
+        await viewer.idle();
+      }
+      renderer.debug.onNodeBuilderCreated = null;
+      return { modes, steps: steps.length, changes, built, pipelines: renderer._pipelines.caches.size - pipelines, shadow };
+    }, Object.keys(none) as DisplayMode[]);
+    expect(result).toEqual({ modes: none, steps: 20, changes: 20, built: 0, pipelines: 0, shadow: 0 });
+  });
+
+  test('the first section on a page is built off-frame: no frame builds a shader, then the view shows the section', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const built = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      const render = renderer.render;
+      const built = { inRender: 0, all: 0 };
+      let depth = 0; // a shadow pass renders inside a render
+      renderer.render = (...args: unknown[]) => {
+        depth++;
+        try {
+          return render.apply(renderer, args);
+        } finally {
+          depth--;
+        }
+      };
+      renderer.debug.onNodeBuilderCreated = () => (built.all++, depth && built.inRender++);
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      await viewer.idle();
+      delete renderer.render;
+      renderer.debug.onNodeBuilderCreated = null;
+      return built;
+    });
+    expect(built.inRender).toBe(0);
+    expect(built.all).toBeGreaterThan(0); // the warm-up built them
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-section-plane.png', shot(page));
+    expect(errors).toEqual([]);
+  });
+
+  test('a transparent double-sided material in view at the first section draws as one built in a frame, also after leaving the scene meanwhile', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const same = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      // A lit see-through shell around the cube: three draws its back faces, then its front faces.
+      const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
+      const shell = cube.clone();
+      shell.material = viewer.three.section(cube.material.clone());
+      Object.assign(shell.material, { transparent: true, opacity: 0.5, side: 2 }); // DoubleSide
+      cube.getWorldPosition(shell.position);
+      shell.scale.setScalar(1.3);
+      viewer.three.overlay.add(shell);
+      await viewer.idle();
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.three.overlay.remove(shell); // out of the scene until the section is built and shown
+      await viewer.idle();
+      viewer.three.overlay.add(shell);
+      await viewer.idle();
+      const image = async () => new Uint8Array(await (await viewer.screenshot()).arrayBuffer()).join();
+      const warmed = await image();
+      shell.material.needsUpdate = true; // built again in a frame, pass by pass
+      await viewer.idle();
+      return warmed === (await image());
+    });
+    expect(same).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  test('what goes for good while the first section builds off-frame is not built and kept', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const renderer = viewer.three.renderer as any;
+      // Render objects of objects out of the scene (the renderer's own ones: background, output, environment), and
+      // the geometries three holds.
+      const count = () => {
+        let out = 0;
+        for (const { object } of renderer._objects._renderObjects) {
+          let o = object;
+          while (o && o !== viewer.three.scene) o = o.parent;
+          if (!o) out++;
+        }
+        return { out, geometries: renderer.info.memory.geometries };
+      };
+      // The viewer's edge and highlight proxies, and a host mesh with its own geometry.
+      viewer.displayMode = 'shaded-wire';
+      viewer.select(['/World/Cube', '/World/Instances']);
+      const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
+      const paint = new cube.constructor(cube.geometry.clone(), viewer.three.section(cube.material.clone()));
+      viewer.three.overlay.add(paint);
+      await viewer.idle();
+      const before = count();
+      // In the first section's task, so all of them are queued for its build: the viewer releases the proxies, the
+      // host drops its mesh for good.
+      viewer.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      viewer.displayMode = 'shaded';
+      paint.removeFromParent();
+      paint.geometry.dispose();
+      paint.dispatchEvent({ type: 'dispose' });
+      await viewer.idle();
+      return { before, after: count() };
+    });
+    expect(result.after).toEqual({ out: result.before.out, geometries: result.before.geometries - 1 });
+    expect(errors).toEqual([]);
+  });
+
+  test('a section on one viewer leaves another viewer on the same page as it was', async ({ page }) => {
+    await open(page, MOCK);
+    const images = await page.evaluate(async () => {
+      const a = document.querySelector('usd-viewer') as UsdViewerElement;
+      const holder = document.createElement('div');
+      holder.innerHTML = '<usd-viewer core-url="mock-core/" force-webgl panels="none" src="mock.usda" style="height: 320px"></usd-viewer>';
+      const b = holder.firstElementChild as UsdViewerElement;
+      document.body.append(b);
+      await b.ready;
+      if (!b.stage) await new Promise((resolve) => b.addEventListener('stageopen', resolve, { once: true }));
+      await b.idle();
+      const image = async (viewer: UsdViewerElement) => new Uint8Array(await (await viewer.screenshot()).arrayBuffer()).join();
+      const before = [await image(a), await image(b)];
+      a.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+      await a.idle();
+      const after = [await image(a), await image(b)];
+      return { a: before[0] === after[0], b: before[1] === after[1] };
+    });
+    expect(images).toEqual({ a: false, b: true });
+  });
+
+  test('the section gizmo moves box corners only across, faces only up and down, and refuses a crossing footprint', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const box = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).section.boxes[0]);
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const events: unknown[] = ((window as any).events = []);
+      const handles = () => (viewer.sectionGizmo as { handles?: number[] } | null)?.handles ?? null; // null: detached
+      for (const type of ['sectionchange', 'sectiongizmochange', 'selectionchange', 'primschange', 'dirtychange']) {
+        viewer.addEventListener(type, (e) => events.push([type, type === 'sectiongizmochange' ? handles() : ((e as CustomEvent).detail?.source ?? null)]));
+      }
+      viewer.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
+      viewer.sectionGizmo = { box: 0 };
+    });
+    const start = await box(); // counter-clockwise seen from above: corner 0 stays at x -1, z -1, corner 3 is x 1, z -1
+    // Every handle starts chosen; Esc clears them, and a click on corner 0's top dot chooses that vertical edge alone.
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[-1, 0.5, -1]]))[0]);
+    // The value carries the choice; set after null, the value read brings it back, so the drag moves that edge alone.
+    // A value set keeps only the integers 0-5 of its handles, once each.
+    const values = await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const read = viewer.sectionGizmo;
+      viewer.sectionGizmo = { box: 0, handles: [5, 2, 5, 9, -1, 1.5, '3' as any] };
+      const odd = viewer.sectionGizmo;
+      viewer.sectionGizmo = null;
+      viewer.sectionGizmo = read;
+      return [read, odd];
+    });
+    expect(values).toEqual([{ box: 0, rotate: false, handles: [0] }, { box: 0, rotate: false, handles: [2, 5] }]);
+    await dragAxis(page, [-1, 0, -1], [1, 0, 0]); // the gizmo sits in the middle of the edge
+    const moved = await box();
+    expect(moved.corners[0][0]).toBeGreaterThan(-0.8);
+    expect([moved.corners[0][1], moved.bottom, moved.top]).toEqual([0, -0.5, 0.5]); // in plan only
+    expect(moved.corners.slice(1)).toEqual(start.corners.slice(1));
+    // The top face's dot sits on the footprint's middle: chosen alone, the gizmo moves it up only.
+    const middle = [0, 2].map((i) => moved.corners.reduce((sum, c) => sum + c[i], 0) / 4);
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[middle[0], 0.5, middle[1]]]))[0]);
+    await dragAxis(page, [middle[0], 0.5, middle[1]], [0, 1, 0]);
+    const raised = await box();
+    expect(raised.top).toBeGreaterThan(0.7);
+    expect([raised.bottom, raised.corners]).toEqual([-0.5, moved.corners]);
+    // Dragged far along +X, corner 0 would cross corner 3: it stops at the last footprint that worked.
+    const [x, , z] = raised.corners[0];
+    await page.keyboard.press('Escape');
+    await page.mouse.click(...(await toScreen(page, [[x, raised.top, z]]))[0]);
+    await dragAxis(page, [x, (raised.bottom + raised.top) / 2, z], [1, 0, 0], 200);
+    const refused = await box();
+    expect(refused.corners[0][0]).toBeGreaterThan(x);
+    expect(refused.corners[0][0]).toBeLessThan(1);
+    expect([refused.bottom, refused.top, refused.corners.slice(1)]).toEqual([raised.bottom, raised.top, start.corners.slice(1)]);
+    // Attached afresh, every handle is chosen again. Dragged up and across by the gizmo's middle, the footprint moves
+    // only in plan and the bottom and top rise together; no frame of the drag redraws the shadows.
+    await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      viewer.sectionGizmo = { box: 0 };
+      let sun: any = null;
+      viewer.three.scene.traverse((o: any) => o.isDirectionalLight && o.castShadow && (sun = o));
+      (window as any).redraws = 0;
+      viewer.three.beforeRender.add(() => void (sun.shadow.needsUpdate && (window as any).redraws++));
+    });
+    const mean = [0, 2].map((i) => refused.corners.reduce((sum, c) => sum + c[i], 0) / 4);
+    const [grip] = await toScreen(page, [[mean[0], (refused.bottom + refused.top) / 2, mean[1]]]);
+    await page.mouse.move(...grip);
+    await page.mouse.down();
+    for (let d = 5; d <= 40; d += 5) await page.mouse.move(grip[0] + d, grip[1] - d);
+    await page.mouse.up();
+    const whole = await box();
+    const shift = whole.corners.map((c, k) => c.map((v, i) => v - refused.corners[k][i]));
+    expect(Math.hypot(shift[0][0], shift[0][2])).toBeGreaterThan(0.05);
+    for (const [dx, dy, dz] of shift) expect([dx - shift[0][0], dy, dz - shift[0][2]].map((v) => Math.abs(v) < 1e-9)).toEqual([true, true, true]);
+    expect(whole.bottom - refused.bottom).toBeGreaterThan(0.05);
+    expect(whole.top - refused.top).toBeCloseTo(whole.bottom - refused.bottom, 9);
+    expect(await page.evaluate(() => (window as any).redraws)).toBe(0);
+    // Only the section changed, from the gizmo: no selection, no edit. sectiongizmochange also came with each change of
+    // the chosen handles (each Esc and click, the values set, attaching afresh), and the value had them by then.
+    const events = await page.evaluate(() => (window as any).events as [string, unknown][]);
+    const all = [0, 1, 2, 3, 4, 5];
+    expect(events.slice(0, 2)).toEqual([['sectionchange', 'api'], ['sectiongizmochange', all]]);
+    expect(events.filter(([type]) => type === 'sectiongizmochange').map(([, handles]) => handles)).toEqual([all, [], [0], [2, 5], null, [0], [], [5], [], [0], all]);
+    expect(events.filter(([, source]) => source === 'gizmo').length).toBeGreaterThan(5);
+    expect(events.slice(2).filter(([type, source]) => type !== 'sectiongizmochange' && (type !== 'sectionchange' || source !== 'gizmo'))).toEqual([]);
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).dirty)).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  test('the section gizmo stays out of screenshot(), works when readonly, and goes with its entry or another tool', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    const image = () => page.evaluate(async () => new Uint8Array(await (await (document.querySelector('usd-viewer') as UsdViewerElement).screenshot()).arrayBuffer()).join());
+    const viewer = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { gizmo: v.sectionGizmo, plane: v.section.planes[0], dirty: v.dirty };
+    });
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.setAttribute('readonly', '');
+      v.section = { on: true, planes: [{ point: [0, 0, 40], normal: [-1, 0, 0] }], boxes: [] }; // its point far out of view
+    });
+    const without = await image();
+    const view = await canvas.screenshot();
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).sectionGizmo = { plane: 0 }));
+    expect(await image()).toBe(without);
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).idle());
+    expect((await canvas.screenshot()).equals(view)).toBe(false); // the view itself shows it
+    // Readonly: the plane still moves along its normal, the stage stays clean; Esc (no handles to clear) lets go. The
+    // gizmo sits in the middle of the outline, where the stage's centre (the framed view's target) falls on the plane.
+    const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
+    await dragAxis(page, [0, y, z], [-1, 0, 0]);
+    const dragged = await viewer();
+    expect(dragged.plane.point[0]).toBeLessThan(-0.2);
+    expect(dragged.plane.normal).toEqual([-1, 0, 0]);
+    expect(dragged.dirty).toBe(false);
+    await canvas.focus();
+    await page.keyboard.press('Escape');
+    expect((await viewer()).gizmo).toBeNull();
+    const result = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      let changes = 0;
+      v.addEventListener('sectiongizmochange', () => changes++);
+      // Around the right-hand instance, off the stage origin.
+      v.section = { ...v.section, boxes: [{ keep: 'outside', corners: [[1.5, 0, 1.5], [2.5, 0, 1.5], [2.5, 0, 2.5], [1.5, 0, 2.5]], bottom: -0.5, top: 0.5 }] };
+      v.tool = 'navigate';
+      v.sectionGizmo = { box: 0 }; // switches back to select
+      const tool = v.tool;
+      const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const gizmoAt = (x: number, y: number, z: number) => {
+        const p = v.three.camera.position.clone().set(x, y, z).project(v.three.camera);
+        return v.sectionGizmoAt(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      };
+      // In place as soon as it is attached, before any frame: corner 0's top dot, and nothing at the stage origin.
+      const early = [gizmoAt(1.5, 0.5, 1.5), gizmoAt(0, 0, 0)];
+      await v.idle();
+      const at = [gizmoAt(1.5, 0.5, 1.5), v.sectionGizmoAt(rect.left + 2, rect.bottom - 2)];
+      v.tool = 'navigate';
+      const navigating = v.sectionGizmo;
+      v.sectionGizmo = { box: 0, rotate: true };
+      const rotating = v.sectionGizmo;
+      v.section = { ...v.section, boxes: [] }; // its entry goes
+      return { tool, early, at, navigating, rotating, gone: v.sectionGizmo, changes };
+    });
+    expect(result).toEqual({ tool: 'select', early: [true, false], at: [true, false], navigating: null, rotating: { box: 0, rotate: true }, gone: null, changes: 4 });
+    expect(errors).toEqual([]);
+  });
+
+  test('a section gizmo drag in the warm-up of the first section, before any frame, goes as far as one after it, and the gizmo follows each change at once', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
+    /**
+     * Plane 0 across X, its gizmo attached afresh, the plane moved 0.3 on along its normal by the host and its arrow
+     * dragged from there: where the plane went, and frames drawn since.
+     */
+    const drag = async (settle: boolean) => {
+      await page.evaluate(() => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+        v.sectionGizmo = { plane: 0 };
+        v.section = { on: true, planes: [{ point: [-0.3, 0, 0], normal: [-1, 0, 0] }], boxes: [] };
+        (window as any).drawn = 0;
+      });
+      await dragAxis(page, [-0.3, y, z], [-1, 0, 0], 60, { settle });
+      return page.evaluate(() => [(document.querySelector('usd-viewer') as UsdViewerElement).section.planes[0].point[0], (window as any).drawn as number]);
+    };
+    // The page's first section warms up through scheduler.yield: held at its first yield, it lets no frame be drawn.
+    await page.evaluate(() => {
+      const w = window as any;
+      (document.querySelector('usd-viewer') as UsdViewerElement).three.beforeRender.add(() => w.drawn++);
+      const next = scheduler.yield.bind(scheduler);
+      const gate = new Promise<void>((resolve) => (w.openGate = resolve));
+      scheduler.yield = () => gate.then(next);
+    });
+    const [held, drawn] = await drag(false);
+    // Still held: a click on corner 3's top dot chooses that corner alone, and the gizmo leaves the box's middle for the
+    // corner's at once.
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [-1, 0, 1], [1, 0, 1], [1, 0, -1]], bottom: -1, top: 1 }] };
+      v.sectionGizmo = { box: 0 };
+    });
+    const [dot, arrow, middle] = await toScreen(page, [[1, 1, -1], [1.3, 0, -1], [0, 0, 0]], false);
+    await page.mouse.click(...dot);
+    const chosen = await page.evaluate(([arrow, middle]) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return [v.sectionGizmo, v.sectionGizmoAt(...arrow), v.sectionGizmoAt(...middle), (window as any).drawn];
+    }, [arrow, middle]);
+    // Still held: corner 0 alone, dragged along +X past corner 3, where the footprint would cross itself. The last steps
+    // are refused, and as the drag ends the gizmo goes back to the corner, away from where the pointer let go.
+    await page.evaluate(() => {
+      addEventListener('pointerup', (e) => ((window as any).up = e));
+      (document.querySelector('usd-viewer') as UsdViewerElement).sectionGizmo = { box: 0, handles: [0] };
+    });
+    await dragAxis(page, [-1, 0, -1], [1, 0, 0], 400, { settle: false });
+    const x = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).section.boxes[0].corners[0][0]);
+    const [corner] = await toScreen(page, [[x + 0.3, 0, -1]], false);
+    const ended = await page.evaluate((corner) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const { up, drawn } = window as any;
+      return [v.sectionGizmoAt(...corner), v.sectionGizmoAt(up.clientX, up.clientY), drawn];
+    }, corner);
+    await page.evaluate(() => {
+      (window as any).openGate();
+      return (document.querySelector('usd-viewer') as UsdViewerElement).idle();
+    });
+    const [after] = await drag(true);
+    // The view looks along X in part: pressed on a drag plane still facing the camera, the arrow would move it less;
+    // pressed on the gizmo where the plane was before the host moved it, it would put the plane back near there.
+    expect(drawn).toBe(0);
+    expect(after).toBeLessThan(-0.5);
+    expect(held).toBeCloseTo(after, 6);
+    expect(chosen).toEqual([{ box: 0, rotate: false, handles: [3] }, true, false, 0]);
+    expect([x > 0.5, x < 1]).toEqual([true, true]);
+    expect(ended).toEqual([true, false, 0]);
+    expect(errors).toEqual([]);
+  });
+
+  test('the Section menu adds a plane and a box, then flips, switches, removes and clears them', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const state = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { section: v.section, gizmo: v.sectionGizmo };
+    });
+    const menu = async (item: string) => {
+      await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+      await page.locator('usd-viewer .popup button', { hasText: item }).click();
+    };
+    await page.evaluate(() => {
+      const events: string[] = ((window as any).events = []);
+      document.querySelector('usd-viewer')!.addEventListener('sectionchange', (e) => events.push((e as CustomEvent).detail.source));
+    });
+    // A plane across X through the stage's centre, keeping the -X side, edited at once.
+    await menu('Plane X');
+    let { section, gizmo } = await state();
+    expect(section.planes.map((p) => p.normal)).toEqual([[-1, 0, 0]]);
+    expect(section.planes[0].point.every(Number.isFinite)).toBe(true);
+    expect(gizmo).toEqual({ plane: 0, rotate: false });
+    // A box showing what is around the selected cube (a 1 % margin), its top and bottom on the up axis (Y).
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).select('/World/Cube'));
+    await menu('Box around the selection');
+    ({ section, gizmo } = await state());
+    const m = 0.5 + Math.sqrt(3) / 100;
+    expect(gizmo).toEqual({ box: 0, rotate: false, handles: [0, 1, 2, 3, 4, 5] });
+    expect(section.boxes[0].keep).toBe('inside');
+    expect([section.boxes[0].bottom, section.boxes[0].top].map((h) => +h.toFixed(6))).toEqual([-m, m].map((h) => +h.toFixed(6)));
+    expect(section.boxes[0].corners.map(([x, , z]) => [Math.abs(x), Math.abs(z)].map((v) => +v.toFixed(6)))).toEqual(Array(4).fill([m, m].map((v) => +v.toFixed(6))));
+    await menu('Flip plane 1');
+    await menu('Box 1: cut out');
+    ({ section } = await state());
+    expect([section.planes[0].normal[0], section.boxes[0].keep]).toEqual([1, 'outside']);
+    // Removing an entry before the edited one keeps the gizmo on its entry; removing the edited one lets go of it.
+    await menu('Plane Y');
+    await menu('Remove plane 1');
+    ({ section, gizmo } = await state());
+    expect([section.planes.map((p) => p.normal), gizmo]).toEqual([[[0, -1, 0]], { plane: 0, rotate: false }]);
+    await menu('Remove plane 1');
+    ({ section, gizmo } = await state());
+    expect([section.planes.length, section.boxes.length, gizmo]).toEqual([0, 1, null]);
+    await menu('Clear');
+    expect(await state()).toEqual({ section: { on: true, planes: [], boxes: [] }, gizmo: null });
+    expect(await page.evaluate(() => (window as any).events)).toEqual(Array(8).fill('ui'));
+    // 7 planes and 8 boxes: the menu stays in the window and scrolls, its first item at hand.
+    await page.evaluate(() => {
+      const box: Section['boxes'][number] = { keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -1, top: 1 };
+      (document.querySelector('usd-viewer') as UsdViewerElement).section = { on: true, planes: Array(7).fill({ point: [0, 0, 0], normal: [0, 1, 0] }), boxes: Array(8).fill(box) };
+    });
+    await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+    const popup = (await page.locator('usd-viewer .popup').boundingBox())!;
+    expect([popup.y >= 0, popup.y + popup.height <= page.viewportSize()!.height]).toEqual([true, true]);
+    await page.locator('usd-viewer .popup button', { hasText: 'Plane X' }).click();
+    expect((await state()).section.planes).toHaveLength(8);
+    expect(errors).toEqual([]);
   });
 
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {

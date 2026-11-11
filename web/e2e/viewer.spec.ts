@@ -849,6 +849,7 @@ test.describe('mock core', () => {
     const show = (section: Section) =>
       page.evaluate(async (section) => {
         const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        viewer.sectionHandles = false; // the cut alone
         viewer.section = section;
         await viewer.idle();
         return viewer.section;
@@ -1019,8 +1020,9 @@ test.describe('mock core', () => {
       renderer.debug.onNodeBuilderCreated = null;
       return built;
     });
-    expect(built.inRender).toBe(0);
+    expect(built.inRender).toBe(0); // the plane's outline and dot included
     expect(built.all).toBeGreaterThan(0); // the warm-up built them
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).sectionHandles = false)); // the cut alone
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-section-plane.png', shot(page));
     expect(errors).toEqual([]);
   });
@@ -1075,6 +1077,7 @@ test.describe('mock core', () => {
       const cube = viewer.three.objectsFor('/World/Cube')[0] as any;
       const paint = new cube.constructor(cube.geometry.clone(), viewer.three.section(cube.material.clone()));
       viewer.three.overlay.add(paint);
+      viewer.sectionHandles = false; // no outline geometry to count
       await viewer.idle();
       const before = count();
       // In the first section's task, so all of them are queued for its build: the viewer releases the proxies, the
@@ -1382,6 +1385,74 @@ test.describe('mock core', () => {
     expect([popup.y >= 0, popup.y + popup.height <= page.viewportSize()!.height]).toEqual([true, true]);
     await page.locator('usd-viewer .popup button', { hasText: 'Plane X' }).click();
     expect((await state()).section.planes).toHaveLength(8);
+    expect(errors).toEqual([]);
+  });
+
+  test('every section entry shows its handles: a click selects, Shift adds, one drag moves all, Hide handles and Del', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    const state = () => page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      return { section: v.section, gizmo: v.sectionGizmo };
+    });
+    const at = (point: [number, number]) => page.evaluate((point) => (document.querySelector('usd-viewer') as UsdViewerElement).sectionGizmoAt(...point), point);
+    const menu = async (item: string) => {
+      await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+      await page.locator('usd-viewer .popup button', { hasText: item }).click();
+    };
+    // A plane across X through the origin and a box around the right-hand instance, set by the host: nothing selected.
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const events: unknown[] = ((window as any).events = []);
+      v.addEventListener('sectionchange', (e) => events.push((e as CustomEvent).detail.source));
+      v.section = { on: true, planes: [{ point: [0, 0, 0], normal: [-1, 0, 0] }], boxes: [{ keep: 'outside', corners: [[1.5, 0, 1.5], [2.5, 0, 1.5], [2.5, 0, 2.5], [1.5, 0, 2.5]], bottom: -0.5, top: 0.5 }] };
+    });
+    // The plane's dot is where the stage's centre (the framed view's target) falls on it.
+    const [, y, z] = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).view.target);
+    const [planeDot, cornerDot, edge] = await toScreen(page, [[0, y, z], [1.5, 0.5, 1.5], [2.5, 0.5, 2]]);
+    const rect = (await canvas.boundingBox())!;
+    const nothing: [number, number] = [rect.x + 4, rect.y + rect.height - 4];
+    expect([await at(planeDot), await at(cornerDot), await at(edge), await at(nothing), (await state()).gizmo]).toEqual([true, true, true, false, null]);
+    // A click on corner 0's top dot chooses that corner of the box; Shift+click on the plane's dot adds the plane.
+    await page.mouse.click(...cornerDot);
+    expect((await state()).gizmo).toEqual({ box: 0, rotate: false, handles: [0] });
+    await page.keyboard.down('Shift');
+    await page.mouse.click(...planeDot);
+    await page.keyboard.up('Shift');
+    expect((await state()).gizmo).toEqual({ planes: [0], boxes: [{ box: 0, handles: [0] }] });
+    // The arrows sit between the plane's dot and the corner's middle: dragged along +X, both move by the same shift.
+    await dragAxis(page, [0.75, y / 2, (z + 1.5) / 2], [1, 0, 0]);
+    let { section } = await state();
+    const shift = section.boxes[0].corners[0][0] - 1.5;
+    expect(shift).toBeGreaterThan(0.1);
+    expect(section.planes[0].point[0]).toBeCloseTo(shift, 6);
+    expect([section.planes[0].normal, section.boxes[0].corners[0].slice(1), section.boxes[0].corners.slice(1)]).toEqual([[-1, 0, 0], [0, 1.5], [[1.5, 0, 2.5], [2.5, 0, 2.5], [2.5, 0, 1.5]]]);
+    // A click on nothing selects none; a click on the box's outline selects the whole box.
+    await page.mouse.click(...nothing);
+    expect((await state()).gizmo).toBeNull();
+    await page.mouse.click(...edge);
+    expect((await state()).gizmo).toEqual({ box: 0, rotate: false, handles: [0, 1, 2, 3, 4, 5] });
+    // Hide handles lets go of it and takes the outlines away from the pointer; Show brings them back, Sections off hides them.
+    await menu('Hide handles');
+    expect([(await state()).gizmo, await at(edge), await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).sectionHandles)]).toEqual([null, false, false]);
+    await menu('Show handles');
+    expect(await at(edge)).toBe(true);
+    await menu('Sections off');
+    expect(await at(edge)).toBe(false);
+    await menu('Sections on');
+    // The navigate tool looks around: no dot or outline takes the pointer there.
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).tool = 'navigate'));
+    expect(await at(edge)).toBe(false);
+    await page.evaluate(() => ((document.querySelector('usd-viewer') as UsdViewerElement).tool = 'select'));
+    // Del deletes what is selected: the box, the plane stays.
+    await page.mouse.click(...edge);
+    await canvas.focus();
+    await page.keyboard.press('Delete');
+    ({ section } = await state());
+    expect([section.planes.length, section.boxes.length, (await state()).gizmo]).toEqual([1, 0, null]);
+    // The host's section, the drag's steps, then Sections off and on and Del.
+    const events: string[] = await page.evaluate(() => (window as any).events);
+    expect([events[0], events.filter((source) => source !== 'gizmo').slice(1), events.slice(1, -3).every((source) => source === 'gizmo')]).toEqual(['api', ['ui', 'ui', 'ui'], true]);
     expect(errors).toEqual([]);
   });
 

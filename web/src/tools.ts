@@ -387,9 +387,10 @@ export class TransformTool extends SelectTool {
     this.anchor = null;
   }
 
-  protected override grabbed(): boolean {
-    // The selection listener runs before the gizmo's own pointerdown, so a hovered handle counts too.
-    return !!this.controls?.dragging || this.controls?.axis != null;
+  protected override grabbed(viewport: Viewport): boolean {
+    // The selection listener runs before the gizmo's own pointerdown, so a hovered handle counts too; so do the
+    // section's dots and outlines (a click on one selects it).
+    return !!this.controls?.dragging || this.controls?.axis != null || viewport.gizmoGrabbed();
   }
 
   /** Re-reads the selected prims that can move and puts the gizmo on the active one. */

@@ -7,7 +7,7 @@ import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
 import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
 import { arm, SECTIONS, WARM_UPS } from './sectionnode.ts';
-import { entry, HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
+import { HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
@@ -82,12 +82,14 @@ export class Viewport {
   oncontext: (path: Path, x: number, y: number) => void = () => {};
   /** The section changed (set by the element: its sectionchange event). */
   onsection: (source: SectionSource) => void = () => {};
-  /** The section gizmo was attached, detached, retargeted or given other handles (set by the element: sectiongizmochange). */
+  /** The section's selection (sectionGizmo) changed, its chosen handles included (set by the element: sectiongizmochange). */
   onsectiongizmo: () => void = () => {};
   private sectionState = EMPTY;
   /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
   private sectionRows = rows(EMPTY, 'Y');
+  /** Made with the first section entry or selection, then kept. */
   private sectionTool: SectionTool | null = null;
+  private handles = true;
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
@@ -368,45 +370,71 @@ export class Viewport {
     this.sectionState = next;
     this.sectionRows = rows(next, this.sync.upAxis);
     SECTIONS.set(this.scene, { rows: this.sectionRows, root: this.sync.root });
+    // The outlines first (letting go of what went, following at once: see SectionTool.place), so the first section's
+    // warm-up builds them too.
+    if (next.planes.length || next.boxes.length) this.editor();
+    this.sectionTool?.sectionChanged();
     if (this.sectionRows[3]) arm();
     this.invalidate(); // not SceneSync's: that one redraws the shadow map
-    if (this.sectionTool && !entry(next, this.sectionTool.target)) this.sectionGizmo = null; // its entry went
-    this.sectionTool?.place(); // the gizmo follows at once too (see SectionTool's constructor)
     this.onsection(source);
   }
 
-  /** The entry the section gizmo edits, with a box's chosen handles; null when it is not attached. */
-  get sectionGizmo(): SectionGizmo | null {
-    return this.sectionTool?.value ?? null;
-  }
-  /**
-   * Attaches the section gizmo afresh, a box with the handles given (integers 0-5; anything else is ignored) or every
-   * one chosen; null, or an entry the section lacks, detaches it.
-   */
-  set sectionGizmo(target: SectionGizmo | null) {
+  /** Removes planes and boxes (indices); the selection stays on the entries left. */
+  removeSections(planes: number[], boxes: number[], source: SectionSource): void {
     const before = JSON.stringify(this.sectionGizmo);
-    this.sectionTool?.dispose();
-    this.sectionTool = null;
-    const { plane, box, rotate, handles } = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown; handles?: unknown };
-    const next = Number.isInteger(plane) ? { plane: plane as number, rotate: rotate === true } : Number.isInteger(box) ? { box: box as number, rotate: rotate === true } : null;
-    const chosen = Array.isArray(handles) ? handles.filter((h) => Number.isInteger(h) && h >= 0 && h <= 5) : undefined;
-    if (next && entry(this.sectionState, next)) this.sectionTool = new SectionTool(this, next, chosen);
+    const s = this.sectionState;
+    this.sectionTool?.removing(planes, boxes);
+    this.setSection({ ...s, planes: s.planes.filter((_, i) => !planes.includes(i)), boxes: s.boxes.filter((_, i) => !boxes.includes(i)) }, source);
     if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo();
   }
 
-  /** True while a section gizmo handle is under the pointer or dragged: the tools leave the pointer alone then. */
+  /** Del: removes the selected planes and boxes (source 'ui'). */
+  removeSelectedSections(): void {
+    if (this.sectionTool) this.removeSections(this.sectionTool.selected.planes, this.sectionTool.selected.boxes, 'ui');
+  }
+
+  /** The selected section entries, a box with its chosen handles (see SectionGizmo); null with none. */
+  get sectionGizmo(): SectionGizmo | null {
+    return this.sectionTool?.value ?? null;
+  }
+  /** Selects afresh (see SectionTool.select); null, or entries the section lacks, select nothing. */
+  set sectionGizmo(target: SectionGizmo | null) {
+    const before = JSON.stringify(this.sectionGizmo);
+    if (target) this.editor().select(target);
+    else this.sectionTool?.select(null);
+    if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo();
+  }
+
+  /**
+   * Outlines and dots on every section entry while the section is on, which a click selects; off, only the selected
+   * entries show them. Turning it off lets go of the selection.
+   */
+  get sectionHandles(): boolean {
+    return this.handles;
+  }
+  set sectionHandles(on: boolean) {
+    this.handles = on;
+    if (!on) this.sectionGizmo = null;
+    this.sectionTool?.place();
+  }
+
+  /** True while a section dot, outline or gizmo axis is under the pointer or dragged: the tools leave the pointer alone then. */
   gizmoGrabbed(): boolean {
     return this.sectionTool?.grabbed() ?? false;
   }
 
-  /** True over a section gizmo handle or axis at a client point (hosts' pointer arbitration). */
+  /** True over a section dot, outline or gizmo axis at a client point (hosts' pointer arbitration). */
   sectionGizmoAt(clientX: number, clientY: number): boolean {
     return this.sectionTool?.at(clientX, clientY) ?? false;
   }
 
-  /** Esc: drops the chosen box handles, or with none chosen detaches the section gizmo. */
+  /** Esc: drops the chosen box handles, or with none chosen lets go of the selection. */
   escapeSectionGizmo(): void {
     if (this.sectionTool && !this.sectionTool.clear()) this.sectionGizmo = null;
+  }
+
+  private editor(): SectionTool {
+    return (this.sectionTool ??= new SectionTool(this));
   }
 
   /** False where the section cuts a three-world point away. */

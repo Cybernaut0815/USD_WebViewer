@@ -100,7 +100,7 @@ export class SectionTool {
   private boxAt = new Map<number, Vec3[]>();
   /** The dot or outline under the pointer, kept like TransformControls' hovered axis. */
   private hovered: Hit | null = null;
-  private press: { x: number; y: number; hit: Hit | null; toggle: boolean } | null = null;
+  private press: { id: number; x: number; y: number; hit: Hit | null; toggle: boolean } | null = null;
   private start: { position: THREE.Vector3; quaternion: THREE.Quaternion; section: Section; planeAt: Map<number, THREE.Vector3> } | null = null;
   private readonly abort = new AbortController();
   private readonly follow = () => this.update();
@@ -158,11 +158,12 @@ export class SectionTool {
     canvas.parentElement!.addEventListener(
       'pointerdown',
       (e) => {
-        if (e.target !== canvas) return;
+        if (e.target !== canvas || this.press?.hit?.dot) return; // another finger while one holds a dot
         this.press = null;
         this.hovered = this.hitAt(e.clientX, e.clientY);
-        if (e.button !== 0 || controls.axis !== null || !this.picks()) return; // the gizmo's axes come first
-        this.press = { x: e.clientX, y: e.clientY, hit: this.hovered, toggle: e.shiftKey || e.ctrlKey || e.metaKey };
+        // The gizmo's axes come first; its hovered axis is stale after a tap or a press with no move since the last one.
+        if (e.button !== 0 || this.axisAt(e.clientX, e.clientY) || !this.picks()) return;
+        this.press = { id: e.pointerId, x: e.clientX, y: e.clientY, hit: this.hovered, toggle: e.shiftKey || e.ctrlKey || e.metaKey };
         if (!this.hovered?.dot) return; // a drag from an outline or from nothing orbits
         viewport.controls.enabled = false; // a press on a dot does not
         canvas.setPointerCapture(e.pointerId);
@@ -171,7 +172,7 @@ export class SectionTool {
     );
     const release = (e: PointerEvent) => {
       const press = this.press;
-      if (!press) return;
+      if (!press || e.pointerId !== press.id) return;
       this.press = null;
       if (press.hit?.dot) viewport.controls.enabled = viewport.cameraPath === null;
       if (e.type !== 'pointerup' || Math.hypot(e.clientX - press.x, e.clientY - press.y) > 4) return;
@@ -191,11 +192,16 @@ export class SectionTool {
   /** True over a dot, outline or gizmo axis at a client point, or while one is held. */
   at(clientX: number, clientY: number): boolean {
     if (this.controls.dragging || this.press?.hit?.dot) return true;
+    return this.axisAt(clientX, clientY) || this.hitAt(clientX, clientY) !== null;
+  }
+
+  /** True over a gizmo axis at a client point: the axis TransformControls itself takes there (it becomes its hovered one). */
+  private axisAt(clientX: number, clientY: number): boolean {
     const rect = this.viewport.canvas.getBoundingClientRect();
     const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
     this.controls.getRaycaster().setFromCamera(ndc, this.viewport.camera);
-    this.controls.pointerHover(null); // the axis TransformControls itself takes there
-    return this.controls.axis !== null || this.hitAt(clientX, clientY) !== null;
+    this.controls.pointerHover(null);
+    return this.controls.axis !== null;
   }
 
   /** The selection (see SectionGizmo): null with nothing selected, a box's handles sorted and left out with rotate. */
@@ -437,35 +443,41 @@ export class SectionTool {
     controls.attach(proxy);
   }
 
-  /** A drag step, applied from the drag's start; refused when the section could not be drawn after it. */
+  /**
+   * A drag step: the selected entries as at the drag's start, moved; the rest of the section as it is now (a host's
+   * change meanwhile stays). Refused when the section could not be drawn after it.
+   */
   private moved(): void {
     const { start, proxy, viewport } = this;
     if (!start) return;
     const up = viewport.sync.upAxis;
-    const section = structuredClone(start.section);
+    const section = viewport.section;
+    const from = start.section;
     const [plane] = this.planes;
     const [box] = this.boxes.keys();
     if (this.rotate && plane !== undefined) {
       // The proxy stays on the plane's dot: the centre of the tilt.
       section.planes[plane] = { point: proxy.position.toArray(), normal: Y.clone().applyQuaternion(proxy.quaternion).toArray() };
     } else if (this.rotate) {
-      const b = section.boxes[box];
+      const b = structuredClone(from.boxes[box]);
       const turn = proxy.quaternion.clone().multiply(start.quaternion.clone().invert()); // about the up axis through the middle
       b.corners = b.corners.map((c) => new THREE.Vector3(...c).sub(start.position).applyQuaternion(turn).add(start.position).toArray()) as SectionBox['corners'];
+      section.boxes[box] = b;
     } else {
       const shift = proxy.position.clone().sub(start.position);
       // A plane's point goes with its dot (the outline's middle): moved along its normal, the plane moves by the
       // shift's part along it.
-      for (const i of this.planes) section.planes[i].point = start.planeAt.get(i)!.clone().add(shift).toArray();
+      for (const i of this.planes) section.planes[i] = { point: start.planeAt.get(i)!.clone().add(shift).toArray(), normal: from.planes[i].normal };
       const H = up === 'Z' ? 2 : 1;
       const plan = shift.toArray();
       const rise = plan[H];
       plan[H] = 0;
       for (const [i, chosen] of this.boxes) {
-        const b = section.boxes[i];
+        const b = structuredClone(from.boxes[i]);
         b.corners = b.corners.map((c, k) => (chosen.has(k) ? c.map((x, j) => x + plan[j]) : c)) as SectionBox['corners'];
         if (chosen.has(4)) b.bottom += rise;
         if (chosen.has(5)) b.top += rise;
+        section.boxes[i] = b;
       }
     }
     // A footprint that crosses itself or turns over, or a top below the bottom, would not come back from clean() as it
@@ -476,6 +488,8 @@ export class SectionTool {
 
   /** A click on a dot or outline: selects it alone, or with toggle adds or removes it. */
   private choose(hit: Hit, toggle: boolean): void {
+    const { planes, boxes } = this.viewport.section;
+    if (hit.index >= (hit.box ? boxes : planes).length) return; // gone while the button was down (Del, a host)
     const before = JSON.stringify(this.value);
     this.rotate = false;
     if (!toggle) {

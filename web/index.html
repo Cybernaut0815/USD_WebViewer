@@ -24,12 +24,15 @@
       if (query.has('live')) viewer.setAttribute('live', query.get('live') === '1' ? '' : query.get('live')); // 1: live/ next to the page
       if (query.has('src')) viewer.setAttribute('src', query.get('src'));
       // The core starts booting now, while the bundle loads; the element adopts this worker (see viewer.ts). What it
-      // posts before then is kept and handed over.
-      const url = new URL('worker.js', new URL(viewer.getAttribute('core-url') ?? 'core/', document.baseURI));
-      const worker = new Worker(url, { type: 'module' });
-      const early = [];
-      worker.onmessage = worker.onerror = (event) => early.push(event);
-      window.usdCoreWorker = { url: url.href, worker, early };
+      // posts before then is kept and handed over. Not before the page is cross-origin isolated: on a first visit to
+      // a host without the headers the service worker above reloads the page first, and the core needs isolation.
+      if (crossOriginIsolated) {
+        const url = new URL('worker.js', new URL(viewer.getAttribute('core-url') ?? 'core/', document.baseURI));
+        const worker = new Worker(url, { type: 'module' });
+        const early = [];
+        worker.onmessage = worker.onerror = (event) => early.push(event);
+        window.usdCoreWorker = { url: url.href, worker, early };
+      }
     </script>
     <script type="module" src="/src/index.ts"></script>
   </body>

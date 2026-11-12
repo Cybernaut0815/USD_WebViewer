@@ -407,6 +407,30 @@ void CollectTextures(HdMaterialNetworkInterface& network, std::set<std::string>*
     }
 }
 
+/// The standard library as far as a network needs it: the definitions of its nodes (with the ones they inherit from)
+/// and every element that is not a definition or an implementation (types, units, geometric properties). HdMtlx
+/// imports the library it is given into the document it builds and validates all of it: with the whole library that
+/// cost about 200 ms per material, with this a few.
+MaterialX::DocumentPtr LibraryFor(HdMaterialNetworkInterface& network)
+{
+    const MaterialX::DocumentPtr& all = HdMtlxStdLibraries();
+    const MaterialX::DocumentPtr library = MaterialX::createDocument();
+    const auto copy = [&](const MaterialX::ConstElementPtr& source) {
+        const MaterialX::ElementPtr element = library->addChildOfCategory(source->getCategory(), source->getName());
+        element->copyContentFrom(source);
+        element->setSourceUri(source->getSourceUri()); // left out of the page's document, like the whole library was
+    };
+    for (const MaterialX::ElementPtr& child : all->getChildren()) {
+        if (!child->isA<MaterialX::NodeDef>() && !child->isA<MaterialX::NodeGraph>() && !child->isA<MaterialX::Implementation>()) copy(child);
+    }
+    std::unordered_set<std::string> done;
+    for (const TfToken& node : network.GetNodeNames()) {
+        for (MaterialX::NodeDefPtr def = all->getNodeDef(network.GetNodeType(node).GetString()); def && done.insert(def->getName()).second;
+             def = all->getNodeDef(def->getInheritString())) copy(def);
+    }
+    return library;
+}
+
 /// MaterialX document for a network whose surface terminal is a MaterialX node, else empty.
 std::string MaterialXDocument(HdMaterialNetworkInterface& network)
 {
@@ -415,7 +439,7 @@ std::string MaterialXDocument(HdMaterialNetworkInterface& network)
     const TfToken node = terminal.second.upstreamNodeName;
     if (!TfStringStartsWith(network.GetNodeType(node).GetString(), "ND_")) return {};
     const MaterialX::DocumentPtr document = HdMtlxCreateMtlxDocumentFromHdMaterialNetworkInterface(
-        &network, node, network.GetNodeInputConnectionNames(node), HdMtlxStdLibraries());
+        &network, node, network.GetNodeInputConnectionNames(node), LibraryFor(network));
     if (!document) return {};
     // hdMtlx writes asset paths as authored; the page needs the resolved ones.
     std::unordered_map<std::string, std::string> resolved;

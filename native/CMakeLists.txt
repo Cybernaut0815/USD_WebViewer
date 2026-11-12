@@ -60,7 +60,7 @@ target_link_options(usdcore PRIVATE
     -sMALLOC=mimalloc
     # USD recurses deeply (composition, value parsing); the 64 KB default overflows silently.
     -sSTACK_SIZE=8MB -sDEFAULT_PTHREAD_STACK_SIZE=2MB
-    -sPTHREAD_POOL_SIZE=8
+    -sPTHREAD_POOL_SIZE=4
     -sFETCH -sFETCH_SUPPORT_INDEXEDDB=0
     -sEXPORTED_RUNTIME_METHODS=FS
     "SHELL:--embed-file ${SDK_PREFIX}/lib/usd@/usd"

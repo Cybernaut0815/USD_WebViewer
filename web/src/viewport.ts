@@ -482,7 +482,8 @@ export class Viewport {
         visible &&= object.visible;
         rid ||= object.userData.rid ?? 0;
       }
-      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? -1 };
+      // A single instance is a plain mesh (see SceneSync.mesh): instance 0 of its item.
+      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? (this.sync.items.get(rid)?.instances ? 0 : -1) };
     }
     return null;
   }
@@ -536,7 +537,7 @@ export class Viewport {
           continue;
         }
         for (let i = 0; i * 16 < item.instances.length && hits.length < 5000; i++) {
-          world.multiplyMatrices(object.matrixWorld, instance.fromArray(item.instances, i * 16));
+          world.multiplyMatrices(this.sync.root.matrixWorld, instance.fromArray(item.instances, i * 16)); // instances are in stage space
           if (inRect(item.geometry.boundingBox, world)) hits.push({ rid: item.rid, instance: i });
         }
       } else {

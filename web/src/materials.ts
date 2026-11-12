@@ -212,42 +212,48 @@ async function buildPreviewSurface(
   const b = new PreviewBuilder(net, textures, host);
   const p = surface.params;
   const m = new THREE.MeshPhysicalNodeMaterial({ side: THREE.DoubleSide });
+  // Every input's textures load at once (the cache shares one load per file), not one after another.
+  const specularWorkflow = num(p.useSpecularWorkflow, 0) === 1;
+  const names = ['diffuseColor', 'emissiveColor', specularWorkflow ? 'specularColor' : 'metallic', 'roughness', 'clearcoat', 'clearcoatRoughness', 'opacity', 'normal', 'occlusion'];
+  const inputs = new Map(names.map((name) => [name, b.connected(surface, name)]));
+  const connected = (name: string) => inputs.get(name)!;
+  await Promise.allSettled(inputs.values()); // a failed one throws below, in its turn
 
-  const diffuse = await b.connected(surface, 'diffuseColor');
+  const diffuse = await connected('diffuseColor');
   if (diffuse) m.colorNode = diffuse;
   else m.color.setRGB(...(vec(p.diffuseColor, [0.18, 0.18, 0.18]) as [number, number, number]));
 
-  const emissive = await b.connected(surface, 'emissiveColor');
+  const emissive = await connected('emissiveColor');
   if (emissive) m.emissiveNode = emissive;
   else m.emissive.setRGB(...(vec(p.emissiveColor, [0, 0, 0]) as [number, number, number]));
 
   const ior = num(p.ior, 1.5);
   m.ior = ior;
-  if (num(p.useSpecularWorkflow, 0) === 1) {
+  if (specularWorkflow) {
     // three computes F0 = f0(ior) * specularColor, so divide the authored F0 by f0(ior).
     const f0 = Math.max(((ior - 1) / (ior + 1)) ** 2, 1e-4);
     m.metalness = 0;
-    const specular = await b.connected(surface, 'specularColor');
+    const specular = await connected('specularColor');
     if (specular) m.specularColorNode = specular.div(f0);
     else m.specularColor.setRGB(...(vec(p.specularColor, [0, 0, 0]).map((v) => v / f0) as [number, number, number]));
   } else {
-    const metallic = await b.connected(surface, 'metallic');
+    const metallic = await connected('metallic');
     if (metallic) m.metalnessNode = metallic;
     else m.metalness = num(p.metallic, 0);
   }
 
-  const roughness = await b.connected(surface, 'roughness');
+  const roughness = await connected('roughness');
   if (roughness) m.roughnessNode = roughness;
   else m.roughness = num(p.roughness, 0.5);
 
-  const clearcoat = await b.connected(surface, 'clearcoat');
+  const clearcoat = await connected('clearcoat');
   if (clearcoat) m.clearcoatNode = clearcoat;
   else m.clearcoat = num(p.clearcoat, 0);
-  const clearcoatRoughness = await b.connected(surface, 'clearcoatRoughness');
+  const clearcoatRoughness = await connected('clearcoatRoughness');
   if (clearcoatRoughness) m.clearcoatRoughnessNode = clearcoatRoughness;
   else m.clearcoatRoughness = num(p.clearcoatRoughness, 0.01);
 
-  const opacity = await b.connected(surface, 'opacity');
+  const opacity = await connected('opacity');
   const threshold = num(p.opacityThreshold, 0);
   if (opacity) m.opacityNode = opacity;
   else m.opacity = num(p.opacity, 1);
@@ -260,11 +266,11 @@ async function buildPreviewSurface(
   // three's shadow pass ignores opacityNode: mask it there too, so cutouts cast cutout shadows.
   if (opacity) m.maskShadowNode = opacity.greaterThan(threshold > 0 ? threshold : 0.5);
 
-  const normal = await b.connected(surface, 'normal');
+  const normal = await connected('normal');
   // normalMap() decodes 0..1 samples itself; a (2, -1) scale/bias has already produced -1..1.
   if (normal) m.normalNode = normalMap(normal.mul(0.5).add(0.5));
 
-  const occlusion = await b.connected(surface, 'occlusion');
+  const occlusion = await connected('occlusion');
   if (occlusion) m.aoNode = occlusion;
   // ponytail: displacement is ignored; add a positionNode offset when an asset needs it.
   m.userData.readsDisplayColor = b.readsDisplayColor;

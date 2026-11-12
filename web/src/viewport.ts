@@ -7,7 +7,7 @@ import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
 import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
 import { arm, SECTIONS, WARM_UPS } from './sectionnode.ts';
-import { HELPERS, type SectionGizmo, SectionTool } from './sectiontool.ts';
+import { HELPERS, type SectionGizmo, type SectionMode, SectionTool } from './sectiontool.ts';
 import type { Tool } from './tools.ts';
 import { verticalFov } from './units.ts';
 
@@ -84,12 +84,15 @@ export class Viewport {
   onsection: (source: SectionSource) => void = () => {};
   /** The section's selection (sectionGizmo) changed, its chosen handles included (set by the element: sectiongizmochange). */
   onsectiongizmo: () => void = () => {};
+  /** A right click on a section entry, which is selected by then (set by the element: its section menu). */
+  onsectionmenu: (x: number, y: number) => void = () => {};
   private sectionState = EMPTY;
   /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
   private sectionRows = rows(EMPTY, 'Y');
   /** Made with the first section entry or selection, then kept. */
   private sectionTool: SectionTool | null = null;
   private handles = true;
+  private mode: SectionMode = 'none';
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
@@ -390,7 +393,24 @@ export class Viewport {
 
   /** Del: removes the selected planes and boxes (source 'ui'). */
   removeSelectedSections(): void {
-    if (this.sectionTool) this.removeSections(this.sectionTool.selected.planes, this.sectionTool.selected.boxes, 'ui');
+    const { planes, boxes } = this.sectionSelected;
+    this.removeSections(planes, boxes, 'ui');
+  }
+
+  /** The selected planes and boxes, by index. */
+  get sectionSelected(): { planes: number[]; boxes: number[] } {
+    return this.sectionTool?.selected ?? { planes: [], boxes: [] };
+  }
+
+  /** What the section gizmo does with the selection: nothing, move or turn it (the element sets it from its tool). */
+  get sectionMode(): SectionMode {
+    return this.mode;
+  }
+  set sectionMode(mode: SectionMode) {
+    const before = JSON.stringify(this.sectionGizmo);
+    this.mode = mode;
+    this.sectionTool?.place();
+    if (JSON.stringify(this.sectionGizmo) !== before) this.onsectiongizmo(); // the one-entry forms carry rotate
   }
 
   /** The selected section entries, a box with its chosen handles (see SectionGizmo); null with none. */

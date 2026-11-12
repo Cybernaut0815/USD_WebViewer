@@ -118,24 +118,22 @@ The prim menu (right-click) also copies the prim's USD, either the composed subt
 
 **Section**, after the tool buttons at the top left of the view, cuts the view open with clipping planes and boxes. It changes only what is drawn: the stage, its files and the shadows stay whole, and picking goes through to what is behind a cut.
 
-- **Adding.** Each new plane or box is selected at once (see below).
+- **The Section menu** adds planes and boxes and acts on all of them; everything else happens in the view.
   - **Plane X / Y / Z** through the stage's centre keeps its negative side: below the horizontal one, which the menu marks.
   - **Plane facing the view** goes through the orbit target and keeps what lies beyond it.
   - **Box around the selection** (around the stage when nothing is selected) shows only what is inside it.
-  - At most 8 planes and 8 boxes. A point shows when every plane keeps it, no "cut out" box holds it, and, if there are "show inside" boxes, one of them holds it.
-- **Handles.** Every plane and box shows its outline and dots in the view, so it can be selected and moved at any time. **Hide handles** in the menu hides them (the cut stays) and **Show handles** brings them back; **Sections off** hides them too.
-- **Selecting.** Click a dot or an outline (in the Select tool, or a Move, Rotate or Scale tool, which switches to Select). **Shift+click** or **Ctrl+click** adds or removes it, so several planes and boxes can be selected and moved together. A click on anything else selects none of them.
+  - A new plane or box is selected at once. At most 8 planes and 8 boxes. A point shows when every plane keeps it, no "cut out" box holds it, and, if there are "show inside" boxes, one of them holds it.
+  - **Hide handles** hides the outlines and dots (the cut stays) and **Show handles** brings them back. **Sections off** shows everything but keeps the entries, and hides their handles too; **Clear** removes them all.
+- **Selecting**, like prims. Every plane and box shows its outline and dots. Click a dot or an outline (in Select, Move, Rotate or Scale; not in Navigate). **Shift+click** or **Ctrl+click** adds or removes it. A click on anything else selects none of them. Prims and sections are never selected together: selecting one clears the other.
   - A box's dot chooses that handle of the box; its outline chooses the whole box. A plane has one dot, in the middle of its outline.
-  - **Del** deletes the selected planes and boxes. **Esc** clears the box handles chosen; pressed again, it selects none.
-- **Moving.** The arrows sit in the middle of what is chosen and move it all together. A plane alone moves along its normal; with others it moves by the part of the move along its normal.
-  - Box corners move only across, in plan; the top and bottom move only up and down.
+  - **Esc** clears the box handles chosen; pressed again, it selects none.
+- **Moving and turning** follow the tool, like prims: **Select** (`Q`) and **Scale** (`R`) show no gizmo, **Move** (`W`) shows arrows and **Rotate** (`E`) rings.
+  - Move: the arrows sit in the middle of what is chosen and move it all together. Box corners move only across, in plan; the top and bottom move only up and down; a plane alone moves along its normal, with others by the part of the move along its normal.
+  - Rotate turns everything selected about the middle of the planes' dots and the boxes' middles. A plane alone tilts about its dot; with a box selected only the ring about the vertical shows, so boxes stay upright.
   - A move that would make a footprint cross itself, or bring a top below its bottom, stops at the last shape that worked.
-- **Each entry in the menu.** Edit (select it alone) or Rotate it, Flip a plane, switch a box between "show inside" and "cut out", or Remove it. **Sections off** shows everything but keeps the entries; **Clear** removes them all.
-- **Planes.** The outline spans the stage, and its arrow points to the side that stays. Rotate tilts a plane about its dot.
-- **Boxes** stand upright: a footprint of four corners between a bottom and a top height. The sides stay vertical, and the top and bottom stay level.
-  - A box has a dot at the top and bottom of every corner, and one on the top and on the bottom face. A corner's two dots are one vertical edge: either one chooses that corner.
-  - Rotate turns the footprint about the vertical through its middle.
-- Navigate, Move, Rotate and Scale (`N` `W` `E` `R`) select none, and so does **Select none** in the menu. In Navigate a click does not select them.
+- **Right click** a plane or box (it is selected if it was not) for the selected ones: **Flip** planes (keep the other side), **Show inside** or **Cut out** boxes, **Delete**. **Del** deletes them too.
+- **Planes.** The outline spans the stage, and its arrow points to the side that stays.
+- **Boxes** stand upright: a footprint of four corners between a bottom and a top height. The sides stay vertical, and the top and bottom stay level. A box has a dot at the top and bottom of every corner, and one on the top and on the bottom face; a corner's two dots are one vertical edge: either one chooses that corner.
 
 ## Statistics
 

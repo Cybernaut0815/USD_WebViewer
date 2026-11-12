@@ -18,6 +18,9 @@ public:
     static void RegisterScheme(const std::string& scheme, const std::string& httpBase, const std::string& authHeader);
     /// Drops cached bytes of a URL so the next open fetches it again (used before a reload).
     static void Forget(const std::string& url);
+    /// Lets go of the packages (usdz) read so far. They are kept until then: the page reads a package's textures one
+    /// by one after the stage opened, and each read opens the package again.
+    static void ReleasePackages();
 
 protected:
     std::string _CreateIdentifier(const std::string& assetPath, const ArResolvedPath& anchorAssetPath) const override;

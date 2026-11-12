@@ -47,6 +47,22 @@ const TOOL_BUTTONS: [ToolName, string, string][] = [
   ['scale', 'Scale', 'R'],
   ['navigate', 'Navigate', 'N'],
 ];
+/**
+ * A core worker the page started before the bundle loaded (index.html), taken once if it is for this URL; its
+ * messages and errors from before are replayed to the client's handlers, ahead of any later ones.
+ */
+function adoptWorker(url: URL): Worker {
+  const early = (globalThis as { usdCoreWorker?: { url: string; worker: Worker; early: Event[] } }).usdCoreWorker;
+  if (!early || early.url !== url.href) return new Worker(url, { type: 'module' });
+  delete (globalThis as { usdCoreWorker?: unknown }).usdCoreWorker;
+  const { worker } = early;
+  worker.onmessage = worker.onerror = null;
+  queueMicrotask(() => {
+    for (const event of early.early) (event.type === 'message' ? worker.onmessage : worker.onerror)?.call(worker, event as MessageEvent & ErrorEvent);
+  });
+  return worker;
+}
+
 /** Viewer skies: Poly Haven CC0 HDRIs in public/skies (see LICENSE.md there), by file name. */
 export const SKIES: Record<string, string> = { 'blue-sky': 'Blue sky', sunset: 'Sunset', forest: 'Forest', industrial: 'Industrial', studio: 'Studio' };
 /** The Help window's contents; the key handler in build() implements the keyboard rows. */
@@ -183,7 +199,7 @@ export class UsdViewerElement extends HTMLElement {
     super();
     const root = this.attachShadow({ mode: 'open' });
     root.adoptedStyleSheets = [sheet];
-    this.session = new UsdSession(new URL(this.getAttribute('core-url') ?? 'core/', document.baseURI));
+    this.session = new UsdSession(new URL(this.getAttribute('core-url') ?? 'core/', document.baseURI), adoptWorker);
     this.viewport = new Viewport(
       this.canvas,
       { readBytes: (path) => this.session.readBytes(path), warn: (message) => this.session.report('warn', message) },
@@ -898,7 +914,8 @@ export class UsdViewerElement extends HTMLElement {
         this.framed = true;
         this.viewport.frame();
       }
-      this.updateStats();
+      const d = e.detail;
+      if (d.meshes || d.curves || d.points || d.removed || d.visibility || d.materials) this.updateStats(); // not for a selection alone
     });
     on('stageloaded', () => {
       this.loading = false;
@@ -927,7 +944,7 @@ export class UsdViewerElement extends HTMLElement {
         const shown = active ?? paths[0];
         this.picker.replaceChildren(h('option', { value: shown, selected: true, title: shown }, shown));
       }
-      if (source === 'viewport' && active) await this.tree.reveal(active);
+      if (source === 'viewport' && active) this.tree.reveal(active).catch(() => {}); // the panel need not wait for it
       this.showProps(active);
     });
     on('primschange', async (e) => {

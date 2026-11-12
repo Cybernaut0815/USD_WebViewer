@@ -1565,6 +1565,67 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
+  test('a selection builds its highlight once and keeps it: no shader build or shadow redraw per selection, nothing left over', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const run = () => page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const w = window as any;
+      w.builds = w.shadows = 0;
+      for (const paths of [['/World/Cube'], ['/World/Instances'], ['/World/Instances/1'], ['/World/Cube', '/World/Instances'], []]) {
+        v.select(paths);
+        await v.idle();
+      }
+      let objects = 0;
+      v.three.scene.traverse(() => objects++);
+      return { builds: w.builds, shadows: w.shadows, objects };
+    });
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const w = window as any;
+      (v.three.renderer as any).debug.onNodeBuilderCreated = () => w.builds++;
+      let sun: any = null;
+      v.three.scene.traverse((o: any) => o.isDirectionalLight && o.castShadow && (sun = o));
+      v.three.beforeRender.add(() => void (sun.shadow.needsUpdate && w.shadows++));
+    });
+    const first = await run();
+    const again = await run();
+    // The first round builds the highlights; selecting the same prims again, a part of an instancer included, builds
+    // nothing, redraws no shadow map, and leaves as many objects in the scene.
+    expect(first.shadows).toBe(0);
+    expect(again).toEqual({ builds: 0, shadows: 0, objects: first.objects });
+    // The core worker the page started before the bundle was taken over by the element.
+    expect(await page.evaluate(() => 'usdCoreWorker' in window)).toBe(false);
+    expect(errors).toEqual([]);
+  });
+
+  test('a single instance draws as a plain mesh at its instance matrix and picks as instance 0; none draws nothing', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const cube = v.three.objectsFor('/World/Cube')[0] as any;
+      const g = cube.geometry;
+      const instance = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -5, 0, 0, 1]); // at x -5, clear of the rest
+      v.session.emit('delta', {
+        meshes: [70, 71].map((rid) => ({ rid, path: rid === 70 ? '/World/One/Proto' : '/World/None/Proto', purpose: 'default', indices: new Uint32Array(g.index.array), positions: new Float32Array(g.attributes.position.array), normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, displayColor: [0.9, 0.9, 0.2], subsets: null, material: 0, instances: rid === 70 ? instance : new Float32Array(0) })),
+      } as any);
+      await v.idle();
+      v.frame();
+      await v.idle();
+      const one = v.three.objectsFor('/World/One/Proto')[0] as any;
+      const position = one.getWorldPosition(one.position.clone()).toArray();
+      const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const p = one.position.clone().set(-5, 0, 0).project(v.three.camera);
+      const pick = await v.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      const none = v.three.objectsFor('/World/None/Proto')[0] as any;
+      return { instanced: !!one.isInstancedMesh, position, pick, none: [!!none.isInstancedMesh, none.count] };
+    });
+    expect(result.instanced).toBe(false);
+    expect(result.none).toEqual([true, 0]); // a prototype no instance uses
+    expect(result.position.map((x: number) => +x.toFixed(6))).toEqual([-5, 0, 0]);
+    expect(result.pick?.instanceIndex).toBe(0); // the mock core answers any rid but the cube's as an instance of /World/Instances
+    expect(errors).toEqual([]);
+  });
+
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {
     await request.delete(`${baseURL}/live/layers`);
     await open(page, `${MOCK}&live=1`);

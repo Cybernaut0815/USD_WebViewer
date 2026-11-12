@@ -24,9 +24,28 @@ struct Gateway {
 };
 std::mutex gMutex;
 std::map<std::string, Gateway> gGateways;
-/// Bytes of URLs still in use. A usdz package is reopened for every file read
-/// from it; this keeps that from downloading the package again each time.
+/// Bytes of URLs still in use, so a URL open twice is read once.
 std::map<std::string, std::pair<std::weak_ptr<const char>, size_t>> gCache;
+/// Packages (URLs and dropped files), held until ReleasePackages: a usdz is reopened for every file read from it,
+/// textures included, long after the stage let go of it, and would be downloaded or read whole each time.
+std::map<std::string, std::pair<std::shared_ptr<const char>, size_t>> gPackages;
+
+bool IsPackage(const std::string& path) { return TfStringEndsWith(TfStringToLower(path), ".usdz"); }
+
+/// A held package's bytes, or null.
+std::shared_ptr<ArAsset> HeldPackage(const std::string& path)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    const auto held = gPackages.find(path);
+    return held == gPackages.end() ? nullptr : ArInMemoryAsset::FromBuffer(held->second.first, held->second.second);
+}
+
+void Hold(const std::string& path, const std::shared_ptr<const char>& bytes, size_t size)
+{
+    if (!IsPackage(path)) return;
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gPackages[path] = { bytes, size };
+}
 
 /// Length of the "scheme://" prefix, or 0 when `path` is not a URL.
 size_t SchemeLength(const std::string& path)
@@ -86,6 +105,13 @@ void WebResolver::Forget(const std::string& url)
 {
     const std::lock_guard<std::mutex> lock(gMutex);
     gCache.erase(url);
+    gPackages.erase(url);
+}
+
+void WebResolver::ReleasePackages()
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gPackages.clear();
 }
 
 std::string WebResolver::_CreateIdentifier(const std::string& assetPath, const ArResolvedPath& anchorAssetPath) const
@@ -117,6 +143,7 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
         // Dropped files are Blobs mounted with WORKERFS, which cannot be memory
         // mapped the way ArFilesystemAsset wants; read them into memory instead.
         if (TfStringStartsWith(url, "/drop/")) {
+            if (std::shared_ptr<ArAsset> held = HeldPackage(url)) return held;
             std::FILE* file = std::fopen(url.c_str(), "rb");
             if (!file) return nullptr;
             std::fseek(file, 0, SEEK_END);
@@ -129,11 +156,14 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
                 std::free(data);
                 return nullptr;
             }
-            return ArInMemoryAsset::FromBuffer(std::shared_ptr<const char>(data, [](const char* p) { std::free(const_cast<char*>(p)); }), size_t(size));
+            const std::shared_ptr<const char> bytes(data, [](const char* p) { std::free(const_cast<char*>(p)); });
+            Hold(url, bytes, size_t(size));
+            return ArInMemoryAsset::FromBuffer(bytes, size_t(size));
         }
         return ArDefaultResolver::_OpenAsset(resolvedPath);
     }
 
+    if (std::shared_ptr<ArAsset> held = HeldPackage(url)) return held;
     std::string request = url, auth;
     {
         const std::lock_guard<std::mutex> lock(gMutex);
@@ -175,5 +205,6 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
         const std::lock_guard<std::mutex> lock(gMutex);
         gCache[url] = { bytes, size };
     }
+    Hold(url, bytes, size);
     return ArInMemoryAsset::FromBuffer(bytes, size);
 }

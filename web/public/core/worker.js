@@ -17,6 +17,23 @@ boot.then(
   (error) => postMessage({ fatal: `USD core failed to start: ${error?.message ?? error}` }),
 );
 
+// The first stage opened pays about 0.2 s for the plugin, schema and imaging registries. A page that opens nothing at
+// once (no src) pays it here instead, on a tiny stage half a second after the core is ready, so its first open is
+// that much faster; one that opened a stage by then skips it.
+let opened = false;
+boot.then(() =>
+  setTimeout(() => {
+    if (opened) return;
+    try {
+      core.FS.writeFile('/tmp/warm.usda', '#usda 1.0\ndef Mesh "M" {}\n');
+      core.openStage('/tmp/warm.usda', false);
+      core.flush(1000);
+      core.closeStage();
+    } catch {}
+    core.takeDiagnostics(); // not the page's
+  }, 500),
+);
+
 // Calls answered here instead of by the wasm module.
 const local = {
   // Dropped files are mounted lazily (no copy until USD reads them) as plain paths.
@@ -46,6 +63,7 @@ function buffers(value, out = []) {
 onmessage = async ({ data: { id, method, args } }) => {
   try {
     await boot;
+    if (method === 'openStage') opened = true;
     let result;
     if (local[method]) result = local[method](...args);
     else {

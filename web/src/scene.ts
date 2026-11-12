@@ -61,6 +61,8 @@ export interface Item {
   instanceBuffer: THREE.InstancedInterleavedBuffer | null;
   /** Overlays of an instanced item sit in root, not under its object: dropped with the object. */
   overlays: THREE.Object3D[];
+  /** The selection highlight drawn over the item, made on its first selection and kept (hidden) until the object goes. */
+  fill: THREE.Mesh | null;
   curves: { points?: Float32Array; counts?: Uint32Array; widths?: Float32Array | null; colors?: Float32Array | null };
   lightType: string;
   lightParams: LightParams | null;
@@ -110,7 +112,15 @@ export class SceneSync {
   version = 0;
   private sun: THREE.DirectionalLight | null = null; // the one light that casts shadows
   private readonly materials = new Map<Rid, MaterialRecord>();
+  /** Selection wires (the *-selwire display modes), made afresh for each selection. */
   private highlights: THREE.Object3D[] = [];
+  /** Items whose fill highlight shows. */
+  private lit = new Set<Item>();
+  /** When the sun's shadow map was last redrawn, and whether a redraw waits for its turn (see invalidate). */
+  private lastShadow = 0;
+  private shadowLater: ReturnType<typeof setTimeout> | 0 = 0;
+  /** The current flush has more pages coming. */
+  private paging = false;
   private selected: { rid: Rid; instances?: Uint32Array }[] = [];
   private activePath: Path | null = null;
   /** Items a drag moves ahead of the core, with the world matrix they started from. */
@@ -146,6 +156,9 @@ export class SceneSync {
   }
 
   apply(delta: RenderDelta): void {
+    // What can change the shadows; a delta with only the selection (or cameras) does not.
+    const content = !!(delta.removed || delta.materials || delta.meshes || delta.curves || delta.points || delta.lights || delta.xforms || delta.visibility);
+    this.paging = !!delta.more;
     delta.removed?.forEach((rid) => this.remove(rid));
     delta.materials?.forEach((entry) => this.material(entry));
     let rebuilt = !!delta.removed;
@@ -194,7 +207,7 @@ export class SceneSync {
         this.version++;
         this.lastBoundsBump = now;
       }
-      this.invalidate();
+      content ? this.invalidate() : this.host.invalidate();
       return;
     }
     this.pending = { rebuilt: false, structural: false, lights: false, selected: false, visibility: false, moved: false };
@@ -211,13 +224,28 @@ export class SceneSync {
       this.version++;
       this.lastBoundsBump = now;
     }
-    this.invalidate();
+    content ? this.invalidate() : this.host.invalidate();
   }
 
-  /** Redraws, and renders the sun's shadow map again: the stage's content changed (camera moves do not come here). */
+  /**
+   * Redraws, and renders the sun's shadow map again: the stage's content changed (camera moves and the selection do
+   * not come here). While a stage streams in (more pages, materials or textures to come) the shadow map, which draws
+   * every caster, is redrawn at most twice a second, and once more after the last change.
+   */
   private invalidate(): void {
-    if (this.sun) this.sun.shadow.needsUpdate = true;
     this.host.invalidate();
+    if (!this.sun) return;
+    const now = performance.now();
+    const wait = this.paging || this.building.size ? this.lastShadow + 500 - now : 0;
+    if (wait <= 0) {
+      this.sun.shadow.needsUpdate = true;
+      this.lastShadow = now;
+    } else if (!this.shadowLater) {
+      this.shadowLater = setTimeout(() => {
+        this.shadowLater = 0;
+        this.invalidate();
+      }, wait);
+    }
   }
 
   /** Forces the next frame to refit bounds and shadows (after a drag). */
@@ -352,7 +380,7 @@ export class SceneSync {
     if (path === this.activePath) return;
     this.activePath = path;
     if (this.selected.length) this.highlight(this.selected);
-    this.invalidate();
+    this.host.invalidate(); // the highlight only: no shadows
   }
 
   setCullBackfaces(cull: boolean): void {
@@ -412,6 +440,7 @@ export class SceneSync {
         instances: null,
         instanceBuffer: null,
         overlays: [],
+        fill: null,
         curves: {},
         lightType: '',
         lightParams: null,
@@ -446,6 +475,7 @@ export class SceneSync {
     // until the flush's last page rebuilds them; disposing twice is harmless.
     for (const proxy of item.overlays) dispose(proxy);
     item.overlays = [];
+    item.fill = null; // one of the overlays
     this.root.remove(item.object);
     item.object.traverse((o) => (o as any).isLight && (o as THREE.Light).dispose());
     if ((item.object as THREE.InstancedMesh).isInstancedMesh) (item.object as THREE.InstancedMesh).dispose();
@@ -458,6 +488,7 @@ export class SceneSync {
     object.userData.rid = item.rid;
     object.matrixAutoUpdate = false;
     if (!item.instances) object.matrix.copy(item.matrix);
+    else if (item.instances.length === 16 && !(object as THREE.InstancedMesh).isInstancedMesh) object.matrix.fromArray(item.instances);
     item.object = object;
     this.root.add(object);
     this.updateVisible(item);
@@ -611,9 +642,13 @@ export class SceneSync {
     }
     if (e.instances !== undefined) {
       const mesh = item.object as THREE.InstancedMesh | null;
-      const same = !!e.instances && mesh?.isInstancedMesh && item.instances?.length === e.instances.length;
+      const one = e.instances?.length === 16;
+      const same = !!e.instances && !!mesh && item.instances?.length === e.instances.length && (one ? !mesh.isInstancedMesh : mesh.isInstancedMesh);
       item.instances = e.instances;
-      if (same && !rebuild) {
+      if (same && !rebuild && one) {
+        mesh!.matrix.fromArray(e.instances!); // a single instance is a plain mesh placed by it
+        moved = true;
+      } else if (same && !rebuild) {
         (mesh!.instanceMatrix.array as Float32Array).set(e.instances!);
         mesh!.instanceMatrix.needsUpdate = true;
         if (item.instanceBuffer) item.instanceBuffer.needsUpdate = true;
@@ -624,7 +659,9 @@ export class SceneSync {
     if (rebuild) {
       const materials = this.materialsFor(item, !!g.attributes.color);
       let object: THREE.Mesh;
-      if (item.instances) {
+      // A single instance (most prototypes of an instanced stage) draws as a plain mesh placed by its matrix: three
+      // builds every InstancedMesh's shaders on its own (its uuid is in the cache key), plain meshes share theirs.
+      if (item.instances && item.instances.length !== 16) { // none at all is an InstancedMesh drawing nothing
         // Built with one instance: the attribute below replaces the constructor's own array.
         const instanced = new THREE.InstancedMesh(g, materials, 1);
         instanced.instanceMatrix = new THREE.InstancedBufferAttribute(item.instances, 16);
@@ -846,43 +883,61 @@ export class SceneSync {
     for (const proxy of this.highlights) dispose(proxy);
     this.highlights = [];
     const wire = this.displayMode.endsWith('selwire');
+    const lit = new Set<Item>();
     // ponytail: one overlay mesh per selected item; switch to an outline pass above a few thousand.
     for (const { rid, instances } of selected.slice(0, 2000)) {
       const item = this.items.get(rid);
       if (!item) continue;
       const active = this.activePath !== null && (item.path === this.activePath || item.path.startsWith(`${this.activePath}/`));
-      const proxy = wire
-        ? this.lines(item, active ? ACTIVE_LINE : SELECTED_LINE, instances)
-        : this.overlay(item, active ? ACTIVE : HIGHLIGHT, instances);
+      if (!wire) {
+        if (this.fill(item, active ? ACTIVE : HIGHLIGHT, instances)) lit.add(item);
+        continue;
+      }
+      const proxy = this.lines(item, active ? ACTIVE_LINE : SELECTED_LINE, instances);
       if (proxy) this.highlights.push(proxy);
     }
+    for (const item of this.lit) if (!lit.has(item) && item.fill) item.fill.visible = false;
+    this.lit = lit;
   }
 
-  /** A mesh drawn on top of an item with another material (highlight), sharing its geometry. */
-  private overlay(item: Item, material: THREE.Material, instances?: Uint32Array): THREE.Mesh | null {
-    if (item.kind !== 'mesh' || !item.object || !item.geometry) return null;
-    let proxy: THREE.Mesh;
-    if (item.instances) {
-      const source = item.object as THREE.InstancedMesh;
-      const instanced = new THREE.InstancedMesh(item.geometry, material, 1);
-      // The whole item shares the mesh's own matrices (no copy); a partial selection picks its own.
-      instanced.instanceMatrix =
-        instances || !source.isInstancedMesh ? new THREE.InstancedBufferAttribute(pickInstances(item.instances, instances), 16) : source.instanceMatrix;
-      instanced.count = instances ? instances.length : item.instances.length / 16;
-      proxy = instanced;
-    } else proxy = new THREE.Mesh(item.geometry, material);
+  /**
+   * Shows an item's highlight: a mesh drawn on top of it with another material, sharing its geometry. It is made on
+   * the item's first selection and then kept, hidden when deselected: a new overlay would cost a shader build (an
+   * instanced one always, its uuid is in three's cache key) and a disposed one takes its shared build with it.
+   */
+  private fill(item: Item, material: THREE.Material, instances?: Uint32Array): boolean {
+    if (item.kind !== 'mesh' || !item.object || !item.geometry) return false;
+    let proxy = item.fill;
+    if (!proxy) {
+      // An instanced highlight has room for every instance; a partial selection draws the first `count`.
+      proxy = instanced(item) ? new THREE.InstancedMesh(item.geometry, material, item.instances!.length / 16) : new THREE.Mesh(item.geometry, material);
+      this.place(item, proxy);
+      if (!instanced(item)) item.overlays.push(proxy); // released with the object
+      item.fill = proxy;
+    }
     // With subsets the geometry has groups; a single material ignores them only when unset.
-    if (item.geometry.groups.length) proxy.material = item.geometry.groups.map(() => material);
-    return this.place(item, proxy);
+    const groups = item.geometry.groups.length;
+    if ((groups ? (proxy.material as THREE.Material[])[0] : proxy.material) !== material) proxy.material = groups ? item.geometry.groups.map(() => material) : material;
+    if (instanced(item)) {
+      const fill = proxy as THREE.InstancedMesh;
+      const all = item.instances!;
+      if (instances) instances.forEach((index, i) => fill.instanceMatrix.array.set(all.subarray(index * 16, index * 16 + 16), i * 16));
+      else fill.instanceMatrix.array.set(all);
+      fill.count = instances ? instances.length : all.length / 16;
+      fill.instanceMatrix.needsUpdate = true;
+      fill.visible = item.object.visible;
+    } else proxy.visible = true;
+    return true;
   }
 
   /** The item's authored face edges drawn as lines (wireframe, selection wire), sharing its positions. */
   private lines(item: Item, material: THREE.LineBasicNodeMaterial, instances?: Uint32Array): THREE.LineSegments | null {
     if (item.kind !== 'mesh' || !item.object || !item.edges) return null;
-    if (!item.instances) return this.place(item, new THREE.LineSegments(item.edges, material));
+    if (!instanced(item)) return this.place(item, new THREE.LineSegments(item.edges, material));
+    const all = item.instances!;
     const buffer = instances
-      ? new THREE.InstancedInterleavedBuffer(pickInstances(item.instances, instances), 16, 1)
-      : (item.instanceBuffer ??= new THREE.InstancedInterleavedBuffer(item.instances, 16, 1));
+      ? new THREE.InstancedInterleavedBuffer(pickInstances(all, instances), 16, 1)
+      : (item.instanceBuffer ??= new THREE.InstancedInterleavedBuffer(all, 16, 1));
     const proxy = new THREE.LineSegments(item.edges, instancedLines(material, buffer));
     (proxy as any).count = buffer.count; // the renderer draws `count` instances of any object
     proxy.userData.ownsMaterial = true;
@@ -895,11 +950,12 @@ export class SceneSync {
       const item = proxy.userData.item as Item | undefined;
       if (item?.object) proxy.visible = item.object.visible;
     }
+    for (const item of this.lit) if (instanced(item) && item.fill) item.fill.visible = item.object!.visible;
   }
 
   /** Overlays of plain items are children (they follow the transform); instanced ones sit in root. */
   private place<T extends THREE.Object3D>(item: Item, proxy: T): T {
-    if (item.instances) {
+    if (instanced(item)) {
       proxy.frustumCulled = false;
       proxy.visible = item.object!.visible;
       proxy.userData.item = item;
@@ -914,6 +970,11 @@ export class SceneSync {
 
 /* ---------- helpers ---------- */
 
+/** The item draws as an InstancedMesh: more than one instance (a single one is a plain mesh placed by its matrix). */
+function instanced(item: Item): boolean {
+  return !!(item.object as THREE.InstancedMesh | null)?.isInstancedMesh;
+}
+
 /** 16 floats per chosen instance (a copy of all of them when `picked` is omitted). */
 function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
   if (!picked) return all.slice();
@@ -923,6 +984,8 @@ function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
 }
 
 function dispose(proxy: THREE.Object3D): void {
+  const item = proxy.userData.item as Item | undefined; // an instanced item's overlay: no longer one of them
+  if (item) item.overlays = item.overlays.filter((o) => o !== proxy);
   proxy.removeFromParent();
   if ((proxy as THREE.InstancedMesh).isInstancedMesh) (proxy as THREE.InstancedMesh).dispose();
   else released(proxy);

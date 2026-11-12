@@ -85,6 +85,7 @@ std::string openStage(const std::string& url, bool loadPayloads)
 {
     const ArResolverScopedCache cache;
     gBridge.SetStage(nullptr);
+    WebResolver::ReleasePackages(); // the last stage's
     const std::string info = gStage.Open(url, loadPayloads);
     gBridge.SetStage(gStage.Get());
     return info;
@@ -94,6 +95,7 @@ void closeStage()
 {
     gBridge.SetStage(nullptr);
     gStage.Close();
+    WebResolver::ReleasePackages();
 }
 
 std::string reloadStage() { return gStage.Reload(); }

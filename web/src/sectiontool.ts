@@ -11,13 +11,16 @@ import type { Viewport } from './viewport.ts';
 
 /**
  * The selected section entries, indices into the section's planes and boxes. One entry: a plane, or a box with its
- * chosen handles (0-3 the footprint corners, 4 the bottom, 5 the top; without them every one is chosen); rotate turns
- * it instead of moving it. Several entries: the planes, and the boxes with their chosen handles, moved together.
+ * chosen handles (0-3 the footprint corners, 4 the bottom, 5 the top; without them every one is chosen); rotate: the
+ * gizmo turns it (the Rotate tool). Several entries: the planes, and the boxes with their chosen handles.
  */
 export type SectionGizmo =
   | { plane: number; rotate?: boolean }
   | { box: number; rotate?: boolean; handles?: number[] }
   | { planes: number[]; boxes: { box: number; handles?: number[] }[] };
+
+/** What the gizmo does with the selection: nothing (Select, Scale, Navigate), move it (Move) or turn it (Rotate). */
+export type SectionMode = 'none' | 'translate' | 'rotate';
 
 /** The layer of the viewer's helpers: the view's cameras draw it, screenshot() and new cameras (layer 0 only) do not. */
 export const HELPERS = 31;
@@ -67,11 +70,12 @@ function write(lines: THREE.LineSegments, points: Vec3[]): void {
  * a plane as a square as wide as the stage around where the stage's centre falls on it, with a dot there and an arrow
  * to the side kept; a box with a dot at the top and bottom of each corner (the pair is one vertical edge: one footprint
  * corner) and one on each face. A click on a dot chooses that handle (a plane's dot: the plane), on an outline the whole
- * entry; Shift or Ctrl+click adds or removes it; a click on nothing else lets go of all (not in the navigate tool). The
- * translate gizmo in the middle of the chosen handles moves them together: corners in plan only, faces up and down
- * only, planes by its shift along their normals; a plane alone only along its normal. With rotate (one entry) a plane
- * tilts about its dot and a box's footprint turns about the up axis through its middle. A change of the selection fires
- * Viewport.onsectiongizmo. Each drag step is applied from the drag's start through Viewport.setSection (source
+ * entry; Shift or Ctrl+click adds or removes it; a click on anything else lets go of all (not in the navigate tool); a
+ * right click opens Viewport.onsectionmenu for the selection. The gizmo follows Viewport.sectionMode: translate moves
+ * the chosen handles together (corners in plan only, faces up and down only, planes by the move's part along their
+ * normals; a plane alone only along its normal); rotate turns the selected entries about the middle of their centres (a
+ * plane alone tilts about its dot; with a box only about the up axis, so boxes stay upright). A change of the selection
+ * fires Viewport.onsectiongizmo. Each drag step is applied from the drag's start through Viewport.setSection (source
  * 'gizmo'); a step the section could not be drawn after is refused.
  */
 export class SectionTool {
@@ -91,7 +95,6 @@ export class SectionTool {
   private planes = new Set<number>();
   /** Selected boxes and their chosen handles: 0-3 the footprint corners, 4 the bottom, 5 the top. */
   private boxes = new Map<number, Set<number>>();
-  private rotate = false;
   /** The dots and outline segments as last drawn, in stage space, for the pointer. */
   private dotHits: { p: Vec3; hit: Hit }[] = [];
   private edgeHits: { a: Vec3; b: Vec3; hit: Hit }[] = [];
@@ -170,6 +173,24 @@ export class SectionTool {
       },
       { signal, capture: true },
     );
+    // A right click (not a right drag, which pans) on a dot or outline: selects it unless it is selected, and opens the
+    // section menu instead of the prim menu.
+    let right: [number, number] | null = null;
+    canvas.addEventListener('pointerdown', (e) => (right = e.button === 2 ? [e.clientX, e.clientY] : null), { signal });
+    canvas.parentElement!.addEventListener(
+      'contextmenu',
+      (e) => {
+        const start = right;
+        right = null;
+        const hit = e.target === canvas && start && Math.hypot(e.clientX - start[0], e.clientY - start[1]) <= 4 ? this.hitAt(e.clientX, e.clientY) : null;
+        if (!hit) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!(hit.box ? this.boxes.has(hit.index) : this.planes.has(hit.index))) this.choose(hit, false);
+        viewport.onsectionmenu(e.clientX, e.clientY);
+      },
+      { signal, capture: true },
+    );
     const release = (e: PointerEvent) => {
       const press = this.press;
       if (!press || e.pointerId !== press.id) return;
@@ -209,9 +230,10 @@ export class SectionTool {
     const planes = sorted(this.planes);
     const boxes = sorted(this.boxes.keys());
     if (planes.length + boxes.length > 1) return { planes, boxes: boxes.map((box) => ({ box, handles: sorted(this.boxes.get(box)!) })) };
-    if (planes.length) return { plane: planes[0], rotate: this.rotate };
+    const rotate = this.viewport.sectionMode === 'rotate'; // the one-entry forms carry the gizmo's mode, as before
+    if (planes.length) return { plane: planes[0], rotate };
     if (!boxes.length) return null;
-    return this.rotate ? { box: boxes[0], rotate: true } : { box: boxes[0], rotate: false, handles: sorted(this.boxes.get(boxes[0])!) };
+    return rotate ? { box: boxes[0], rotate } : { box: boxes[0], rotate, handles: sorted(this.boxes.get(boxes[0])!) };
   }
 
   /** The selected planes and boxes, by index. */
@@ -221,24 +243,22 @@ export class SectionTool {
 
   /**
    * Selects afresh: a box with the handles given (integers 0-5; anything else is ignored) or every one; entries the
-   * section lacks are left out, as is rotate with several entries. With notify, fires onsectiongizmo when it changed.
+   * section lacks are left out (rotate is the tool's: see the element). With notify, fires onsectiongizmo when it changed.
    */
   select(target: SectionGizmo | null, notify = false): void {
     const before = JSON.stringify(this.value);
     const section = this.viewport.section;
-    const t = (target ?? {}) as { plane?: unknown; box?: unknown; rotate?: unknown; handles?: unknown; planes?: unknown; boxes?: unknown };
+    const t = (target ?? {}) as { plane?: unknown; box?: unknown; handles?: unknown; planes?: unknown; boxes?: unknown };
     const index = (i: unknown, count: number): i is number => Number.isInteger(i) && (i as number) >= 0 && (i as number) < count;
     const chosen = (handles: unknown) => new Set(Array.isArray(handles) ? handles.filter((h) => Number.isInteger(h) && h >= 0 && h <= 5) : ALL);
     this.planes = new Set();
     this.boxes = new Map();
-    this.rotate = false;
     if (index(t.plane, section.planes.length)) this.planes.add(t.plane);
     else if (index(t.box, section.boxes.length)) this.boxes.set(t.box, chosen(t.handles));
     else {
       for (const i of Array.isArray(t.planes) ? t.planes : []) if (index(i, section.planes.length)) this.planes.add(i);
       for (const b of Array.isArray(t.boxes) ? t.boxes : []) if (index(b?.box, section.boxes.length)) this.boxes.set(b.box, chosen(b.handles));
     }
-    this.rotate = t.rotate === true && this.planes.size + this.boxes.size === 1 && ('plane' in t || 'box' in t);
     this.start = null; // a drag under way stops moving what was selected
     this.changed(before, notify);
   }
@@ -251,7 +271,6 @@ export class SectionTool {
     for (const i of this.planes) if (i >= planes.length) this.planes.delete(i);
     for (const i of this.boxes.keys()) if (i >= boxes.length) this.boxes.delete(i);
     if (this.planes.size + this.boxes.size !== count) this.start = null; // a drag under way lost what it moved
-    if (this.planes.size + this.boxes.size !== 1) this.rotate = false;
     this.changed(before, true);
   }
 
@@ -260,13 +279,12 @@ export class SectionTool {
     const shift = (i: number, gone: number[]) => i - gone.filter((g) => g < i).length;
     this.planes = new Set([...this.planes].filter((i) => !planes.includes(i)).map((i) => shift(i, planes)));
     this.boxes = new Map([...this.boxes].filter(([i]) => !boxes.includes(i)).map(([i, chosen]) => [shift(i, boxes), chosen]));
-    if (this.planes.size + this.boxes.size !== 1) this.rotate = false;
     this.start = null; // the indices a drag under way holds are stale
   }
 
-  /** Esc: drops the chosen box handles; false when there were none (planes and rotate have none). */
+  /** Esc: drops the chosen box handles; false when there were none (planes have none). */
   clear(): boolean {
-    if (this.rotate || ![...this.boxes.values()].some((chosen) => chosen.size)) return false;
+    if (![...this.boxes.values()].some((chosen) => chosen.size)) return false;
     const before = JSON.stringify(this.value);
     for (const chosen of this.boxes.values()) chosen.clear();
     this.changed(before, true);
@@ -356,7 +374,7 @@ export class SectionTool {
       const square = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
       const points = [...square.flatMap((p, i) => [p, square[(i + 1) % 4]]), c, tip, ...[barb(a, 1), barb(a, -1), barb(b, 1), barb(b, -1)].flatMap((p) => [tip, p])];
       draw(points.map((p) => p.toArray()), { box: false, index, dot: false }, selected);
-      dots.push({ p: c.toArray(), hit: { box: false, index, dot: true }, chosen: selected && !this.rotate });
+      dots.push({ p: c.toArray(), hit: { box: false, index, dot: true }, chosen: selected });
       this.planeAt.set(index, c);
     });
     section.boxes.forEach((e, index) => {
@@ -374,7 +392,7 @@ export class SectionTool {
       }
       [...lo, ...hi, at(mean, bottom), at(mean, top)].forEach((p, dot) => {
         const handle = handleOf(dot);
-        dots.push({ p, hit: { box: true, index, dot: true, handle }, chosen: !!chosen?.has(handle) && !this.rotate });
+        dots.push({ p, hit: { box: true, index, dot: true, handle }, chosen: !!chosen?.has(handle) });
       });
       this.boxAt.set(index, [...corners.map((c) => at(c, mid)), at(mean, bottom), at(mean, top), at(mean, mid)]);
     });
@@ -398,47 +416,35 @@ export class SectionTool {
       const n = new THREE.Vector3(...section.planes[plane].normal).normalize();
       if (Y.clone().applyQuaternion(proxy.quaternion).dot(n) < 1 - 1e-9) proxy.quaternion.setFromUnitVectors(Y, n);
     };
+    const mode = viewport.sectionMode;
     const [plane] = this.planes;
-    const [box] = this.boxes.keys();
-    if (this.rotate) {
-      // A plane tilts about its dot; a box's footprint turns about the up axis through its middle (the ring alone).
-      controls.setMode('rotate');
-      if (plane !== undefined) {
-        proxy.position.copy(this.planeAt.get(plane)!);
-        along(plane);
-      } else {
-        proxy.position.fromArray(this.boxAt.get(box)![6]);
-        proxy.quaternion.identity();
-      }
-      controls.setSpace(plane !== undefined ? 'local' : 'world');
-      controls.showX = controls.showZ = plane !== undefined;
-      controls.showY = plane === undefined;
-      controls.attach(proxy);
-      return;
-    }
-    controls.setMode('translate');
+    // Rotate turns the entries about the middle of their centres (a plane's dot, a box's middle); move takes the
+    // middle of the chosen handles.
     const handles = [...this.planes].map((i) => this.planeAt.get(i)!);
-    for (const [i, chosen] of this.boxes) for (const h of chosen) handles.push(new THREE.Vector3(...this.boxAt.get(i)![h]));
-    if (!handles.length) {
+    for (const [i, chosen] of this.boxes) for (const h of mode === 'rotate' ? [6] : chosen) handles.push(new THREE.Vector3(...this.boxAt.get(i)![h]));
+    if (mode === 'none' || !handles.length) {
       controls.detach();
       return;
     }
+    controls.setMode(mode);
     proxy.position.set(0, 0, 0);
     for (const h of handles) proxy.position.add(h);
     proxy.position.divideScalar(handles.length);
     if (this.planes.size === 1 && !this.boxes.size) {
-      // A plane alone moves along its normal: the proxy's local Y.
+      // A plane alone moves along its normal (the proxy's local Y) and tilts about its own X and Z.
       along(plane);
       controls.setSpace('local');
-      controls.showX = controls.showZ = false;
-      controls.showY = true;
+      controls.showX = controls.showZ = mode === 'rotate';
+      controls.showY = mode === 'translate';
     } else {
       // Corners move in plan, faces up and down, planes either way: only those axes show (world Y is the stage's up).
+      // A turn with a box is about the up axis only, so boxes stay upright.
       proxy.quaternion.identity();
       controls.setSpace('world');
       const chosen = [...this.boxes.values()].flatMap((c) => [...c]);
-      controls.showX = controls.showZ = this.planes.size > 0 || chosen.some((h) => h < 4);
-      controls.showY = this.planes.size > 0 || chosen.some((h) => h >= 4);
+      const planes = this.planes.size > 0;
+      controls.showX = controls.showZ = mode === 'rotate' ? !this.boxes.size : planes || chosen.some((h) => h < 4);
+      controls.showY = mode === 'rotate' || planes || chosen.some((h) => h >= 4);
     }
     controls.attach(proxy);
   }
@@ -453,16 +459,17 @@ export class SectionTool {
     const up = viewport.sync.upAxis;
     const section = viewport.section;
     const from = start.section;
-    const [plane] = this.planes;
-    const [box] = this.boxes.keys();
-    if (this.rotate && plane !== undefined) {
-      // The proxy stays on the plane's dot: the centre of the tilt.
-      section.planes[plane] = { point: proxy.position.toArray(), normal: Y.clone().applyQuaternion(proxy.quaternion).toArray() };
-    } else if (this.rotate) {
-      const b = structuredClone(from.boxes[box]);
-      const turn = proxy.quaternion.clone().multiply(start.quaternion.clone().invert()); // about the up axis through the middle
-      b.corners = b.corners.map((c) => new THREE.Vector3(...c).sub(start.position).applyQuaternion(turn).add(start.position).toArray()) as SectionBox['corners'];
-      section.boxes[box] = b;
+    if (viewport.sectionMode === 'rotate') {
+      // About the gizmo's middle o: a plane's dot (its point) and normal turn, and a box's corners (about the up axis).
+      const o = start.position;
+      const turn = proxy.quaternion.clone().multiply(start.quaternion.clone().invert());
+      const about = (p: THREE.Vector3) => p.sub(o).applyQuaternion(turn).add(o).toArray();
+      for (const i of this.planes) section.planes[i] = { point: about(start.planeAt.get(i)!.clone()), normal: new THREE.Vector3(...from.planes[i].normal).applyQuaternion(turn).toArray() };
+      for (const i of this.boxes.keys()) {
+        const b = structuredClone(from.boxes[i]);
+        b.corners = b.corners.map((c) => about(new THREE.Vector3(...c))) as SectionBox['corners'];
+        section.boxes[i] = b;
+      }
     } else {
       const shift = proxy.position.clone().sub(start.position);
       // A plane's point goes with its dot (the outline's middle): moved along its normal, the plane moves by the
@@ -491,7 +498,6 @@ export class SectionTool {
     const { planes, boxes } = this.viewport.section;
     if (hit.index >= (hit.box ? boxes : planes).length) return; // gone while the button was down (Del, a host)
     const before = JSON.stringify(this.value);
-    this.rotate = false;
     if (!toggle) {
       this.planes = new Set();
       this.boxes = new Map();

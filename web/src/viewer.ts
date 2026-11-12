@@ -98,9 +98,11 @@ const SHORTCUTS: [string, [string, string][]][] = [
   [
     'Section',
     [
-      ['Section (view)', 'Clipping planes and boxes: add, edit, flip, remove, hide their handles'],
+      ['Section (view)', 'Add clipping planes and boxes; hide their handles, turn them off, clear them'],
       ['Click a dot or outline', 'Select a plane, a box, or a box corner (its vertical edge), top or bottom'],
-      ['Shift / Ctrl+click', 'Add or remove it: the arrows move everything selected'],
+      ['Shift / Ctrl+click', 'Add or remove it'],
+      ['W / E', 'Move / rotate the selected planes and boxes together'],
+      ['Right click', 'Flip planes, show inside or cut out boxes, delete'],
       ['Del', 'Delete the selected planes and boxes'],
       ['Esc', 'Clear the box handles chosen; again: select none'],
     ],
@@ -208,7 +210,8 @@ export class UsdViewerElement extends HTMLElement {
   attributeChangedCallback(name: string, _old: string | null, value: string | null): void {
     if (name === 'src' && value) this.open(value).catch(() => {});
     if (name === 'panels') this.shadowRoot!.firstElementChild!.classList.toggle('bare', value === 'none');
-    if (name === 'readonly' && value !== null && this.tool !== 'navigate') this.tool = 'select'; // drops a transform gizmo
+    if (name === 'readonly' && value !== null && this.tool === 'scale') this.tool = 'select';
+    if (name === 'readonly' && this.viewport.tool instanceof TransformTool) this.viewport.tool.refresh(); // readonly: no prim gizmo
     // live="" means the relay at live/ next to the page (what the dev server provides).
     if (name === 'live') value === null ? this.session.live.disconnect() : this.session.live.connect(new URL(value || 'live/', document.baseURI).href);
   }
@@ -313,14 +316,15 @@ export class UsdViewerElement extends HTMLElement {
     return this.toolName;
   }
   set tool(name: ToolName) {
-    if (name === this.toolName || (this.hasAttribute('readonly') && name !== 'select' && name !== 'navigate')) return; // readonly: no transform tools
+    if (name === this.toolName || (this.hasAttribute('readonly') && name === 'scale')) return; // readonly: Move and Rotate for sections only
     this.toolName = name;
-    if (name !== 'select') this.sectionGizmo = null; // it shares the pointer with select only
     const current = this.viewport.tool;
     if (name === 'select') this.viewport.tool = new SelectTool(this.session);
     else if (name === 'navigate') this.viewport.tool = new NavigateTool(this.session);
     else if (current instanceof TransformTool) current.setMode(name);
-    else this.viewport.tool = new TransformTool(this.session, name);
+    else this.viewport.tool = new TransformTool(this.session, name, () => !this.hasAttribute('readonly'));
+    // Sections follow the tool like prims: Move and Rotate put their gizmo on the selected ones.
+    this.viewport.sectionMode = name === 'translate' || name === 'rotate' ? name : 'none';
     this.dispatchEvent(new Event('toolchange'));
   }
 
@@ -406,20 +410,24 @@ export class UsdViewerElement extends HTMLElement {
   }
 
   /**
-   * The section entries selected in the view, which the gizmo edits, or null: one plane, one box with its chosen
-   * `handles` (unless it rotates), or several entries (`planes`, `boxes` with their `handles`) moved together. Setting
-   * selects afresh (a box with the handles given, or every one chosen: the whole box moves), so a value read earlier
-   * brings the same choice back, and switches the tool to select; indices the section lacks are left out. Losing the
-   * entry and another tool let go of it. It keeps its indices when the section is replaced: a host that removes an
-   * earlier entry sets it again. It changes only `section` (source 'gizmo'), also when readonly. Fires
-   * `sectiongizmochange` when the value changed, a click, Esc or Del included.
+   * The section entries selected in the view, or null: one plane, one box with its chosen `handles` (left out when the
+   * tool rotates), or several entries (`planes`, `boxes` with their `handles`). Like prims, the Move and Rotate tools put
+   * their gizmo on them (`rotate` in a one-entry value: the Rotate tool); prims and sections are never selected
+   * together. Setting selects afresh (a box with the handles given, or every one chosen: the whole box moves), so a
+   * value read earlier brings the same choice back; indices the section lacks are left out. It also switches the tool
+   * to Rotate with `rotate: true`, otherwise to Move unless it is Move or Rotate already, and clears the prim
+   * selection. Losing the entry, or selecting a prim, lets go of it. It keeps its indices when the section is replaced:
+   * a host that removes an earlier entry sets it again. It changes only `section` (source 'gizmo'), also when readonly.
+   * Fires `sectiongizmochange` when the value changed, a click, Esc, Del or a tool switch included.
    */
   get sectionGizmo(): SectionGizmo | null {
     return this.viewport.sectionGizmo;
   }
   set sectionGizmo(target: SectionGizmo | null) {
     this.viewport.sectionGizmo = target;
-    if (this.viewport.sectionGizmo) this.tool = 'select';
+    if (!this.viewport.sectionGizmo) return;
+    if ((target as { rotate?: unknown }).rotate === true) this.tool = 'rotate';
+    else if (this.tool !== 'translate' && this.tool !== 'rotate') this.tool = 'translate';
   }
   /**
    * Outlines and dots on every section entry while the section is on (default), which a click selects; off, only the
@@ -685,7 +693,8 @@ export class UsdViewerElement extends HTMLElement {
       const removing = (e.key === 'Delete' || e.key === 'Backspace') && this.viewport.sectionGizmo !== null;
       // readonly: F and the H keys only (hiding writes the session layer, never saved; the Help window lists editing
       // keys), and Esc and Del for the section's selection (they edit the view only)
-      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH' && !gizmo && !removing) return;
+      const tools = plain && ((TOOL_KEYS[key] && TOOL_KEYS[key] !== 'scale') || key === 'n'); // readonly: Move and Rotate move sections only
+      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH' && !gizmo && !removing && !tools) return;
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();
@@ -738,10 +747,8 @@ export class UsdViewerElement extends HTMLElement {
     const set = (next: Section) => v.setSection(next, 'ui');
     const add = (plane: SectionPlane | null, box: SectionBox | null) => {
       set({ ...s, planes: plane ? [...s.planes, plane] : s.planes, boxes: box ? [...s.boxes, box] : s.boxes });
-      this.sectionGizmo = plane ? { plane: s.planes.length } : { box: s.boxes.length };
+      v.sectionGizmo = plane ? { plane: s.planes.length } : { box: s.boxes.length }; // selected; the tool stays
     };
-    /** Removes plane or box i: the selection stays on the other entries. */
-    const remove = (kind: 'plane' | 'box', i: number) => v.removeSections(kind === 'plane' ? [i] : [], kind === 'box' ? [i] : [], 'ui');
     /** Stage-space bounds of objects, of the whole stage by default: [min, max]. */
     const bounds = (objects?: THREE.Object3D[]) => {
       const box = v.bounds(objects).applyMatrix4(v.sync.root.matrixWorld.clone().invert());
@@ -778,30 +785,38 @@ export class UsdViewerElement extends HTMLElement {
       ...['X', 'Y', 'Z'].map((name, axis) => ({ label: `Plane ${name}${axis === up ? ' (horizontal)' : ''}`, action: centred(axis), disabled: s.planes.length >= MAX })),
       { label: 'Plane facing the view', action: facing, disabled: s.planes.length >= MAX },
       { label: this.selection.length ? 'Box around the selection' : 'Box around the stage', action: around, disabled: s.boxes.length >= MAX },
-      ...s.planes.flatMap((p, i) => [
-        { label: `Edit plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i }) },
-        { label: `Rotate plane ${i + 1}`, action: () => (this.sectionGizmo = { plane: i, rotate: true }) },
-        { label: `Flip plane ${i + 1}`, action: () => set({ ...s, planes: s.planes.with(i, { point: p.point, normal: p.normal.map((n) => -n) as Vec3 }) }) },
-        { label: `Remove plane ${i + 1}`, action: () => remove('plane', i) },
-      ]),
-      ...s.boxes.flatMap((b, i) => [
-        { label: `Edit box ${i + 1}`, action: () => (this.sectionGizmo = { box: i }) },
-        { label: `Rotate box ${i + 1}`, action: () => (this.sectionGizmo = { box: i, rotate: true }) },
-        { label: `Box ${i + 1}: ${b.keep === 'inside' ? 'cut out' : 'show inside'}`, action: () => set({ ...s, boxes: s.boxes.with(i, { ...b, keep: b.keep === 'inside' ? 'outside' : 'inside' }) }) },
-        { label: `Remove box ${i + 1}`, action: () => remove('box', i) },
-      ]),
       { label: v.sectionHandles ? 'Hide handles' : 'Show handles', action: () => (v.sectionHandles = !v.sectionHandles), disabled: empty },
       {
         label: s.on ? 'Sections off' : 'Sections on',
         action: () => {
-          if (s.on) this.sectionGizmo = null; // its handles go with the cut
+          if (s.on) v.sectionGizmo = null; // its handles go with the cut
           set({ ...s, on: !s.on });
         },
         disabled: empty,
       },
       { label: 'Clear', action: () => set(EMPTY), disabled: empty },
     ];
-    if (this.sectionGizmo) items.push({ label: 'Select none', action: () => (this.sectionGizmo = null) });
+    showMenu(this.shadowRoot!, x, y, items);
+  }
+
+  /** The menu of the selected planes and boxes (a right click on one): flip, show inside or cut out, delete. */
+  private selectedSectionMenu(x: number, y: number): void {
+    const v = this.viewport;
+    const s = this.section;
+    const { planes, boxes } = v.sectionSelected;
+    const inside = boxes.every((i) => s.boxes[i].keep === 'inside');
+    const many = (n: number, one: string, more: string) => (n > 1 ? more : one);
+    const items: MenuItem[] = [];
+    if (planes.length) {
+      const flipped = s.planes.map((p, i) => (planes.includes(i) ? { point: p.point, normal: p.normal.map((n) => -n || 0) as Vec3 } : p));
+      items.push({ label: many(planes.length, 'Flip plane', 'Flip planes'), action: () => v.setSection({ ...s, planes: flipped }, 'ui') });
+    }
+    if (boxes.length) {
+      const keep = inside ? 'outside' : 'inside';
+      const kept = s.boxes.map((b, i) => (boxes.includes(i) ? { ...b, keep } : b));
+      items.push({ label: inside ? 'Cut out' : 'Show inside', action: () => v.setSection({ ...s, boxes: kept }, 'ui') });
+    }
+    items.push({ label: 'Delete', action: () => v.removeSelectedSections() });
     showMenu(this.shadowRoot!, x, y, items);
   }
 
@@ -871,9 +886,10 @@ export class UsdViewerElement extends HTMLElement {
     }
     this.viewport.onsection = (source) => this.dispatchEvent(new CustomEvent('sectionchange', { detail: { source } }));
     this.viewport.onsectiongizmo = () => {
-      if (this.viewport.sectionGizmo && this.tool !== 'select') this.tool = 'select'; // a click on one in a transform tool
+      if (this.viewport.sectionGizmo && this.selection.length) this.session.select([], 'api'); // never both selected
       this.dispatchEvent(new Event('sectiongizmochange'));
     };
+    this.viewport.onsectionmenu = (x, y) => this.selectedSectionMenu(x, y);
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
       if (e.detail.cameras?.length || e.detail.removed?.length) this.dispatchEvent(new Event('cameraschange'));
@@ -899,6 +915,7 @@ export class UsdViewerElement extends HTMLElement {
     });
     on('selectionchange', async (e) => {
       const { paths, source, active } = e.detail;
+      if (paths.length) this.viewport.sectionGizmo = null; // never both selected
       this.tree.setSelection(paths, active);
       this.viewport.sync.setActive(active);
       this.picker.hidden = paths.length < 2;

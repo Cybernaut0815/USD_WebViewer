@@ -322,9 +322,18 @@ export class TransformTool extends SelectTool {
     if (this.controls && this.viewport) this.controls.camera = this.viewport.camera;
   };
 
-  constructor(session: UsdSession, mode: TransformMode) {
+  /** False keeps the gizmo off the prims (a readonly view, where Move and Rotate act on sections only). */
+  private readonly editable: () => boolean;
+
+  constructor(session: UsdSession, mode: TransformMode, editable: () => boolean = () => true) {
     super(session);
     this.mode = mode;
+    this.editable = editable;
+  }
+
+  /** Re-reads the targets, as after a selection change (editable may have changed). */
+  refresh(): void {
+    if (!this.dragging) this.track(this.retarget());
   }
 
   setMode(mode: TransformMode): void {
@@ -396,7 +405,7 @@ export class TransformTool extends SelectTool {
   /** Re-reads the selected prims that can move and puts the gizmo on the active one. */
   private async retarget(): Promise<void> {
     const session = this.session;
-    const chosen = session.selection.filter((p) => !session.isLocked(p));
+    const chosen = this.editable() ? session.selection.filter((p) => !session.isLocked(p)) : [];
     // A prim moves with its selected ancestor; moving both would apply the offset twice.
     const set = new Set(chosen);
     const roots = chosen.filter((p) => !hasAncestorIn(p, set));

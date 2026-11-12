@@ -661,7 +661,7 @@ export class SceneSync {
       let object: THREE.Mesh;
       // A single instance (most prototypes of an instanced stage) draws as a plain mesh placed by its matrix: three
       // builds every InstancedMesh's shaders on its own (its uuid is in the cache key), plain meshes share theirs.
-      if (item.instances && item.instances.length > 16) {
+      if (item.instances && item.instances.length !== 16) { // none at all is an InstancedMesh drawing nothing
         // Built with one instance: the attribute below replaces the constructor's own array.
         const instanced = new THREE.InstancedMesh(g, materials, 1);
         instanced.instanceMatrix = new THREE.InstancedBufferAttribute(item.instances, 16);
@@ -984,6 +984,8 @@ function pickInstances(all: Float32Array, picked?: Uint32Array): Float32Array {
 }
 
 function dispose(proxy: THREE.Object3D): void {
+  const item = proxy.userData.item as Item | undefined; // an instanced item's overlay: no longer one of them
+  if (item) item.overlays = item.overlays.filter((o) => o !== proxy);
   proxy.removeFromParent();
   if ((proxy as THREE.InstancedMesh).isInstancedMesh) (proxy as THREE.InstancedMesh).dispose();
   else released(proxy);

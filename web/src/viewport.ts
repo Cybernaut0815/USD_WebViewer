@@ -483,7 +483,7 @@ export class Viewport {
         rid ||= object.userData.rid ?? 0;
       }
       // A single instance is a plain mesh (see SceneSync.mesh): instance 0 of its item.
-      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? (this.sync.items.get(rid)?.instances ? 0 : -1) };
+      if (visible && rid && this.keeps(hit.point)) return { rid, instance: hit.instanceId ?? (this.sync.items.get(rid)?.instances?.length === 16 ? 0 : -1) };
     }
     return null;
   }

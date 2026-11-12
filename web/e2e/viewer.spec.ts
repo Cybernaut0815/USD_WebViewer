@@ -1598,7 +1598,7 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
-  test('a single instance draws as a plain mesh at its instance matrix, and picks as instance 0', async ({ page }) => {
+  test('a single instance draws as a plain mesh at its instance matrix and picks as instance 0; none draws nothing', async ({ page }) => {
     const errors = await open(page, MOCK);
     const result = await page.evaluate(async () => {
       const v = document.querySelector('usd-viewer') as UsdViewerElement;
@@ -1606,7 +1606,7 @@ test.describe('mock core', () => {
       const g = cube.geometry;
       const instance = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -5, 0, 0, 1]); // at x -5, clear of the rest
       v.session.emit('delta', {
-        meshes: [{ rid: 70, path: '/World/One/Proto', purpose: 'default', indices: new Uint32Array(g.index.array), positions: new Float32Array(g.attributes.position.array), normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, displayColor: [0.9, 0.9, 0.2], subsets: null, material: 0, instances: instance }],
+        meshes: [70, 71].map((rid) => ({ rid, path: rid === 70 ? '/World/One/Proto' : '/World/None/Proto', purpose: 'default', indices: new Uint32Array(g.index.array), positions: new Float32Array(g.attributes.position.array), normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, displayColor: [0.9, 0.9, 0.2], subsets: null, material: 0, instances: rid === 70 ? instance : new Float32Array(0) })),
       } as any);
       await v.idle();
       v.frame();
@@ -1616,9 +1616,11 @@ test.describe('mock core', () => {
       const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
       const p = one.position.clone().set(-5, 0, 0).project(v.three.camera);
       const pick = await v.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
-      return { instanced: !!one.isInstancedMesh, position, pick };
+      const none = v.three.objectsFor('/World/None/Proto')[0] as any;
+      return { instanced: !!one.isInstancedMesh, position, pick, none: [!!none.isInstancedMesh, none.count] };
     });
     expect(result.instanced).toBe(false);
+    expect(result.none).toEqual([true, 0]); // a prototype no instance uses
     expect(result.position.map((x: number) => +x.toFixed(6))).toEqual([-5, 0, 0]);
     expect(result.pick?.instanceIndex).toBe(0); // the mock core answers any rid but the cube's as an instance of /World/Instances
     expect(errors).toEqual([]);

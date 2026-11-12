@@ -407,7 +407,8 @@ void CollectTextures(HdMaterialNetworkInterface& network, std::set<std::string>*
     }
 }
 
-/// The standard library as far as a network needs it: the definitions of its nodes (with the ones they inherit from)
+/// The standard library as far as a network needs it: the definitions of its nodes (under the names HdMtlx looks
+/// them up by, with the ones they inherit from), ND_surface (HdMtlx's fallback for a node it finds no definition for)
 /// and every element that is not a definition or an implementation (types, units, geometric properties). HdMtlx
 /// imports the library it is given into the document it builds and validates all of it: with the whole library that
 /// cost about 200 ms per material, with this a few.
@@ -424,10 +425,11 @@ MaterialX::DocumentPtr LibraryFor(HdMaterialNetworkInterface& network)
         if (!child->isA<MaterialX::NodeDef>() && !child->isA<MaterialX::NodeGraph>() && !child->isA<MaterialX::Implementation>()) copy(child);
     }
     std::unordered_set<std::string> done;
-    for (const TfToken& node : network.GetNodeNames()) {
-        for (MaterialX::NodeDefPtr def = all->getNodeDef(network.GetNodeType(node).GetString()); def && done.insert(def->getName()).second;
-             def = all->getNodeDef(def->getInheritString())) copy(def);
-    }
+    const auto add = [&](const std::string& name) {
+        for (MaterialX::NodeDefPtr def = all->getNodeDef(name); def && done.insert(def->getName()).second; def = all->getNodeDef(def->getInheritString())) copy(def);
+    };
+    add("ND_surface");
+    for (const TfToken& node : network.GetNodeNames()) add(HdMtlxGetNodeDefName(network.GetNodeType(node).GetString()));
     return library;
 }
 

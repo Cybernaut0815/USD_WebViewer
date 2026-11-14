@@ -3,6 +3,7 @@
 
 let core;
 let drops = 0;
+const dropped = new Map(); // mounted path -> File, for reading a stage's root layer ahead (preload)
 
 // The wasm downloads from the start, alongside the glue (on its own, the glue would ask for it only once loaded).
 const WASM = new URL('usdcore.wasm', import.meta.url);
@@ -41,15 +42,43 @@ const local = {
   mount(files) {
     const dir = `/drop/${++drops}`;
     core.FS.mkdirTree(dir);
-    core.FS.mount(core.FS.filesystems.WORKERFS, { blobs: files.map((f) => ({ name: f.path, data: f.file })) }, dir);
+    local.remount(dir, files, false);
     return dir;
   },
   // The files behind a mount changed on disk: swap the Blobs, then reloadLayers re-reads them.
-  remount(dir, files) {
-    core.FS.unmount(dir);
+  remount(dir, files, mounted = true) {
+    if (mounted) core.FS.unmount(dir);
     core.FS.mount(core.FS.filesystems.WORKERFS, { blobs: files.map((f) => ({ name: f.path, data: f.file })) }, dir);
+    for (const path of dropped.keys()) if (path.startsWith(`${dir}/`)) dropped.delete(path);
+    for (const f of files) dropped.set(`${dir}/${f.path}`, f.file);
   },
 };
+
+// A big dropped root layer is read ahead, asynchronously with several reads in flight, into a block the core then
+// opens: about 4x the throughput of the synchronous reads WORKERFS makes (FileReaderSync). Smaller files and
+// sublayers are read by the core itself; so is this one if anything here fails.
+const CHUNK = 64 << 20;
+async function preload(path) {
+  const file = dropped.get(path);
+  if (!file || file.size < CHUNK) return;
+  const handle = core.beginFile(path, file.size);
+  if (!handle) return;
+  let complete = false;
+  try {
+    let next = 0;
+    const reader = async () => {
+      while (next < file.size) {
+        const at = next;
+        next += CHUNK;
+        const bytes = new Uint8Array(await file.slice(at, at + CHUNK).arrayBuffer());
+        if (!core.writeFile(handle, at, bytes)) throw new Error('not written');
+      }
+    };
+    await Promise.all([reader(), reader(), reader(), reader()]);
+    complete = true;
+  } catch {}
+  core.endFile(handle, complete);
+}
 
 const TEXT = new Set(['exportPrim']);
 
@@ -61,12 +90,17 @@ function buffers(value, out = []) {
   return out;
 }
 
-onmessage = async ({ data: { id, method, args } }) => {
+// One call at a time, in order, also while a preload waits for its reads.
+let queue = boot.catch(() => {});
+onmessage = ({ data }) => (queue = queue.then(() => answer(data)));
+
+async function answer({ id, method, args }) {
   try {
     await boot;
     let result;
     if (local[method]) result = local[method](...args);
     else {
+      if (method === 'openStage') await preload(args[0]);
       result = core[method](...args);
       // Convention: every string the core returns is JSON, except exported USD text.
       if (typeof result === 'string' && !TEXT.has(method)) result = JSON.parse(result);
@@ -76,4 +110,4 @@ onmessage = async ({ data: { id, method, args } }) => {
   } catch (error) {
     postMessage({ id, error: String(error?.message ?? error) });
   }
-};
+}

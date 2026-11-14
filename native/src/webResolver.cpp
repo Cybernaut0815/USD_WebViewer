@@ -48,6 +48,20 @@ void Cache(const std::string& path, const std::shared_ptr<const char>& bytes, si
     const std::lock_guard<std::mutex> lock(gMutex);
     gCache[path] = { bytes, size };
 }
+/// Dropped files read ahead by the worker (Provide), each taken by its first open.
+std::map<std::string, std::pair<std::shared_ptr<const char>, size_t>> gProvided;
+
+/// The bytes provided for a path, taken out of the map, or null.
+std::shared_ptr<ArAsset> TakeProvided(const std::string& path, std::shared_ptr<const char>* bytes, size_t* size)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    const auto found = gProvided.find(path);
+    if (found == gProvided.end()) return nullptr;
+    *bytes = found->second.first;
+    *size = found->second.second;
+    gProvided.erase(found);
+    return ArInMemoryAsset::FromBuffer(*bytes, *size);
+}
 /// Packages (URLs and dropped files), held until ReleasePackages: a usdz is reopened for every file read from it,
 /// textures included, long after the stage let go of it, and would be downloaded or read whole each time.
 std::map<std::string, std::pair<std::shared_ptr<const char>, size_t>> gPackages;
@@ -128,6 +142,19 @@ void WebResolver::Forget(const std::string& url)
     const std::lock_guard<std::mutex> lock(gMutex);
     gCache.erase(url);
     gPackages.erase(url);
+    gProvided.erase(url);
+}
+
+void WebResolver::Provide(const std::string& path, const std::shared_ptr<const char>& bytes, size_t size)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gProvided[path] = { bytes, size };
+}
+
+void WebResolver::DropProvided()
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gProvided.clear();
 }
 
 void WebResolver::ReleasePackages()
@@ -166,6 +193,13 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
         // mapped the way ArFilesystemAsset wants; read them into memory instead.
         if (TfStringStartsWith(url, "/drop/")) {
             if (std::shared_ptr<ArAsset> held = HeldPackage(url)) return held;
+            std::shared_ptr<const char> provided;
+            size_t providedSize = 0;
+            if (std::shared_ptr<ArAsset> asset = TakeProvided(url, &provided, &providedSize)) {
+                Hold(url, provided, providedSize);
+                Cache(url, provided, providedSize);
+                return asset;
+            }
             if (std::shared_ptr<ArAsset> cached = Cached(url)) return cached;
             std::FILE* file = std::fopen(url.c_str(), "rb");
             if (!file) return nullptr;

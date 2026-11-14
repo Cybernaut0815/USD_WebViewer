@@ -21,6 +21,11 @@ public:
     /// Lets go of the packages (usdz) read so far. They are kept until then: the page reads a package's textures one
     /// by one after the stage opened, and each read opens the package again.
     static void ReleasePackages();
+    /// Bytes of a dropped file (`/drop/...`) the worker read ahead, asynchronously and in parallel, which is several
+    /// times faster than the synchronous reads a mounted Blob allows. The next open of `path` takes them; Forget and
+    /// DropProvided let go of ones never opened.
+    static void Provide(const std::string& path, const std::shared_ptr<const char>& bytes, size_t size);
+    static void DropProvided();
 
 protected:
     std::string _CreateIdentifier(const std::string& assetPath, const ArResolvedPath& anchorAssetPath) const override;

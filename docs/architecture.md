@@ -51,7 +51,7 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 - **Editing:** gizmo editing with undo, change markers and Clear edits, saving, and reload-on-change.
 - **Live link:** layers pushed through the relay replace the open layer or add an overlay; viewer edits are published back.
 
-Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 MB, or 4 MB with brotli.
+Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 21 MB: 5.3 MB with gzip, 3.3 MB with brotli. The SDK and the core use native WebAssembly exceptions (`-fwasm-exceptions`); emulated in JavaScript, they routed every call that may unwind through a JS trampoline, about a third of the core's time on large stages.
 
 **Not built yet:** the Nucleus gateway. The CI workflow in `.github/workflows/ci.yml` has not run anywhere yet.
 

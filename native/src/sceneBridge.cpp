@@ -820,8 +820,37 @@ void SceneBridge::Removed(Rec* rec)
 }
 
 /// One mesh conversion: what GatherMesh read, and what BuildMeshJob made of it.
+/// The channels every rendered item has (transform, visibility, creation info), read from its data source on any
+/// thread and written into the delta on this one.
+struct CommonChannels {
+    GfMatrix4d matrix;
+    bool xform = false, visibility = false, visible = true, info = false;
+    std::string purpose;
+};
+
+namespace {
+
+void ReadCommon(const HdDataSourceLocatorSet& dirty, bool created, const HdContainerDataSourceHandle& source, CommonChannels* c)
+{
+    c->xform = dirty.Intersects(HdXformSchema::GetDefaultLocator());
+    if (c->xform) c->matrix = Xform(source);
+    c->visibility = dirty.Intersects(HdVisibilitySchema::GetDefaultLocator());
+    if (c->visibility) c->visible = Visible(source);
+    c->info = !created;
+    if (c->info) {
+        const HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(source);
+        const TfToken token = purpose ? Value(purpose.GetPurpose()) : TfToken();
+        c->purpose = token.IsEmpty() || token == HdRenderTagTokens->geometry ? std::string("default") : token.GetString();
+    }
+}
+
+} // namespace
+
 struct SceneBridge::MeshJob {
     Rec* rec = nullptr;
+    HdContainerDataSourceHandle source; // the prim's, fetched once
+    CommonChannels common;               // read on the threads with the mesh
+    SdfPath material;                    // bound material, when its binding is dirty
     bool created = false;
     bool ok = false; // GatherMesh found something to convert
     MeshIn in;
@@ -853,22 +882,24 @@ val SceneBridge::Flush(int maxItems)
     _vis.clear();
 
     // Channels every rendered item has: transform, visibility, creation info.
-    const auto common = [&](Rec& rec, const HdContainerDataSourceHandle& source, val& entry) {
-        if (rec.dirty.Intersects(HdXformSchema::GetDefaultLocator())) {
+    const auto writeCommon = [&](const Rec& rec, const CommonChannels& c, val& entry) {
+        if (c.xform) {
             _xformRids.push_back(rec.rid);
-            const GfMatrix4d matrix = Xform(source);
-            _xforms.insert(_xforms.end(), matrix.data(), matrix.data() + 16);
+            _xforms.insert(_xforms.end(), c.matrix.data(), c.matrix.data() + 16);
         }
-        if (rec.dirty.Intersects(HdVisibilitySchema::GetDefaultLocator())) {
+        if (c.visibility) {
             _visRids.push_back(rec.rid);
-            _vis.push_back(Visible(source) ? 1 : 0);
+            _vis.push_back(c.visible ? 1 : 0);
         }
-        if (!rec.created) {
+        if (c.info) {
             entry.set("path", rec.path.GetString());
-            const HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(source);
-            const TfToken token = purpose ? Value(purpose.GetPurpose()) : TfToken();
-            entry.set("purpose", token.IsEmpty() || token == HdRenderTagTokens->geometry ? std::string("default") : token.GetString());
+            entry.set("purpose", c.purpose);
         }
+    };
+    const auto common = [&](Rec& rec, const HdContainerDataSourceHandle& source, val& entry) {
+        CommonChannels c;
+        ReadCommon(rec.dirty, rec.created, source, &c);
+        writeCommon(rec, c, entry);
     };
 
     // Materials, lights, cameras and bookkeeping prims first: geometry refers to them.
@@ -1031,13 +1062,16 @@ val SceneBridge::Flush(int maxItems)
             if (source) {
                 item.entry = val::object();
                 item.entry.set("rid", rec.rid);
-                common(rec, source, item.entry);
-                if (rec.type == HdPrimTypeTokens->mesh) {
+                if (rec.type == HdPrimTypeTokens->mesh) { // its common channels and binding are read on the threads
                     item.job = std::make_unique<MeshJob>();
                     item.job->rec = &rec;
+                    item.job->source = source;
                     item.job->created = item.created;
-                } else if (rec.type == HdPrimTypeTokens->basisCurves) ConvertCurves(rec, item.created, item.entry);
-                else ConvertPoints(rec, item.created, item.entry);
+                } else {
+                    common(rec, source, item.entry);
+                    if (rec.type == HdPrimTypeTokens->basisCurves) ConvertCurves(rec, item.created, item.entry);
+                    else ConvertPoints(rec, item.created, item.entry);
+                }
             }
             items.push_back(std::move(item));
             ++it;
@@ -1054,6 +1088,8 @@ val SceneBridge::Flush(int maxItems)
         WorkParallelForN(jobs.size(), [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; i++) {
                 MeshJob& job = *jobs[i];
+                ReadCommon(job.rec->dirty, job.rec->created, job.source, &job.common);
+                if (job.rec->dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) job.material = BoundMaterial(job.source);
                 job.ok = GatherMesh(*job.rec, job.created, &job);
                 if (!job.ok) continue;
                 std::unique_lock<std::mutex> lock(exclusive, std::defer_lock);
@@ -1064,13 +1100,16 @@ val SceneBridge::Flush(int maxItems)
         for (Item& item : items) {
             Rec& rec = *item.rec;
             if (item.source) {
+                if (item.job) writeCommon(rec, item.job->common, item.entry);
                 if (item.job && item.job->ok) {
                     EmitMesh(*item.job, item.entry);
                     emittedBytes += item.job->bytes;
                     item.job->in = MeshIn(); // the JS copies exist now
                     item.job->out = MeshOut();
                 }
-                if (rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) item.entry.set("material", RidOf(BoundMaterial(item.source)));
+                if (rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) {
+                    item.entry.set("material", RidOf(item.job ? item.job->material : BoundMaterial(item.source)));
+                }
                 const bool instancing = UpdateInstancing(rec, item.source, item.entry);
                 if (rec.dirty.Intersects(HdSelectionsSchema::GetDefaultLocator())) UpdateSelection(rec, item.source);
                 // Items whose only change is a transform, visibility or selection travel in the packed channels.
@@ -1162,7 +1201,7 @@ bool SceneBridge::GatherMesh(Rec& rec, bool created, MeshJob* job)
     if (!topologyDirty && !primvarsDirty && !rec.edgesWanted) return false;
     job->edgesOnly = rec.edgesWanted && !topologyDirty && !primvarsDirty;
 
-    const HdContainerDataSourceHandle source = _scene->GetPrim(rec.path).dataSource;
+    const HdContainerDataSourceHandle source = job->source ? job->source : _scene->GetPrim(rec.path).dataSource;
     const HdMeshSchema mesh = HdMeshSchema::GetFromParent(source);
     const HdMeshTopologySchema topology = mesh.GetTopology();
     const HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(source);
@@ -1266,7 +1305,7 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
     const bool topologyDirty = job.topologyDirty, pointsOnly = job.pointsOnly;
     const std::vector<float>& constantColor = job.constantColor;
     const float constantOpacity = job.constantOpacity;
-    const HdContainerDataSourceHandle source = _scene->GetPrim(rec.path).dataSource;
+    const HdContainerDataSourceHandle source = job.source ? job.source : _scene->GetPrim(rec.path).dataSource;
     const bool full = !job.fast && job.full;
     if (!job.fast) {
         rec.vertexCount = out.positions.size() / 3;

@@ -32,8 +32,8 @@ add_executable(usdcore
     src/stage.cpp
     src/webResolver.cpp
 )
-# Thread and exception models must match the SDK's.
-target_compile_options(usdcore PRIVATE -pthread -fexceptions)
+# Thread and exception models must match the SDK's (native wasm exceptions, see sdk/CMakeLists.txt).
+target_compile_options(usdcore PRIVATE -pthread -fwasm-exceptions)
 
 # The USD libraries are linked by hand instead of through their imported targets:
 #  - Whole archives: USD registers types, schemas and plugins from static
@@ -52,7 +52,7 @@ target_link_options(usdcore PRIVATE -Wl,--whole-archive ${archives} -Wl,--no-who
 target_link_libraries(usdcore PRIVATE TBB::tbb MaterialXFormat MaterialXCore OpenSubdiv::osdCPU_static)
 
 target_link_options(usdcore PRIVATE
-    -pthread -fexceptions -lembind -lworkerfs.js --no-entry
+    -pthread -fwasm-exceptions -lembind -lworkerfs.js --no-entry
     -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=worker,node
     -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB
     # Meshes are read and built on all threads; the default allocator's one lock makes 8 threads

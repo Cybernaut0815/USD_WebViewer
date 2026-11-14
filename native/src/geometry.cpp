@@ -262,54 +262,95 @@ struct Layout {
 /// Welds the corners by (mesh vertex, per-corner values): the bits of each faceVarying or uniform
 /// channel's value at the corner, so equal values weld whether the primvar is indexed or written
 /// out per corner, and seams (different values) split. With `canon` (WeldPoints) a corner's mesh
-/// vertex is the first of its coincident points. One open-addressing table of output vertices, kept at
-/// most half full as they come; a row is rebuilt from its corner when compared (rows kept per corner
-/// were the largest allocation of a big mesh).
+/// vertex is the first of its coincident points.
+/// Most corners repeat the elements (primvar indices, face for uniform) of their vertex's first corner:
+/// those take its output vertex at once. Only the others are hashed, in an open-addressing table of output
+/// vertices kept at most half full, which gets a vertex's first row before its first hashed corner, so the
+/// result is the one hashing every corner would give. Rows are rebuilt from their corner when compared.
 void Weld(const Poly& poly, const std::vector<const PrimvarIn*>& perCorner, const std::vector<int>& cornerFace,
     const std::vector<uint32_t>& canon, Layout* layout)
 {
-    const size_t corners = poly.indices.size();
+    const size_t corners = poly.indices.size(), points = poly.points.size() / 3;
     size_t words = 1;
     for (const PrimvarIn* pv : perCorner) words += size_t(pv->size);
+    const auto element = [&](const PrimvarIn* pv, size_t corner) {
+        return pv->interpolation == kFaceVarying ? pv->indices[corner] : poly.baseFace(size_t(cornerFace[corner]));
+    };
     const auto fill = [&](size_t corner, uint32_t* row) {
         const int vertex = poly.indices[corner];
         row[0] = !canon.empty() && vertex >= 0 && size_t(vertex) < canon.size() ? canon[size_t(vertex)] : uint32_t(vertex);
         size_t w = 1;
         for (const PrimvarIn* pv : perCorner) {
             const size_t count = pv->values.size() / pv->size;
-            const int element = pv->interpolation == kFaceVarying ? pv->indices[corner] : poly.baseFace(cornerFace[corner]);
-            for (int k = 0; k < pv->size; k++) row[w++] = element >= 0 && size_t(element) < count ? Bits(pv->values[size_t(element) * pv->size + k]) : 0;
+            const int e = element(pv, corner);
+            for (int k = 0; k < pv->size; k++) row[w++] = e >= 0 && size_t(e) < count ? Bits(pv->values[size_t(e) * pv->size + k]) : 0;
         }
     };
     std::vector<uint32_t> row(words), other(words);
-    size_t capacity = 16;
-    while (capacity < poly.points.size() / 3 * 2) capacity <<= 1; // about a vertex per point; seams grow it
+    size_t capacity = 1024, used = 0;
     std::vector<uint32_t> table(capacity, UINT32_MAX); // the output vertex whose row owns the slot
+    const auto insert = [&](uint32_t vertex, const uint32_t* r) {
+        size_t slot = HashRow(r, words) & (capacity - 1);
+        while (table[slot] != UINT32_MAX) slot = (slot + 1) & (capacity - 1);
+        table[slot] = vertex;
+        if (++used * 2 <= capacity) return;
+        std::vector<uint32_t> old(capacity * 2, UINT32_MAX);
+        old.swap(table);
+        capacity <<= 1;
+        for (const uint32_t o : old) {
+            if (o == UINT32_MAX) continue;
+            fill(layout->rep[o], other.data());
+            size_t s = HashRow(other.data(), words) & (capacity - 1);
+            while (table[s] != UINT32_MAX) s = (s + 1) & (capacity - 1);
+            table[s] = o;
+        }
+    };
+    const auto added = [&](size_t corner, uint32_t key) {
+        const uint32_t o = uint32_t(layout->weld.size());
+        layout->cornerVertex[corner] = o;
+        layout->weld.push_back(key);
+        layout->rep.push_back(uint32_t(corner));
+        return o;
+    };
+    const size_t channels = perCorner.size();
+    std::vector<uint32_t> first(points, UINT32_MAX); // mesh vertex -> output vertex of its first corner
+    std::vector<int> firstElements(points * channels); // and that corner's elements, read where the vertex is
+    std::vector<uint8_t> hashed(points, 0);          // that output vertex is in the table
     layout->cornerVertex.assign(corners, 0);
     for (size_t corner = 0; corner < corners; corner++) {
+        const int vertex = poly.indices[corner];
+        const bool valid = vertex >= 0 && size_t(vertex) < points;
+        if (valid) {
+            const uint32_t key = canon.empty() ? uint32_t(vertex) : canon[size_t(vertex)];
+            int* elements = &firstElements[size_t(key) * channels];
+            if (first[key] == UINT32_MAX) {
+                first[key] = added(corner, key);
+                for (size_t c = 0; c < channels; c++) elements[c] = element(perCorner[c], corner);
+                continue;
+            }
+            bool same = true;
+            for (size_t c = 0; same && c < channels; c++) same = element(perCorner[c], corner) == elements[c];
+            if (same) {
+                layout->cornerVertex[corner] = first[key];
+                continue;
+            }
+            if (!hashed[key]) { // a seam here: the first row joins the table, so equal values still weld to it
+                hashed[key] = 1;
+                fill(layout->rep[first[key]], other.data());
+                insert(first[key], other.data());
+            }
+        }
         fill(corner, row.data());
         for (size_t slot = HashRow(row.data(), words) & (capacity - 1);; slot = (slot + 1) & (capacity - 1)) {
             const uint32_t owner = table[slot];
             if (owner == UINT32_MAX) {
-                table[slot] = layout->cornerVertex[corner] = uint32_t(layout->weld.size());
-                layout->weld.push_back(row[0]);
-                layout->rep.push_back(uint32_t(corner));
+                insert(added(corner, row[0]), row.data());
                 break;
             }
             fill(layout->rep[owner], other.data());
             if (row == other) {
                 layout->cornerVertex[corner] = owner;
                 break;
-            }
-        }
-        if (layout->weld.size() * 2 > capacity) {
-            capacity <<= 1;
-            table.assign(capacity, UINT32_MAX);
-            for (uint32_t o = 0; o < uint32_t(layout->weld.size()); o++) {
-                fill(layout->rep[o], other.data());
-                size_t slot = HashRow(other.data(), words) & (capacity - 1);
-                while (table[slot] != UINT32_MAX) slot = (slot + 1) & (capacity - 1);
-                table[slot] = o;
             }
         }
     }
@@ -502,29 +543,13 @@ MeshOut BuildMesh(MeshIn& in)
         offset += n;
     }
 
-    // Coincident points of a static polygonal mesh (CAD exports repeat them per face group) draw as one vertex.
-    const std::vector<uint32_t> canon = polygonal && in.staticPoints ? WeldPoints(poly, perPoint) : std::vector<uint32_t>();
-
+    // Face edges bucketed by their smaller vertex: a counting sort (two passes and one allocation; the meshes are built
+    // in parallel), then each bucket, a handful of records on ordinary meshes, sorted by the other vertex. An edge met
+    // twice from the same authored face lies inside it (refinement): not drawn. The buckets take 4 (count only) to 16
+    // (line pairs) bytes per corner: counting needs no layout and runs before the welds, line pairs after them, and
+    // both before the triangles, so no two of these large allocations coexist.
     Layout layout;
-    if (!perCorner.empty()) Weld(poly, perCorner, cornerFace, canon, &layout);
-    else if (!canon.empty()) {
-        layout.pointVertex.resize(size_t(vertices));
-        for (int v = 0; v < vertices; v++) {
-            if (canon[v] == uint32_t(v)) {
-                layout.pointVertex[v] = uint32_t(layout.weld.size());
-                layout.weld.push_back(uint32_t(v));
-            } else layout.pointVertex[v] = layout.pointVertex[canon[v]];
-        }
-        layout.vertices = layout.weld.size();
-    } else layout.vertices = size_t(vertices);
-    const size_t outVertices = layout.vertices;
-
-    out.flipped = poly.flip;
-    {
-        // Face edges bucketed by their smaller vertex: a counting sort (two passes and one allocation; the meshes
-        // are built in parallel), then each bucket, a handful of records on ordinary meshes, sorted by the other
-        // vertex. An edge met twice from the same authored face lies inside it (refinement): not drawn. Before the
-        // triangles, so the buckets are gone when those are allocated (each is 4 to 16 bytes per corner).
+    const auto faceEdges = [&] {
         struct EdgeRec {
             uint32_t other; // the larger vertex
             uint32_t a, b;  // in the layout of `indices`
@@ -602,7 +627,27 @@ MeshOut BuildMesh(MeshIn& in)
                 out.distinctEdges += size_t(std::unique(lo, hi) - lo);
             }
         }
-    }
+    };
+    if (!in.edges) faceEdges();
+
+    // Coincident points of a static polygonal mesh (CAD exports repeat them per face group) draw as one vertex.
+    const std::vector<uint32_t> canon = polygonal && in.staticPoints ? WeldPoints(poly, perPoint) : std::vector<uint32_t>();
+
+    if (!perCorner.empty()) Weld(poly, perCorner, cornerFace, canon, &layout);
+    else if (!canon.empty()) {
+        layout.pointVertex.resize(size_t(vertices));
+        for (int v = 0; v < vertices; v++) {
+            if (canon[v] == uint32_t(v)) {
+                layout.pointVertex[v] = uint32_t(layout.weld.size());
+                layout.weld.push_back(uint32_t(v));
+            } else layout.pointVertex[v] = layout.pointVertex[canon[v]];
+        }
+        layout.vertices = layout.weld.size();
+    } else layout.vertices = size_t(vertices);
+    const size_t outVertices = layout.vertices;
+
+    out.flipped = poly.flip;
+    if (in.edges) faceEdges();
 
     // Fan triangulation.
     out.indices.reserve(triangles * 3);
@@ -622,6 +667,10 @@ MeshOut BuildMesh(MeshIn& in)
         offset += n;
     }
 
+    // The corner map (4 bytes per corner) is read below only to keep it for faceVarying normals or to find the
+    // vertex of welded points at seams; otherwise it goes before the per-vertex streams are allocated. No layout.at()
+    // after this point.
+    if (!faceVaryingNormals && (canon.empty() || !layout.pointVertex.empty())) std::vector<uint32_t>().swap(layout.cornerVertex);
     // Per-vertex data in the output layout: each output vertex copies its mesh vertex.
     const auto gather = [&](const float* perVertex, int size) {
         if (layout.weld.empty()) return std::vector<float>(perVertex, perVertex + size_t(vertices) * size);

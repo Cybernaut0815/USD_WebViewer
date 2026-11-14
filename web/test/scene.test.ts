@@ -216,6 +216,93 @@ test("in the wire modes a batch draws its items' edges as one line draw sharing 
   assert.equal(mesh.getVisibleAt(4), false);
 });
 
+test('the viewer draws root without the batched stand-ins that show nothing; every other walk sees all of root', () => {
+  const { s, batches, item } = sync();
+  s.apply(row(80));
+  const drawn = () => {
+    let list: THREE.Object3D[] = [];
+    s.drawing(() => (list = [...s.root.children]));
+    return list;
+  };
+  assert.deepEqual(drawn(), batches(), 'only the batch');
+  assert.equal(s.root.children.length, 81, 'outside the draw: every stand-in and the batch');
+  // A shown selection fill, a host's child and leaving the batch each keep a stand-in drawn.
+  s.apply({ selected: [{ rid: 3 }] });
+  assert.ok(drawn().includes(item(3).object!), 'selected: its fill draws');
+  s.apply({ selected: [] });
+  assert.ok(!drawn().includes(item(3).object!), 'deselected: its fill hides');
+  item(4).object!.add(new THREE.Object3D());
+  assert.ok(drawn().includes(item(4).object!), "a host's child");
+  s.apply({ meshes: [{ rid: 5, positions: new Float32Array(24 * 3) }] });
+  assert.ok(drawn().includes(item(5).object!), 'out of its batch');
+  // The order is root's (three keys the lights' shaders on it), and root is whole again after the draw.
+  const order = s.root.children.filter((o) => drawn().includes(o));
+  assert.deepEqual(drawn(), order);
+  assert.equal(s.root.children.length, 81);
+  // A stand-in's world matrix follows an xform at once: the viewer's render no longer walks it.
+  s.apply({ xforms: { rids: new Uint32Array([6]), matrices: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 7, 8, 9, 1]) } });
+  assert.deepEqual(item(6).object!.matrixWorld.elements.slice(12, 15), [7, 8, 9]);
+  // A root change made inside the draw survives it.
+  const added = new THREE.Object3D();
+  s.drawing(() => s.root.add(added));
+  assert.ok(s.root.children.includes(added));
+});
+
+test('culling walks the slots: holes stay hidden, and a still view with nothing culled does no work', () => {
+  const { s, batches, item } = sync();
+  s.apply(row(64));
+  const mesh = batches()[0];
+  s.apply({ meshes: [{ rid: 2, positions: new Float32Array(24 * 3) }] }); // slot 1 becomes a hole
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1e7);
+  camera.position.set(64, 0, 1e5);
+  camera.updateMatrixWorld();
+  s.root.updateMatrixWorld(true);
+  s.cullDetail(camera, 1000);
+  s.cullDetail(null, 0);
+  assert.equal(mesh.getVisibleAt(1), false, 'the hole');
+  assert.equal(mesh.getVisibleAt(item(3).batched!.instance), true);
+  let calls = 0;
+  const setVisibleAt = mesh.setVisibleAt.bind(mesh);
+  mesh.setVisibleAt = (slot, visible) => (calls++, setVisibleAt(slot, visible));
+  s.cullDetail(null, 0);
+  assert.equal(calls, 0);
+});
+
+test('stats are counted once and redone when what they count changes', () => {
+  const { s } = sync();
+  s.apply(row(80));
+  assert.equal(s.stats().meshes, 80);
+  s.apply({ visibility: { rids: new Uint32Array([3]), visible: new Uint8Array([0]) } });
+  assert.equal(s.stats().meshes, 79);
+  s.apply({ removed: new Uint32Array([4]) });
+  assert.equal(s.stats().meshes, 78);
+  s.setPurposes(['render']);
+  assert.equal(s.stats().meshes, 0);
+});
+
+test('removed items leave root in one pass, with three\'s events and root\'s order kept', () => {
+  const { s, item } = sync();
+  s.apply(row(10));
+  const gone = [item(3).object!, item(7).object!];
+  const removed: THREE.Object3D[] = [];
+  s.root.addEventListener('childremoved', ({ child }) => removed.push(child));
+  const before = s.root.children.filter((o) => !gone.includes(o));
+  s.apply({ removed: new Uint32Array([3, 7]) });
+  assert.deepEqual(s.root.children, before);
+  assert.deepEqual(removed, gone);
+  assert.ok(gone.every((o) => o.parent === null));
+});
+
+test('a pick skips batched items whose bounding sphere the ray misses', () => {
+  const { s, item } = sync();
+  s.apply(row(64));
+  s.apply({ meshes: [cube(500)] }); // alone: never batched
+  const towards = (x: number) => new THREE.Ray(new THREE.Vector3(x, 0, 5), new THREE.Vector3(0, 0, -1));
+  assert.equal(s.mayHit(item(1), towards(0)), true, 'cube 1 sits at x 0');
+  assert.equal(s.mayHit(item(1), towards(10)), false);
+  assert.equal(s.mayHit(item(500), towards(10)), true, 'unbatched: always tested in full');
+});
+
 test('objectsUnder finds the items at and below the given paths, not siblings sharing a prefix', () => {
   const { s } = sync();
   s.apply({ meshes: [cube(1, { path: '/A/B' }), cube(2, { path: '/A/C/D' }), cube(3, { path: '/AB' })] });

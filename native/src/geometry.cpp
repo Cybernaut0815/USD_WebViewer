@@ -1,5 +1,6 @@
 #include "geometry.h"
 
+#include "pxr/base/work/loops.h"
 #include "pxr/imaging/pxOsd/meshTopology.h"
 #include "pxr/imaging/pxOsd/refinerFactory.h"
 #include "pxr/imaging/pxOsd/tokens.h"
@@ -8,6 +9,7 @@
 #include <opensubdiv/far/topologyRefiner.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 
@@ -357,6 +359,51 @@ void Weld(const Poly& poly, const std::vector<const PrimvarIn*>& perCorner, cons
     layout->vertices = layout->weld.size();
 }
 
+/// Faces in chunks for the passes over a mesh: chunk c holds faces [face[c], face[c + 1]), whose corners start at
+/// corner[c]. One chunk, the whole mesh (its loops stop at a malformed face), unless the build may use every thread
+/// (MeshIn::parallel): then chunks of a fixed size, so sums add up in the same order on any machine, which end before
+/// the first malformed face as the serial loops would.
+struct FaceChunks {
+    std::vector<size_t> face, corner;
+    size_t size() const { return face.size() - 1; }
+    /// fn(c) for every chunk, on all threads when there are several.
+    template <class Fn>
+    void each(Fn&& fn) const
+    {
+        if (size() == 1) fn(size_t(0));
+        else WorkParallelForN(size(), [&](size_t begin, size_t end) {
+            for (size_t c = begin; c < end; c++) fn(c);
+        });
+    }
+};
+
+FaceChunks ChunkFaces(const Poly& poly, bool parallel)
+{
+    FaceChunks chunks { { 0 }, { 0 } };
+    if (!parallel) {
+        chunks.face.push_back(poly.counts.size());
+        chunks.corner.push_back(poly.indices.size());
+        return chunks;
+    }
+    constexpr size_t kChunkFaces = size_t(1) << 18;
+    const size_t corners = poly.indices.size();
+    size_t offset = 0, f = 0;
+    for (; f < poly.counts.size(); f++) {
+        const int n = poly.counts[f];
+        if (n < 0 || offset + n > corners) break; // malformed topology
+        offset += size_t(n);
+        if ((f + 1) % kChunkFaces == 0) {
+            chunks.face.push_back(f + 1);
+            chunks.corner.push_back(offset);
+        }
+    }
+    if (chunks.face.back() != f) {
+        chunks.face.push_back(f);
+        chunks.corner.push_back(offset);
+    }
+    return chunks;
+}
+
 // ponytail: calibration knobs of FlatNormals. A face agrees within 30 degrees (either sign: a flipped normal
 // draws the same double-sided), and up to 1% of the area may disagree (slivers, export noise).
 constexpr double kFlatCos2 = 0.75;
@@ -365,47 +412,66 @@ constexpr double kFlatShare = 0.01;
 /// True when a polygonal mesh's normals only restate its faces: one value per face (uniform, or faceVarying
 /// constant over each face) parallel to the face itself. Flat shading draws them the same, without splitting
 /// every face into its own vertices. The normal of a face is the sum of its fan's cross products.
-bool FlatNormals(const Poly& poly, const std::vector<uint8_t>& drawn, const PrimvarIn& normals)
+bool FlatNormals(const Poly& poly, const std::vector<uint8_t>& drawn, const PrimvarIn& normals, const FaceChunks& chunks)
 {
     const bool uniform = normals.interpolation == kUniform;
     if (normals.size != 3 || (!uniform && normals.interpolation != kFaceVarying)) return false;
     const size_t corners = poly.indices.size(), count = normals.values.size() / 3;
     if (!uniform && normals.indices.size() != corners) return false;
-    double total = 0, disagreeing = 0;
-    size_t offset = 0;
-    for (size_t f = 0; f < poly.counts.size(); f++) {
-        const int n = poly.counts[f];
-        if (n < 0 || offset + n > corners) break;
-        if (drawn[f]) {
-            const int element = uniform ? poly.baseFace(f) : normals.indices[offset];
-            if (element < 0 || size_t(element) >= count) return false;
-            const float* value = &normals.values[size_t(element) * 3];
-            for (int i = 1; !uniform && i < n; i++) {
-                const int other = normals.indices[offset + i];
-                if (other == element) continue;
-                if (other < 0 || size_t(other) >= count || !std::equal(value, value + 3, &normals.values[size_t(other) * 3])) return false;
+    struct Sums {
+        double total = 0, disagreeing = 0;
+        bool fails = false;
+    };
+    std::vector<Sums> sums(chunks.size());
+    chunks.each([&](size_t c) {
+        Sums& sum = sums[c];
+        size_t offset = chunks.corner[c];
+        for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+            const int n = poly.counts[f];
+            if (n < 0 || offset + n > corners) break;
+            if (drawn[f]) {
+                const int element = uniform ? poly.baseFace(f) : normals.indices[offset];
+                if (element < 0 || size_t(element) >= count) {
+                    sum.fails = true;
+                    return;
+                }
+                const float* value = &normals.values[size_t(element) * 3];
+                for (int i = 1; !uniform && i < n; i++) {
+                    const int other = normals.indices[offset + i];
+                    if (other == element) continue;
+                    if (other < 0 || size_t(other) >= count || !std::equal(value, value + 3, &normals.values[size_t(other) * 3])) {
+                        sum.fails = true;
+                        return;
+                    }
+                }
+                const float* p0 = &poly.points[size_t(poly.indices[offset]) * 3];
+                double g[3] = { 0, 0, 0 };
+                for (int i = 1; i + 1 < n; i++) {
+                    const float* p1 = &poly.points[size_t(poly.indices[offset + i]) * 3];
+                    const float* p2 = &poly.points[size_t(poly.indices[offset + i + 1]) * 3];
+                    const double a[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
+                    const double b[3] = { p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2] };
+                    g[0] += a[1] * b[2] - a[2] * b[1];
+                    g[1] += a[2] * b[0] - a[0] * b[2];
+                    g[2] += a[0] * b[1] - a[1] * b[0];
+                }
+                const double gg = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+                const double nn = double(value[0]) * value[0] + double(value[1]) * value[1] + double(value[2]) * value[2];
+                const double gn = g[0] * value[0] + g[1] * value[1] + g[2] * value[2];
+                if (gg > 0 && nn > 0) {
+                    const double area = std::sqrt(gg);
+                    sum.total += area;
+                    if (gn * gn < kFlatCos2 * gg * nn) sum.disagreeing += area;
+                }
             }
-            const float* p0 = &poly.points[size_t(poly.indices[offset]) * 3];
-            double g[3] = { 0, 0, 0 };
-            for (int i = 1; i + 1 < n; i++) {
-                const float* p1 = &poly.points[size_t(poly.indices[offset + i]) * 3];
-                const float* p2 = &poly.points[size_t(poly.indices[offset + i + 1]) * 3];
-                const double a[3] = { p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2] };
-                const double b[3] = { p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2] };
-                g[0] += a[1] * b[2] - a[2] * b[1];
-                g[1] += a[2] * b[0] - a[0] * b[2];
-                g[2] += a[0] * b[1] - a[1] * b[0];
-            }
-            const double gg = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-            const double nn = double(value[0]) * value[0] + double(value[1]) * value[1] + double(value[2]) * value[2];
-            const double gn = g[0] * value[0] + g[1] * value[1] + g[2] * value[2];
-            if (gg > 0 && nn > 0) {
-                const double area = std::sqrt(gg);
-                total += area;
-                if (gn * gn < kFlatCos2 * gg * nn) disagreeing += area;
-            }
+            offset += n;
         }
-        offset += n;
+    });
+    double total = 0, disagreeing = 0; // in chunk order: the same sums on any machine
+    for (const Sums& sum : sums) {
+        if (sum.fails) return false;
+        total += sum.total;
+        disagreeing += sum.disagreeing;
     }
     return total > 0 && disagreeing <= kFlatShare * total;
 }
@@ -413,7 +479,9 @@ bool FlatNormals(const Poly& poly, const std::vector<uint8_t>& drawn, const Prim
 /// Coincident points: canon[v] is the first point whose position and per-point values (`perPoint`, the
 /// vertex and varying primvars that are sent) are bitwise equal to v's, so canon[v] <= v. Empty when no
 /// two points coincide. One open-addressing table of point ids; rows are compared straight from the arrays.
-std::vector<uint32_t> WeldPoints(const Poly& poly, const std::vector<const PrimvarIn*>& perPoint)
+/// With `parallel`, on every thread: the points split by row hash into partitions welded side by side (8 bytes per
+/// point).
+std::vector<uint32_t> WeldPoints(const Poly& poly, const std::vector<const PrimvarIn*>& perPoint, bool parallel)
 {
     const size_t vertices = poly.points.size() / 3;
     size_t words = 3;
@@ -427,6 +495,76 @@ std::vector<uint32_t> WeldPoints(const Poly& poly, const std::vector<const Primv
             w += size_t(pv->size);
         }
     };
+    if (parallel) {
+        // Partitioned by the top bits of the row hash: equal rows land in one partition, which keeps its points in
+        // index order, so every partition welds on its own small table to the serial result.
+        constexpr int kBits = 8;
+        constexpr size_t kParts = size_t(1) << kBits, kChunk = size_t(1) << 16;
+        std::vector<uint32_t> hashes(vertices);
+        WorkParallelForN(vertices, [&](size_t begin, size_t end) {
+            std::vector<uint32_t> r(words);
+            for (size_t v = begin; v < end; v++) {
+                fill(v, r.data());
+                hashes[v] = HashRow(r.data(), words);
+            }
+        });
+        const size_t chunks = (vertices + kChunk - 1) / kChunk;
+        const auto part = [&](size_t v) { return size_t(hashes[v] >> (32 - kBits)); };
+        std::vector<uint32_t> place(chunks * kParts, 0); // per chunk and partition: a count, then the first slot
+        WorkParallelForN(chunks, [&](size_t begin, size_t end) {
+            for (size_t c = begin; c < end; c++) {
+                for (size_t v = c * kChunk, last = std::min(vertices, v + kChunk); v < last; v++) place[c * kParts + part(v)]++;
+            }
+        });
+        std::vector<size_t> first(kParts + 1, 0);
+        size_t at = 0;
+        for (size_t p = 0; p < kParts; p++) {
+            first[p] = at;
+            for (size_t c = 0; c < chunks; c++) {
+                const uint32_t n = place[c * kParts + p];
+                place[c * kParts + p] = uint32_t(at);
+                at += n;
+            }
+        }
+        first[kParts] = at;
+        std::vector<uint32_t> order(vertices);
+        WorkParallelForN(chunks, [&](size_t begin, size_t end) {
+            for (size_t c = begin; c < end; c++) {
+                for (size_t v = c * kChunk, last = std::min(vertices, v + kChunk); v < last; v++) order[place[c * kParts + part(v)]++] = uint32_t(v);
+            }
+        });
+        std::vector<uint32_t> canon(vertices);
+        std::atomic<bool> merged { false };
+        WorkParallelForN(kParts, [&](size_t begin, size_t end) {
+            std::vector<uint32_t> r(words), o(words), table;
+            for (size_t p = begin; p < end; p++) {
+                size_t capacity = 16;
+                while (capacity < (first[p + 1] - first[p]) * 2) capacity <<= 1;
+                table.assign(capacity, UINT32_MAX);
+                for (size_t k = first[p]; k < first[p + 1]; k++) {
+                    const uint32_t v = order[k];
+                    fill(v, r.data());
+                    for (size_t slot = hashes[v] & (capacity - 1);; slot = (slot + 1) & (capacity - 1)) {
+                        const uint32_t owner = table[slot];
+                        if (owner == UINT32_MAX) {
+                            table[slot] = v;
+                            canon[v] = v;
+                            break;
+                        }
+                        if (hashes[owner] != hashes[v]) continue;
+                        fill(owner, o.data());
+                        if (r == o) {
+                            canon[v] = owner;
+                            merged = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        if (!merged) canon.clear();
+        return canon;
+    }
     size_t capacity = 16, used = 0;
     while (capacity < vertices) capacity <<= 1; // doubled whenever more than half full
     std::vector<uint32_t> table(capacity, UINT32_MAX), canon(vertices);
@@ -483,25 +621,37 @@ MeshOut BuildMesh(MeshIn& in)
     const size_t corners = poly.indices.size();
     const std::vector<PrimvarIn>& primvars = *poly.primvars;
 
-    // Faces with fewer than three corners, holes and faces with indices out of range are not drawn.
+    // Faces with fewer than three corners, holes and faces with indices out of range are not drawn. The first
+    // triangle of each chunk of faces is where the fan triangulation below writes it.
+    const FaceChunks chunks = ChunkFaces(poly, in.parallel);
     std::vector<uint8_t> drawn(poly.counts.size(), 0);
-    size_t triangles = 0;
-    size_t offset = 0;
-    for (size_t f = 0; f < poly.counts.size(); f++) {
-        const int n = poly.counts[f];
-        if (n < 0 || offset + n > corners) break; // malformed topology
-        bool valid = n >= 3 && !poly.hole[f];
-        for (int i = 0; i < n; i++) {
-            const int v = poly.indices[offset + i];
-            if (v < 0 || v >= vertices) valid = false;
+    std::vector<size_t> firstTriangle(chunks.size() + 1, 0), drawnFaces(chunks.size(), 0);
+    chunks.each([&](size_t c) {
+        size_t at = chunks.corner[c], triangles = 0, faces = 0;
+        for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+            const int n = poly.counts[f];
+            if (n < 0 || at + n > corners) break; // malformed topology
+            bool valid = n >= 3 && !poly.hole[f];
+            for (int i = 0; i < n; i++) {
+                const int v = poly.indices[at + i];
+                if (v < 0 || v >= vertices) valid = false;
+            }
+            if (valid) {
+                drawn[f] = 1;
+                triangles += size_t(n) - 2;
+                faces++;
+            }
+            at += n;
         }
-        if (valid) {
-            drawn[f] = 1;
-            triangles += size_t(n) - 2;
-            out.drawnFaces++;
-        }
-        offset += n;
+        firstTriangle[c + 1] = triangles;
+        drawnFaces[c] = faces;
+    });
+    for (size_t c = 0; c < chunks.size(); c++) {
+        firstTriangle[c + 1] += firstTriangle[c];
+        out.drawnFaces += drawnFaces[c];
     }
+    const size_t triangles = firstTriangle.back();
+    size_t offset = 0;
 
     // Subdivision surfaces ignore authored normals. A static polygonal mesh ignores normals that only restate
     // its faces: flat shading draws them the same, and they would split every face into vertices of its own.
@@ -509,7 +659,7 @@ MeshOut BuildMesh(MeshIn& in)
     for (const PrimvarIn& pv : primvars) {
         if (pv.name == kNormals) normals = &pv;
     }
-    const bool skipNormals = !polygonal || (in.staticPoints && normals && FlatNormals(poly, drawn, *normals));
+    const bool skipNormals = !polygonal || (in.staticPoints && normals && FlatNormals(poly, drawn, *normals, chunks));
     if (skipNormals && normals && poly.primvars == &in.primvars) { // freed before the outputs are allocated
         in.primvars.erase(in.primvars.begin() + (normals - in.primvars.data()));
         normals = nullptr;
@@ -535,13 +685,15 @@ MeshOut BuildMesh(MeshIn& in)
 
     // The authored face of each corner is only needed to look up uniform primvars.
     std::vector<int> cornerFace(uniform ? corners : 0, 0);
-    offset = 0;
-    for (size_t f = 0; uniform && f < poly.counts.size(); f++) {
-        const int n = poly.counts[f];
-        if (n < 0 || offset + n > corners) break;
-        std::fill_n(cornerFace.begin() + offset, n, int(f));
-        offset += n;
-    }
+    if (uniform) chunks.each([&](size_t c) {
+        size_t at = chunks.corner[c];
+        for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+            const int n = poly.counts[f];
+            if (n < 0 || at + n > corners) break;
+            std::fill_n(cornerFace.begin() + at, n, int(f));
+            at += n;
+        }
+    });
 
     // Face edges bucketed by their smaller vertex: a counting sort (two passes and one allocation; the meshes are built
     // in parallel), then each bucket, a handful of records on ordinary meshes, sorted by the other vertex. An edge met
@@ -556,14 +708,23 @@ MeshOut BuildMesh(MeshIn& in)
             int base;
         };
         std::vector<uint32_t> start(size_t(vertices) + 2, 0); // start[v + 2] counts, then start[v + 1] places, then [start[v], start[v + 1]) is bucket v
-        offset = 0;
-        for (size_t f = 0; f < poly.counts.size(); f++) {
-            const int n = poly.counts[f];
-            if (n < 0 || offset + n > corners) break;
-            for (int i = 0; drawn[f] && i < n; i++) start[size_t(std::min(poly.indices[offset + i], poly.indices[offset + (i + 1) % n])) + 2]++;
-            offset += n;
-        }
+        const bool shared = chunks.size() > 1; // threads count and place at once
+        const auto bump = [shared](uint32_t& slot) { return shared ? __atomic_fetch_add(&slot, 1u, __ATOMIC_RELAXED) : slot++; };
+        chunks.each([&](size_t c) {
+            size_t at = chunks.corner[c];
+            for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+                const int n = poly.counts[f];
+                if (n < 0 || at + n > corners) break;
+                for (int i = 0; drawn[f] && i < n; i++) bump(start[size_t(std::min(poly.indices[at + i], poly.indices[at + (i + 1) % n])) + 2]);
+                at += n;
+            }
+        });
         for (size_t i = 1; i < start.size(); i++) start[i] += start[i - 1];
+        // Buckets sorted one by one, by ranges of vertices on every thread when the mesh is built alone.
+        const auto byVertices = [&](auto&& fn) {
+            if (shared) WorkParallelForN(size_t(vertices), fn);
+            else fn(size_t(0), size_t(vertices));
+        };
         if (in.edges) {
             std::vector<EdgeRec> records(start.back());
             offset = 0;
@@ -590,10 +751,14 @@ MeshOut BuildMesh(MeshIn& in)
                     i = j;
                 }
             };
+            byVertices([&](size_t begin, size_t end) {
+                for (size_t v = begin; v < end; v++) {
+                    const size_t lo = start[v], hi = start[v + 1];
+                    if (hi - lo > 1) std::sort(records.begin() + lo, records.begin() + hi, [](const EdgeRec& x, const EdgeRec& y) { return x.other < y.other; });
+                }
+            });
             size_t drawnEdges = 0;
             for (int v = 0; v < vertices; v++) {
-                const size_t lo = start[v], hi = start[v + 1];
-                if (hi - lo > 1) std::sort(records.begin() + lo, records.begin() + hi, [](const EdgeRec& x, const EdgeRec& y) { return x.other < y.other; });
                 edgesOf(v, [&](const EdgeRec&, bool draw) {
                     out.distinctEdges++;
                     drawnEdges += draw;
@@ -610,28 +775,41 @@ MeshOut BuildMesh(MeshIn& in)
         } else if (!out.refined) {
             // Only the stats' count: the larger vertex of each face edge, bucketed by the smaller one (4 bytes per
             // corner instead of a 16-byte record). A refined mesh is counted on its cage (CountMesh).
+            // Placed in any order (each bucket is sorted next), so threads place at once.
             std::vector<uint32_t> others(start.back());
-            offset = 0;
-            for (size_t f = 0; f < poly.counts.size(); f++) {
-                const int n = poly.counts[f];
-                if (n < 0 || offset + n > corners) break;
-                for (int i = 0; drawn[f] && i < n; i++) {
-                    const int v0 = poly.indices[offset + i], v1 = poly.indices[offset + (i + 1) % n];
-                    others[start[size_t(std::min(v0, v1)) + 1]++] = uint32_t(std::max(v0, v1));
+            chunks.each([&](size_t c) {
+                size_t at = chunks.corner[c];
+                for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+                    const int n = poly.counts[f];
+                    if (n < 0 || at + n > corners) break;
+                    for (int i = 0; drawn[f] && i < n; i++) {
+                        const int v0 = poly.indices[at + i], v1 = poly.indices[at + (i + 1) % n];
+                        others[bump(start[size_t(std::min(v0, v1)) + 1])] = uint32_t(std::max(v0, v1));
+                    }
+                    at += n;
                 }
-                offset += n;
-            }
-            for (int v = 0; v < vertices; v++) {
-                const auto lo = others.begin() + start[v], hi = others.begin() + start[v + 1];
-                std::sort(lo, hi);
-                out.distinctEdges += size_t(std::unique(lo, hi) - lo);
-            }
+            });
+            std::atomic<size_t> distinct { 0 };
+            byVertices([&](size_t begin, size_t end) {
+                size_t count = 0;
+                for (size_t v = begin; v < end; v++) {
+                    const auto lo = others.begin() + start[v], hi = others.begin() + start[v + 1];
+                    std::sort(lo, hi);
+                    count += size_t(std::unique(lo, hi) - lo);
+                }
+                distinct += count;
+            });
+            out.distinctEdges += distinct;
         }
     };
     if (!in.edges) faceEdges();
 
     // Coincident points of a static polygonal mesh (CAD exports repeat them per face group) draw as one vertex.
-    const std::vector<uint32_t> canon = polygonal && in.staticPoints ? WeldPoints(poly, perPoint) : std::vector<uint32_t>();
+    // On every thread when the mesh is built alone and its points are well under its corners (a welded mesh, few
+    // repeats). Triangle soup (a point per corner, each repeated by its neighbours) welds faster serially: its table
+    // holds only the distinct rows, while partitions would read every row out of order (25 M points: 1.1 s vs 1.7 s).
+    const bool parallelWeld = in.parallel && size_t(vertices) * 2 < corners;
+    const std::vector<uint32_t> canon = polygonal && in.staticPoints ? WeldPoints(poly, perPoint, parallelWeld) : std::vector<uint32_t>();
 
     if (!perCorner.empty()) Weld(poly, perCorner, cornerFace, canon, &layout);
     else if (!canon.empty()) {
@@ -649,23 +827,27 @@ MeshOut BuildMesh(MeshIn& in)
     out.flipped = poly.flip;
     if (in.edges) faceEdges();
 
-    // Fan triangulation.
-    out.indices.reserve(triangles * 3);
-    if (out.refined) out.triangleFace.reserve(triangles); // unrefined: trianglePoly is the authored face
-    out.trianglePoly.reserve(triangles);
-    offset = 0;
-    for (size_t f = 0; f < poly.counts.size(); f++) {
-        const int n = poly.counts[f];
-        if (n < 0 || offset + n > corners) break;
-        for (int i = 1; drawn[f] && i + 1 < n; i++) {
-            size_t a = offset, b = offset + i, c = offset + i + 1;
-            if (poly.flip) std::swap(b, c);
-            for (size_t corner : { a, b, c }) out.indices.push_back(layout.at(corner, poly));
-            if (out.refined) out.triangleFace.push_back(poly.baseFace(f));
-            out.trianglePoly.push_back(int(f));
+    // Fan triangulation: each chunk of faces writes its own range.
+    out.indices.resize(triangles * 3);
+    if (out.refined) out.triangleFace.resize(triangles); // unrefined: trianglePoly is the authored face
+    out.trianglePoly.resize(triangles);
+    chunks.each([&](size_t c) {
+        size_t at = chunks.corner[c], t = firstTriangle[c];
+        for (size_t f = chunks.face[c]; f < chunks.face[c + 1]; f++) {
+            const int n = poly.counts[f];
+            if (n < 0 || at + n > corners) break;
+            for (int i = 1; drawn[f] && i + 1 < n; i++, t++) {
+                size_t a = at, b = at + i, d = at + i + 1;
+                if (poly.flip) std::swap(b, d);
+                out.indices[t * 3] = layout.at(a, poly);
+                out.indices[t * 3 + 1] = layout.at(b, poly);
+                out.indices[t * 3 + 2] = layout.at(d, poly);
+                if (out.refined) out.triangleFace[t] = poly.baseFace(f);
+                out.trianglePoly[t] = int(f);
+            }
+            at += n;
         }
-        offset += n;
-    }
+    });
 
     // The corner map (4 bytes per corner) is read below only to keep it for faceVarying normals or to find the
     // vertex of welded points at seams; otherwise it goes before the per-vertex streams are allocated. No layout.at()

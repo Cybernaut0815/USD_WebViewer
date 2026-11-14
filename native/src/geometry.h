@@ -39,6 +39,9 @@ struct MeshIn {
     bool staticPoints = false;
     /// Build the face edges' line pairs (wire display modes); otherwise only count them.
     bool edges = true;
+    /// The build may use every thread (a mesh of millions of corners built on its own); otherwise it stays on the
+    /// calling thread, as when many meshes are built at once.
+    bool parallel = false;
 };
 
 struct PrimvarOut {

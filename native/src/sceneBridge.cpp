@@ -859,6 +859,7 @@ struct SceneBridge::MeshJob {
     bool fast = false;      // positions (and normals) only, in the layout of the last full build
     bool edgesOnly = false; // nothing changed but the page wants this mesh's face edges
     bool forceFull = false; // GatherMesh: read everything although only the points changed
+    bool parallel = false;  // built on its own after the parallel loop: BuildMesh may use every thread
     bool full = false;      // the output layout differs from what the page has: send every stream
     uint64_t indexHash = 0;
     std::vector<float> constantColor;
@@ -1099,7 +1100,9 @@ val SceneBridge::Flush(int maxItems)
             }
         });
         for (size_t i = 0; i < jobs.size(); i++) {
-            if (later[i]) BuildMeshJob(*jobs[i]);
+            if (!later[i]) continue;
+            jobs[i]->parallel = true;
+            BuildMeshJob(*jobs[i]);
         }
         for (Item& item : items) {
             Rec& rec = *item.rec;
@@ -1286,6 +1289,7 @@ void SceneBridge::BuildMeshJob(MeshJob& job)
         job.ok = GatherMesh(rec, job.created, &job);
         if (!job.ok) return;
     }
+    job.in.parallel = job.parallel;
     job.out = BuildMesh(job.in);
     const MeshOut& out = job.out;
     // Welding lays vertices out by primvar values, so the triangle list can change while the

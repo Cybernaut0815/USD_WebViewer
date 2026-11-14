@@ -24,7 +24,7 @@ export default defineConfig(({ mode }) => ({
   // `--mode no-headers`: a host that sends no COOP/COEP (GitHub Pages), where sw.js isolates the page (e2e "hosting").
   cacheDir: mode === 'no-headers' ? 'node_modules/.vite-no-headers' : undefined,
   server: { headers: mode === 'no-headers' ? {} : isolation },
-  preview: { headers: isolation },
+  preview: { headers: mode === 'no-headers' ? {} : isolation },
   build:
     mode === 'lib'
       ? {

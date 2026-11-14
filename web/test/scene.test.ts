@@ -167,3 +167,11 @@ test('culling back faces swaps the batch material; picking from behind still hit
   assert.equal((single.batches()[0].material as THREE.Material).side, THREE.FrontSide);
   assert.equal((single.item(1).object as THREE.Mesh).material, HIDDEN);
 });
+
+test('objectsUnder finds the items at and below the given paths, not siblings sharing a prefix', () => {
+  const { s } = sync();
+  s.apply({ meshes: [cube(1, { path: '/A/B' }), cube(2, { path: '/A/C/D' }), cube(3, { path: '/AB' })] });
+  const paths = (list: THREE.Object3D[]) => list.map((o) => [...s.items.values()].find((i) => i.object === o)!.path).sort();
+  assert.deepEqual(paths(s.objectsUnder(['/A'])), ['/A/B', '/A/C/D']);
+  assert.deepEqual(paths(s.objectsUnder(['/A/C/D', '/AB'])), ['/A/C/D', '/AB']);
+});

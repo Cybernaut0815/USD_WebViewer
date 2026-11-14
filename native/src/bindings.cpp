@@ -168,6 +168,7 @@ void setSelection(const val& paths)
 }
 
 std::string resolvePick(unsigned rid, int instanceIndex) { return gBridge.ResolvePick(rid, instanceIndex); }
+void setEdges(bool on) { gBridge.SetEdges(on); }
 
 std::string setVariant(const std::string& path, const std::string& variantSet, const std::string& variant)
 {
@@ -275,6 +276,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setRefineBudget", &setRefineBudget);
     function("flush", &flush);
     function("setSelection", &setSelection);
+    function("setEdges", &setEdges);
     function("resolvePick", &resolvePick);
     function("setVariant", &setVariant);
     function("setVisible", &setVisible);

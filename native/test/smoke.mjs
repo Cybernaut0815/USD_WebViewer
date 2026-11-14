@@ -9,6 +9,7 @@ const { default: createCore } = await import(pathToFileURL(path.join(dir, 'usdco
 const started = performance.now();
 const core = await createCore();
 core.init(4);
+core.setEdges(true); // the blocks below check face edges too; 'face edges only on request' turns them off
 console.log(`core ${core.usdVersion()} ready in ${Math.round(performance.now() - started)} ms`);
 
 const names = new Map(); // rid -> path; only the creating entry carries the path
@@ -622,6 +623,156 @@ def Mesh "Strip"
   noErrors();
 }
 
+/* ---------- normals that only restate the faces draw flat (static polygonal meshes) ---------- */
+{
+  // Two quads: one flat on the ground, one tilted 45 degrees up from their shared edge.
+  const quads = (name, normals, extra = '') => `def Mesh "${name}"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4, 4]
+    int[] faceVertexIndices = [0, 1, 2, 3, 1, 4, 5, 2]
+${extra}${normals}
+}
+`;
+  const points = '    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 1), (2, 1, 1)]\n';
+  const uniform = (a, b) => `    normal3f[] normals = [${a}, ${b}] (
+        interpolation = "uniform"
+    )`;
+  const faceVarying = (values, indices) => `    normal3f[] primvars:normals = [${values}] (
+        interpolation = "faceVarying"
+    )
+    int[] primvars:normals:indices = [${indices}]`;
+  const tilt = '(-0.7071, 0, 0.7071)';
+  open('flat.usda', `#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 2
+)
+${quads('Flat', uniform('(0, 0, 1)', tilt), points)}${quads('Flipped', uniform('(0, 0, -1)', '(0.7071, 0, -0.7071)'), points)}${quads('Tilted', uniform('(0, 0, 1)', '(1, 0, 0)'), points)}${quads('Corners', faceVarying(`(0, 0, 1), ${tilt}`, '0, 0, 0, 0, 1, 1, 1, 1'), points)}${quads('Smooth', faceVarying(`(0, 0, 1), ${tilt}, (0, 0, 1)`, '0, 0, 0, 0, 2, 1, 1, 2'), points)}${quads('Animated', uniform('(0, 0, 1)', tilt), `    point3f[] points.timeSamples = {
+        1: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 1), (2, 1, 1)],
+        2: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 2), (2, 1, 2)],
+    }
+`)}`);
+  core.setTime(1);
+  const by = Object.fromEntries(flush().meshes.map((m) => [m.path, m]));
+  for (const name of ['Flat', 'Flipped', 'Corners']) {
+    assert.equal(by[`/${name}`].normals, null, `${name}: normals that restate the faces are dropped (flat shading)`);
+    assert.equal(by[`/${name}`].positions.length, 6 * 3, `${name}: so the shared edge stays welded`);
+  }
+  assert.deepEqual(by['/Flat'].counts, { points: 6, faces: 2, edges: 7 });
+  assert.notEqual(by['/Tilted'].normals, null, 'a normal 45 degrees off its face on 58% of the area is kept');
+  assert.equal(by['/Tilted'].positions.length, 8 * 3, 'and splits the shared edge as before');
+  assert.notEqual(by['/Smooth'].normals, null, 'normals that vary inside a face are shading data');
+  assert.notEqual(by['/Animated'].normals, null, 'moving points keep their normals (their layout is reused per frame)');
+  assert.equal(by['/Animated'].deforming, true);
+  assert.equal(by['/Flat'].deforming, undefined);
+  noErrors();
+}
+
+/* ---------- coincident points of static polygonal meshes draw as one vertex ---------- */
+{
+  // Two quads with 8 points of their own (a CAD export): points 4 and 7 repeat points 1 and 2.
+  const mesh = (name, body) => `def Mesh "${name}"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4, 4]
+    int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+${body}
+}
+`;
+  const points = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [1, 0, 0], [2, 0, 0], [2, 1, 0], [1, 1, 0]];
+  const text = (list) => list.map((p) => `(${p.join(', ')})`).join(', ');
+  open('coincident.usda', `#usda 1.0
+(
+    startTimeCode = 1
+    endTimeCode = 2
+)
+${mesh('Split', `    point3f[] points = [${text(points)}]`)}${mesh('Moving', `    point3f[] points.timeSamples = {
+        1: [${text(points)}],
+        2: [${text(points.map(([x, y, z]) => [x, y, z + 1]))}],
+    }`)}${mesh('Colored', `    point3f[] points = [${text(points)}]
+    color3f[] primvars:displayColor = [(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+        interpolation = "vertex"
+    )`)}`);
+  core.setTime(1);
+  const by = Object.fromEntries(flush().meshes.map((m) => [m.path, m]));
+  const split = by['/Split'];
+  assert.equal(split.positions.length, 6 * 3, 'two coincident pairs: 6 vertices drawn');
+  assert.deepEqual(split.counts, { points: 8, faces: 2, edges: 8 }, 'the stats still count the authored mesh');
+  const splitMap = core.meshMap(split.rid);
+  assert.deepEqual([...splitMap.points], [0, 1, 2, 3, 1, 4, 5, 2], 'every authored point finds its drawn vertex');
+  assert.deepEqual([...splitMap.weld], [0, 1, 2, 3, 5, 6], 'and each drawn vertex its first authored point');
+  assert.deepEqual([...splitMap.faces], [0, 0, 1, 1]);
+  assert.equal(by['/Moving'].positions.length, 8 * 3, 'moving points are not welded');
+  assert.equal(core.meshMap(by['/Moving'].rid).points, null);
+  assert.equal(by['/Colored'].positions.length, 8 * 3, 'nor are points whose per-point values differ');
+  core.setTime(2);
+  const frame = flush().meshes;
+  assert.deepEqual(frame.map((m) => m.path ?? names.get(m.rid)), ['/Moving'], 'only the moving mesh is sent again');
+  assert.equal(frame[0].indices, undefined, 'and it keeps the fast path: positions only');
+
+  // An edit that pulls a coincident point away: the full build welds again from the new positions.
+  const moved = points.map((p, i) => (i === 4 ? [1, 0, 5] : p));
+  JSON.parse(core.setAttribute('/Split', 'points', JSON.stringify(moved), NaN));
+  const rebuilt = flush().meshes.find((m) => m.rid === split.rid);
+  assert.equal(rebuilt.positions.length, 7 * 3, 'one pair is left');
+  assert.ok(rebuilt.indices, 'a new layout sends the triangles again');
+  assert.equal(core.meshMap(split.rid).weld.length, rebuilt.positions.length / 3, 'the mesh map follows the drawn layout');
+  noErrors();
+}
+
+/* ---------- face edges only on request (wire display modes) ---------- */
+{
+  core.setEdges(false);
+  open('edges.usda', `#usda 1.0
+def Mesh "Quad"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+}
+def Cube "Box"
+{
+    double size = 1
+}
+`);
+  const first = Object.fromEntries(flush().meshes.map((m) => [m.path, m]));
+  assert.equal(first['/Quad'].edges, undefined, 'edges off: no line pairs');
+  assert.deepEqual(first['/Quad'].counts, { points: 4, faces: 1, edges: 4 }, 'but the stats still count them');
+  assert.equal(first['/Box'].counts.edges, 12);
+  core.setEdges(true);
+  const edged = flush().meshes;
+  assert.equal(edged.length, 2, 'turned on, every mesh the page has gets its edges');
+  const quad = edged.find((m) => m.rid === first['/Quad'].rid);
+  assert.equal(quad.edges.length, 8);
+  assert.equal(quad.indices, undefined, 'and only them: the page has the layout');
+  assert.equal(quad.positions, undefined);
+  assert.equal(flush().meshes, undefined, 'a second flush sends nothing');
+  core.setEdges(false);
+  core.setEdges(true);
+  assert.equal(flush().meshes, undefined, 'edges the page has are not sent again');
+
+  // A new layout while edges are off comes without them; switching on later sends them once.
+  core.setEdges(false);
+  JSON.parse(core.setAttribute('/Quad', 'faceVertexIndices', JSON.stringify([1, 2, 3, 0]), NaN));
+  const relaid = flush().meshes[0];
+  assert.ok(relaid.indices);
+  assert.equal(relaid.edges, undefined);
+  core.setEdges(true);
+  core.setEdges(false);
+  assert.equal(flush().meshes, undefined, 'switched off again before the flush: nothing is converted');
+  core.setEdges(true);
+  const again = flush().meshes;
+  assert.deepEqual(again.map((m) => [m.rid, m.edges.length, m.indices]), [[first['/Quad'].rid, 8, undefined]]);
+  // While on, a topology edit carries its edges with the indices.
+  JSON.parse(core.setAttribute('/Quad', 'faceVertexIndices', JSON.stringify([0, 1, 2, 3]), NaN));
+  const edited = flush().meshes[0];
+  assert.ok(edited.indices);
+  assert.equal(edited.edges.length, 8);
+  noErrors();
+}
+
 /* ---------- editing: transforms, undo information, layers ---------- */
 {
   const info = open('edit.usda', `#usda 1.0
@@ -1079,6 +1230,42 @@ def Xform "World"
   edit = imp('', bytes('#usda 1.0\n(\n    subLayers = [@./geo.usda@]\n)\ndef Scope "Root" {}\n'));
   assert.ok(edit.ok, edit.error);
   assert.deepEqual(edit.resynced, ['/Root']);
+  noErrors();
+}
+
+/* ---------- edits on a binary stage (the change markers reopen the file); bounds follow edits ---------- */
+{
+  open('snap.usda', `#usda 1.0
+def Xform "World"
+{
+    def Cube "Cube"
+    {
+        double size = 2
+        double3 xformOp:translate = (1, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}`);
+  core.FS.writeFile('/tmp/snap.usdc', core.exportLayer('/tmp/snap.usda', 'usdc'));
+  assert.ok(JSON.parse(core.openStage('/tmp/snap.usdc', true)).ok);
+  flush();
+  const bounds = () => JSON.parse(core.primBounds('/World', NaN));
+  assert.deepEqual(bounds(), [0, -1, -1, 2, 1, 1]);
+  const attr = (v) => JSON.parse(core.setAttribute('/World/Cube', 'size', String(v), NaN));
+  assert.deepEqual(attr(4).changed, ['/World/Cube']);
+  assert.deepEqual(bounds(), [-1, -2, -2, 3, 2, 2], 'an edit drops the cached bounds');
+  assert.deepEqual(attr(2).changed, [], 'compared with the file as opened');
+  attr(5);
+  const reverted = JSON.parse(core.revertPrim('/World/Cube'));
+  assert.deepEqual(reverted.changed, []);
+  assert.equal(JSON.parse(core.attributeValue('/World/Cube', 'size', NaN)), 2, 'Clear edits restores the file value');
+  assert.deepEqual(JSON.parse(core.restorePrim(reverted.previous)).changed, ['/World/Cube']);
+  core.revertPrim('/World/Cube');
+  const m = (x) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, 0, 0, 1];
+  const moved = JSON.parse(core.setXform('/World/Cube', m(3), NaN));
+  assert.deepEqual(moved.changed, ['/World/Cube']);
+  assert.deepEqual(bounds(), [2, -1, -1, 4, 1, 1]);
+  assert.deepEqual(JSON.parse(core.setXform('/World/Cube', moved.previous, NaN)).changed, [], 'undo leaves nothing marked');
+  assert.deepEqual(bounds(), [0, -1, -1, 2, 1, 1]);
   noErrors();
 }
 

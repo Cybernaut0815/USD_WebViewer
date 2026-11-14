@@ -57,6 +57,12 @@ export interface CoreApi {
   clearRefinementOverrides(): Edit;
   flush(maxItems: number): RenderDelta;
   setSelection(paths: Path[]): void;
+  /**
+   * Face edges for the wire display modes. Off (the default) meshes send only their counts; on, every mesh entry
+   * with indices carries its edges, and meshes the page already has get theirs in the next flush (edges-only
+   * entries). Kept across stages.
+   */
+  setEdges(on: boolean): void;
   resolvePick(rid: Rid, instanceIndex: number): PickResult | null;
   /** How a mesh item's drawn triangles map to the polygons they were fanned from; null for anything else. */
   meshMap(rid: Rid): MeshMap | null;
@@ -230,12 +236,16 @@ export interface PickResult {
  * are consecutive and fan from its first corner: (c0, ci, ci+1), or (c0, ci+1, ci) when `flipped` (leftHanded).
  * `authored`: the polygons are the prim's own faces (indices into its faceVertexCounts, given in `counts`); otherwise
  * they are the faces of a refined surface or of an implicit shape's generated mesh (`counts` null), and `weld` maps
- * a drawn vertex to the vertex of that surface (null: the same index).
+ * a drawn vertex to the vertex of that surface (null: the same index). On static polygonal meshes coincident points
+ * (same position and per-point values) draw as one vertex: `weld` gives the first of them, and `points` maps every
+ * authored point to the drawn vertex that draws it (4294967295: no drawn face uses it), so per-point results can be
+ * written back to all of them. `points` is null when no points were welded that way.
  */
 export interface MeshMap {
   faces: Int32Array<ArrayBuffer>;
   counts: Int32Array<ArrayBuffer> | null;
   weld: Uint32Array<ArrayBuffer> | null;
+  points: Uint32Array<ArrayBuffer> | null;
   flipped: boolean;
   authored: boolean;
 }
@@ -303,7 +313,11 @@ export interface MeshCounts {
 }
 export interface MeshEntry extends Item {
   indices?: Uint32Array; // triangle list
-  /** Line pairs along the authored faces (no triangulation diagonals), same layout as indices; sent with them. */
+  /**
+   * Line pairs along the authored faces (no triangulation diagonals), same layout as indices. Only while edges are
+   * on (setEdges): with the indices, or alone, without positions, for a mesh whose layout the page already has.
+   * Indices without edges leave the item without edges.
+   */
   edges?: Uint32Array;
   /** The authored mesh's counts; sent with indices. */
   counts?: MeshCounts;
@@ -315,6 +329,8 @@ export interface MeshEntry extends Item {
   displayColor?: [number, number, number];
   displayOpacity?: number;
   doubleSided?: boolean;
+  /** Sent with indices: the points vary over time (animation, skinning), so later entries move them. */
+  deforming?: boolean;
   /** 16 floats per instance, fully composed world matrices; null: not instanced. */
   instances?: Float32Array | null;
 }

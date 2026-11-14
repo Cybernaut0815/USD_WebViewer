@@ -70,9 +70,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options(usdcore PRIVATE -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=2)
 endif()
 
-# The page loads the core from web/public/core/.
-add_custom_command(TARGET usdcore POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE_DIR:usdcore>/usdcore.js $<TARGET_FILE_DIR:usdcore>/usdcore.wasm
-        ${CMAKE_CURRENT_SOURCE_DIR}/../web/public/core/
-)
+# The page loads the core from web/public/core/ (OFF for side builds, e.g. -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs).
+option(COPY_TO_WEB "Copy the built core into web/public/core" ON)
+if(COPY_TO_WEB)
+    add_custom_command(TARGET usdcore POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE_DIR:usdcore>/usdcore.js $<TARGET_FILE_DIR:usdcore>/usdcore.wasm
+            ${CMAKE_CURRENT_SOURCE_DIR}/../web/public/core/
+    )
+endif()

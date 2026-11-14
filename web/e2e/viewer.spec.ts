@@ -258,11 +258,16 @@ test.describe('mock core', () => {
 
   test('display modes draw wireframes', async ({ page }) => {
     const errors = await open(page, MOCK);
-    await page.evaluate(async () => {
+    const edges = await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const cube = (viewer as any).viewport.sync.items.get(1);
+      // Edges come from the core only once a wire mode asks for them; the stats count them all along.
+      const before = { edges: cube.edges, stats: viewer.stats.edges };
       viewer.displayMode = 'plain-wire';
       await viewer.idle();
+      return { before, after: !!cube.edges };
     });
+    expect(edges).toEqual({ before: { edges: null, stats: 48 }, after: true });
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-plain-wire.png', shot(page));
     await page.evaluate(async () => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
@@ -599,6 +604,20 @@ test.describe('mock core', () => {
     await page.keyboard.press('h');
     await expect.poll(state).toEqual({ meshes: 3, dirty: false });
     await expect(cubeRow).toHaveClass(/dim/);
+    // A pick does not even raycast the hidden cube (three would test every triangle of a hidden mesh).
+    const raycasts = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const cube = viewer.three.objectsFor('/World/Cube')[0];
+      let calls = 0;
+      const raycast = cube.raycast;
+      cube.raycast = (...args) => (calls++, raycast.apply(cube, args));
+      const p = cube.getWorldPosition(cube.position.clone()).project(viewer.three.camera);
+      const rect = viewer.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      await viewer.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      cube.raycast = raycast;
+      return calls;
+    });
+    expect(raycasts).toBe(0);
     await page.keyboard.press('Alt+h');
     await expect.poll(state).toEqual({ meshes: 4, dirty: false });
     await expect(cubeRow).not.toHaveClass(/dim/);
@@ -1626,6 +1645,53 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
+  test('small static meshes of one look draw in one batch, looking as drawn one by one', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const rids = Array.from({ length: 80 }, (_, i) => 100 + i);
+    // 80 copies of the cube's streams in a grid below the stage; with positionsOnly, a points update for each.
+    const inject = (positionsOnly: boolean) =>
+      page.evaluate(async ({ rids, positionsOnly }) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        const g = (v.three.objectsFor('/World/Cube')[0] as any).geometry;
+        const positions = () => new Float32Array(g.attributes.position.array);
+        const scale = (i: number) => [0.5, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0.5, 0, (i % 10) * 0.8 - 3.6, -1.5 - Math.floor(i / 10) * 0.4, -2, 1];
+        v.session.emit('delta', positionsOnly ? { meshes: rids.map((rid) => ({ rid, positions: positions() })) } : {
+          meshes: rids.map((rid) => ({
+            rid, path: `/World/Many/C${rid}`, purpose: 'default', indices: new Uint32Array(g.index.array), positions: positions(),
+            normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 },
+            displayColor: [0.2 + (rid % 5) * 0.15, 0.6, 0.3], subsets: null, material: 0, instances: null,
+          })),
+          xforms: { rids: new Uint32Array(rids), matrices: new Float64Array(rids.flatMap((_, i) => scale(i))) },
+        } as any);
+        v.frame();
+        await v.idle();
+        await new Promise((resolve) => setTimeout(resolve, 300)); // the full-detail frame after the view moved
+        await v.idle();
+        return v.three.root.children.filter((o: any) => o.isBatchedMesh).map((o: any) => o.instanceCount);
+      }, { rids, positionsOnly });
+    expect(await inject(false)).toEqual([80]);
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched.png', shot(page));
+    // A batched item picks through its own object, and its stage visibility reaches its instance.
+    const batched = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const vp = (v as any).viewport;
+      const object = v.three.objectsFor('/World/Many/C105')[0];
+      const p = object.getWorldPosition(object.position.clone()).project(v.three.camera);
+      const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const hit = vp.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height);
+      v.session.emit('delta', { visibility: { rids: new Uint32Array([105]), visible: new Uint8Array([0]) } } as any);
+      const item = vp.sync.items.get(105);
+      const hidden = !item.batched.batch.mesh.getVisibleAt(item.batched.instance);
+      v.session.emit('delta', { visibility: { rids: new Uint32Array([105]), visible: new Uint8Array([1]) } } as any);
+      return { rid: hit?.rid, hidden, standIn: (object as any).material.visible };
+    });
+    expect(batched).toEqual({ rid: 105, hidden: true, standIn: false });
+    // Points updates take each item out of its batch for good: the same picture, drawn one by one.
+    expect(await inject(true)).toEqual([]);
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched.png', shot(page));
+    expect(errors).toEqual([]);
+  });
+
   test('live link: a layer pushed to the relay replaces the open layer, and viewer edits are published back', async ({ page, request, baseURL }) => {
     await request.delete(`${baseURL}/live/layers`);
     await open(page, `${MOCK}&live=1`);
@@ -1933,5 +1999,65 @@ test.describe('public assets', () => {
     expect(result.upAxis).toBe('Z');
     expect(result.meshes).toBeGreaterThan(1000);
     expect(errors).toEqual([]);
+  });
+});
+
+/* ---------- a host without isolation headers (GitHub Pages): sw.js provides them ---------- */
+
+test.describe('hosting', () => {
+  const HOST = 'http://localhost:4174';
+
+  /** A first visit in a fresh context: navigations of the main frame, and the paths the service worker answered. */
+  async function visit(browser: import('@playwright/test').Browser, url: string) {
+    const context = await browser.newContext({ viewport: { width: 1024, height: 640 } });
+    const page = await context.newPage();
+    const counts = { navigations: 0, fromWorker: [] as string[], all: [] as string[], errors: [] as string[] };
+    page.on('framenavigated', (frame) => frame === page.mainFrame() && counts.navigations++);
+    page.on('response', (response) => {
+      counts.all.push(new URL(response.url()).pathname);
+      if (response.fromServiceWorker()) counts.fromWorker.push(new URL(response.url()).pathname);
+    });
+    page.on('pageerror', (error) => counts.errors.push(error.message));
+    await page.goto(url);
+    await expect.poll(() => counts.navigations).toBe(2); // the reload once sw.js is active
+    await page.waitForFunction(() => crossOriginIsolated);
+    const ready = () =>
+      page.evaluate(async () => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        await viewer.ready;
+        if (!viewer.hasAttribute('src')) return;
+        if (!viewer.stage) await new Promise((resolve) => viewer.addEventListener('stageopen', resolve, { once: true }));
+        await viewer.idle();
+      });
+    await ready();
+    return { context, page, counts, ready };
+  }
+
+  test('sw.js isolates the page with one reload and answers only the page and the worker scripts', async ({ browser }) => {
+    const { context, page, counts, ready } = await visit(browser, `${HOST}/?core=mock-core/&forceWebGL=1&src=mock.usda`);
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).stats.meshes)).toBe(4); // the cube and three instances
+    expect(page.workers().length).toBe(1);
+    expect(counts.fromWorker.filter((path) => path !== '/' && !path.endsWith('/worker.js'))).toEqual([]);
+    expect(counts.fromWorker).toContain('/');
+    expect(counts.fromWorker).toContain('/mock-core/worker.js');
+    // Later visits are isolated from the start: no second reload.
+    await page.reload();
+    await ready();
+    expect(counts.navigations).toBe(3);
+    expect(counts.errors).toEqual([]);
+    await context.close();
+  });
+
+  test('the wasm core boots under sw.js; the wasm is not served by it', async ({ browser }) => {
+    test.skip(!existsSync(new URL('../public/core/usdcore.wasm', import.meta.url)), 'usdcore.wasm has not been built');
+    const { context, page, counts } = await visit(browser, `${HOST}/?forceWebGL=1`);
+    const core = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).session.ready);
+    expect(core.usd).toMatch(/^\d+\.\d+/);
+    expect(page.workers().length).toBe(1 + core.threads); // the core's threads need the isolation
+    expect(counts.fromWorker).toContain('/core/worker.js');
+    expect(counts.all).toContain('/core/usdcore.wasm'); // requests from inside the worker are seen too
+    expect(counts.fromWorker.filter((path) => path.endsWith('.wasm'))).toEqual([]);
+    expect(counts.errors).toEqual([]);
+    await context.close();
   });
 });

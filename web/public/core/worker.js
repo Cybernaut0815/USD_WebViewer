@@ -4,35 +4,36 @@
 let core;
 let drops = 0;
 
+// The wasm downloads from the start, alongside the glue (on its own, the glue would ask for it only once loaded).
+const WASM = new URL('usdcore.wasm', import.meta.url);
+const wasm = fetch(WASM, { credentials: 'same-origin' });
+let failed;
+const failure = new Promise((_, reject) => (failed = reject)); // the glue waits forever on a failed instantiate
+function instantiateWasm(imports, done) {
+  WebAssembly.instantiateStreaming(wasm, imports)
+    .catch(() => fetch(WASM).then((response) => response.arrayBuffer()).then((bytes) => WebAssembly.instantiate(bytes, imports))) // not served as application/wasm
+    .then(({ instance, module }) => done(instance, module), failed);
+  return {};
+}
+
 const boot = (async () => {
   const { default: createCore } = await import('./usdcore.js');
-  core = await createCore();
+  core = await Promise.race([createCore({ instantiateWasm }), failure]);
   // ponytail: 4 measured faster than 8 for the mesh build (allocator contention); raise once mimalloc is measured.
   const threads = Math.min(4, navigator.hardwareConcurrency || 4);
   core.init(threads);
-  return { usd: core.usdVersion(), threads };
+  postMessage({ ready: { usd: core.usdVersion(), threads } });
+  // The first stage opened pays about 0.2 s for the plugin, schema and imaging registries: paid here, on a tiny stage,
+  // before any request runs (they wait for boot), so the first open is that much faster.
+  try {
+    core.FS.writeFile('/tmp/warm.usda', '#usda 1.0\ndef Mesh "M" {}\n');
+    core.openStage('/tmp/warm.usda', false);
+    core.flush(1000);
+    core.closeStage();
+  } catch {}
+  core.takeDiagnostics(); // not the page's
 })();
-boot.then(
-  (ready) => postMessage({ ready }),
-  (error) => postMessage({ fatal: `USD core failed to start: ${error?.message ?? error}` }),
-);
-
-// The first stage opened pays about 0.2 s for the plugin, schema and imaging registries. A page that opens nothing at
-// once (no src) pays it here instead, on a tiny stage half a second after the core is ready, so its first open is
-// that much faster; one that opened a stage by then skips it.
-let opened = false;
-boot.then(() =>
-  setTimeout(() => {
-    if (opened) return;
-    try {
-      core.FS.writeFile('/tmp/warm.usda', '#usda 1.0\ndef Mesh "M" {}\n');
-      core.openStage('/tmp/warm.usda', false);
-      core.flush(1000);
-      core.closeStage();
-    } catch {}
-    core.takeDiagnostics(); // not the page's
-  }, 500),
-);
+boot.catch((error) => postMessage({ fatal: `USD core failed to start: ${error?.message ?? error}` }));
 
 // Calls answered here instead of by the wasm module.
 const local = {
@@ -63,7 +64,6 @@ function buffers(value, out = []) {
 onmessage = async ({ data: { id, method, args } }) => {
   try {
     await boot;
-    if (method === 'openStage') opened = true;
     let result;
     if (local[method]) result = local[method](...args);
     else {

@@ -14,5 +14,9 @@ export default defineConfig({
     deviceScaleFactor: 1,
     launchOptions: { args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] },
   },
-  webServer: { command: 'npx vite --port 4173 --strictPort', url: 'http://localhost:4173', reuseExistingServer: true },
+  webServer: [
+    { command: 'npx vite --port 4173 --strictPort', url: 'http://localhost:4173', reuseExistingServer: true },
+    // A host without isolation headers (GitHub Pages): sw.js provides them (the "hosting" tests).
+    { command: 'npx vite --port 4174 --strictPort --mode no-headers', url: 'http://localhost:4174', reuseExistingServer: true },
+  ],
 });

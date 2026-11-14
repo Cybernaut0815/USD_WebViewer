@@ -25,7 +25,7 @@ Link to test the [viewer](https://cybernaut0815.github.io/USD_WebViewer/).
 On Windows, two scripts in the repo root work by double-click:
 
 - **`build.bat`** installs the npm packages and builds the page into `web/dist`. If the wasm core is missing and emsdk is set up (`%EMSDK%`), it builds the SDK and the core first (see [Building the core](#building-the-core)).
-- **`start.bat`** serves `web/dist` at <http://localhost:4173> and opens the browser. It runs `build.bat` first when there is no build, and opens the mock stage when the build has no core. Close its window to stop the server.
+- **`start.bat`** runs `build.bat` (so the page is never older than the sources), serves `web/dist` at <http://localhost:4180> and opens the browser, on the mock stage when the build has no core. Close its window to stop the server.
 
 All npm commands run inside `web/`; the repo root has no `package.json`.
 

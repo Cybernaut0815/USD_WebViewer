@@ -1,5 +1,6 @@
-// Property panel: details of the selected prim.
+// Property panel: details of the selected prim, or the selected section planes and boxes.
 import type { Json, Path, PrimInfo } from './protocol.ts';
+import { clean, type Section, type Up, type Vec3 } from './section.ts';
 
 // Text always goes through textContent: everything shown here comes from untrusted files.
 export function h(tag: string, props: Record<string, unknown> = {}, ...children: (Node | string)[]): HTMLElement {
@@ -98,8 +99,13 @@ export class Props {
   autoLoad = false;
   /** World bounds of a prim (min xyz, max xyz): a subtree walk, asked for only while its section is open. */
   bounds: (path: Path) => Promise<number[] | null> = () => Promise.resolve(null);
+  /** A section edit from the panel: the whole next section (it passed clean() whole), or entries to delete. */
+  onsectionedit: (next: Section) => void = () => {};
+  onsectiondelete: (planes: number[], boxes: number[]) => void = () => {};
   /** Which sections the user folded or unfolded; kept when another prim is shown. */
   private readonly folded = new Map<string, boolean>();
+  /** The section view on show: which entries it has, and how it takes new values in place (gizmo drags). */
+  private sectionView: { key: string; refresh: (section: Section) => void } | null = null;
 
   constructor() {
     const target = (event: Event) => {
@@ -138,7 +144,90 @@ export class Props {
     return details;
   }
 
+  /**
+   * The selected planes and boxes (indices into `section`), their numbers editable in stage space. Shown again with
+   * the same entries, it only refreshes the values, so a gizmo drag keeps the focus and the folds.
+   */
+  showSection(section: Section, selected: { planes: number[]; boxes: number[] }, up: Up): void {
+    const key = JSON.stringify([selected, section.planes.length, section.boxes.length, up]);
+    if (this.sectionView?.key === key) return this.sectionView.refresh(section);
+    let current = section;
+    const refreshers: ((s: Section) => void)[] = [];
+    /** A number box for one value: on change the edited section goes out whole, or the value comes back if it would not draw. */
+    const number = (get: (s: Section) => number, put: (s: Section, value: number) => void, label: string) => {
+      const input = h('input', { type: 'number', step: 'any', title: label, ariaLabel: label }) as HTMLInputElement;
+      const fill = (s: Section) => (input.value = format(get(s)));
+      refreshers.push(fill);
+      fill(current);
+      input.addEventListener('change', () => {
+        const next = structuredClone(current);
+        put(next, input.valueAsNumber);
+        const kept = clean(next, up);
+        if (!Number.isFinite(input.valueAsNumber) || kept.planes.length !== next.planes.length || kept.boxes.length !== next.boxes.length) fill(current);
+        else this.onsectionedit(next);
+      });
+      return input;
+    };
+    const button = (label: string, action: () => void) => {
+      const b = h('button', {}, label);
+      b.addEventListener('click', action);
+      return b;
+    };
+    const xyz = (name: string, get: (s: Section) => number[], label: string) =>
+      [name, h('div', { className: 'xyz' }, ...['X', 'Y', 'Z'].map((axis, k) => number((s) => get(s)[k], (s, v) => (get(s)[k] = v), `${label} ${axis}`)))];
+    const parts: HTMLElement[] = [h('div', { className: 'head' }, h('strong', {}, 'Section'), h('span', { className: 'type' }, 'stage space'))];
+    for (const i of selected.planes) {
+      const flip = button('Flip', () => {
+        const next = structuredClone(current);
+        next.planes[i].normal = next.planes[i].normal.map((n) => -n || 0) as Vec3;
+        this.onsectionedit(next);
+      });
+      parts.push(
+        this.section(
+          `Plane ${i + 1}`,
+          true,
+          table([xyz('Point', (s) => s.planes[i].point, `Plane ${i + 1} point`), xyz('Normal', (s) => s.planes[i].normal, `Plane ${i + 1} normal`)]),
+          h('div', { className: 'actions' }, flip, button('Delete', () => this.onsectiondelete([i], []))),
+        ),
+      );
+    }
+    // A box's corners in plan: the two axes across the up axis (section.ts reads only these).
+    const plan = up === 'Z' ? [0, 1] : [2, 0];
+    for (const i of selected.boxes) {
+      const keep = h('select', {}, h('option', { value: 'inside' }, 'Show inside'), h('option', { value: 'outside' }, 'Cut out')) as HTMLSelectElement;
+      refreshers.push((s) => (keep.value = s.boxes[i].keep));
+      keep.value = current.boxes[i].keep;
+      keep.addEventListener('change', () => {
+        const next = structuredClone(current);
+        next.boxes[i].keep = keep.value as 'inside' | 'outside';
+        this.onsectionedit(next);
+      });
+      const height = (name: 'bottom' | 'top') => h('div', { className: 'xyz' }, number((s) => s.boxes[i][name], (s, v) => (s.boxes[i][name] = v), `Box ${i + 1} ${name}`));
+      const corner = (c: number) => [
+        `Corner ${c + 1}`,
+        h('div', { className: 'xyz' }, ...plan.map((k) => number((s) => s.boxes[i].corners[c][k], (s, v) => (s.boxes[i].corners[c][k] = v), `Box ${i + 1} corner ${c + 1} ${'XYZ'[k]}`))),
+      ];
+      parts.push(
+        this.section(
+          `Box ${i + 1}`,
+          true,
+          table([['Keep', keep], ['Bottom', height('bottom')], ['Top', height('top')], ...[0, 1, 2, 3].map(corner)]),
+          h('div', { className: 'actions' }, button('Delete', () => this.onsectiondelete([], [i]))),
+        ),
+      );
+    }
+    this.element.replaceChildren(...parts);
+    this.sectionView = {
+      key,
+      refresh: (s) => {
+        current = s;
+        refreshers.forEach((fill) => fill(s));
+      },
+    };
+  }
+
   show(info: PrimInfo | null): void {
+    this.sectionView = null;
     if (!info) {
       this.element.replaceChildren(h('p', { className: 'hint' }, 'Select a prim to see its details.'));
       return;

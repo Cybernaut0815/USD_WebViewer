@@ -6,6 +6,7 @@ import {
   ACTIVE_LINE,
   batchLook,
   buildMaterial,
+  copyLook,
   displayMaterial,
   hairlineMaterial,
   HIDDEN,
@@ -1330,7 +1331,7 @@ export class SceneSync {
     if (!flat && !single) return record.material!;
     const key = `${flat}|${single}`;
     let variant = record.variants.get(key);
-    if (!variant) record.variants.set(key, (variant = style(section(record.material!.clone()), flat, single)));
+    if (!variant) record.variants.set(key, (variant = style(section(copyLook(record.material!)), flat, single)));
     return variant;
   }
 

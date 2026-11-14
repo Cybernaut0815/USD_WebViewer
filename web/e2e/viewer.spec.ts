@@ -95,6 +95,15 @@ test.describe('mock core', () => {
     await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Cube');
   });
 
+  test('Esc selects nothing, as a click on empty space does', async ({ page }) => {
+    await open(page, MOCK);
+    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
+    await expect(page.locator('usd-viewer .props .head strong')).toHaveText('Cube');
+    await page.keyboard.press('Escape');
+    expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).selection)).toEqual([]);
+    await expect(page.locator('usd-viewer .props .hint')).toBeVisible();
+  });
+
   test('shift-click adds, ctrl-click removes, and the picker chooses the prim shown', async ({ page }) => {
     await open(page, MOCK);
     const picker = page.locator('usd-viewer .picker');
@@ -1401,7 +1410,7 @@ test.describe('mock core', () => {
     expect(await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).tool)).toBe('select');
     // A box around the selected cube (a 1 % margin), selected instead of the cube: never both.
     await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).select('/World/Cube'));
-    expect(await labels()).toEqual(['Plane X', 'Plane Y (horizontal)', 'Plane Z', 'Plane facing the view', 'Box around the selection', 'Hide handles', 'Sections off', 'Clear']);
+    expect(await labels()).toEqual(['Plane X', 'Plane Y (horizontal)', 'Plane Z', 'Plane facing the view', 'Box around the selection', 'Hide handles', 'Sections off', 'Clear', 'Select all', 'Flip plane', 'Cut out', 'Delete selected']);
     await menu('Box around the selection');
     ({ section, gizmo, selection } = await state());
     const m = 0.5 + Math.sqrt(3) / 100;
@@ -1427,6 +1436,18 @@ test.describe('mock core', () => {
     await menu('Clear');
     expect(await state()).toEqual({ section: { on: true, planes: [], boxes: [] }, gizmo: null, selection: [] });
     expect(await page.evaluate(() => (window as any).events)).toEqual(Array(8).fill('ui'));
+    // The Section menu edits the selection too: Esc lets go of a new plane, Select all takes it back, then Flip plane
+    // and Delete selected.
+    await menu('Plane X');
+    await page.locator('usd-viewer canvas').focus();
+    await page.keyboard.press('Escape');
+    expect((await state()).gizmo).toBeNull();
+    await menu('Select all');
+    expect((await state()).gizmo).not.toBeNull();
+    await menu('Flip plane');
+    expect((await state()).section.planes.map((p) => p.normal)).toEqual([[1, 0, 0]]);
+    await menu('Delete selected');
+    expect((await state()).section.planes).toEqual([]);
     // 7 planes and 8 boxes: the menu stays in the window, its first item at hand.
     await page.evaluate(() => {
       const box: Section['boxes'][number] = { keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -1, top: 1 };
@@ -1437,6 +1458,45 @@ test.describe('mock core', () => {
     expect([popup.y >= 0, popup.y + popup.height <= page.viewportSize()!.height]).toEqual([true, true]);
     await page.locator('usd-viewer .popup button', { hasText: 'Plane X' }).click();
     expect((await state()).section.planes).toHaveLength(8);
+    expect(errors).toEqual([]);
+  });
+
+  test('the details panel edits the selected planes and boxes, refusing values that would not draw', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const section = () => page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).section);
+    const props = page.locator('usd-viewer .props');
+    const set = async (label: string, value: string) => {
+      await props.getByLabel(label, { exact: true }).fill(value);
+      await props.getByLabel(label, { exact: true }).press('Enter');
+    };
+    await page.locator('usd-viewer .tools button', { hasText: 'Section' }).click();
+    await page.locator('usd-viewer .popup button', { hasText: 'Plane X' }).click();
+    await expect(props.locator('summary')).toHaveText(['Plane 1']);
+    await set('Plane 1 point X', '0.25');
+    expect((await section()).planes[0].point[0]).toBe(0.25);
+    await set('Plane 1 normal X', '0'); // a zero normal would drop the plane: the value comes back
+    await expect(props.getByLabel('Plane 1 normal X')).toHaveValue('-1');
+    await props.getByRole('button', { name: 'Flip' }).click();
+    expect((await section()).planes[0].normal).toEqual([1, 0, 0]);
+    await expect(props.getByLabel('Plane 1 normal X')).toHaveValue('1');
+    await props.getByRole('button', { name: 'Delete' }).click();
+    expect((await section()).planes).toEqual([]);
+    await expect(props.locator('.hint')).toBeVisible();
+    // A box: Cut out, a new top, and a top below its bottom refused.
+    await page.evaluate(() => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.section = { on: true, planes: [], boxes: [{ keep: 'inside', corners: [[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1]], bottom: -0.5, top: 0.5 }] };
+      v.sectionGizmo = { box: 0 };
+    });
+    await expect(props.locator('summary')).toHaveText(['Box 1']);
+    await props.locator('select').selectOption('outside');
+    await set('Box 1 top', '2');
+    await set('Box 1 bottom', '3');
+    await expect(props.getByLabel('Box 1 bottom')).toHaveValue('-0.5');
+    expect((await section()).boxes.map((b) => [b.keep, b.bottom, b.top])).toEqual([['outside', -0.5, 2]]);
+    // Selecting a prim shows the prim; the section stays.
+    await page.locator('usd-viewer .row .name', { hasText: 'Cube' }).click();
+    await expect(props.locator('.head strong')).toHaveText('Cube');
     expect(errors).toEqual([]);
   });
 

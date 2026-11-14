@@ -32,8 +32,8 @@ add_executable(usdcore
     src/stage.cpp
     src/webResolver.cpp
 )
-# Thread and exception models must match the SDK's.
-target_compile_options(usdcore PRIVATE -pthread -fexceptions)
+# Thread and exception models must match the SDK's (native wasm exceptions, see sdk/CMakeLists.txt).
+target_compile_options(usdcore PRIVATE -pthread -fwasm-exceptions)
 
 # The USD libraries are linked by hand instead of through their imported targets:
 #  - Whole archives: USD registers types, schemas and plugins from static
@@ -52,7 +52,7 @@ target_link_options(usdcore PRIVATE -Wl,--whole-archive ${archives} -Wl,--no-who
 target_link_libraries(usdcore PRIVATE TBB::tbb MaterialXFormat MaterialXCore OpenSubdiv::osdCPU_static)
 
 target_link_options(usdcore PRIVATE
-    -pthread -fexceptions -lembind -lworkerfs.js --no-entry
+    -pthread -fwasm-exceptions -lembind -lworkerfs.js --no-entry
     -sMODULARIZE -sEXPORT_ES6 -sENVIRONMENT=worker,node
     -sALLOW_MEMORY_GROWTH -sINITIAL_MEMORY=256MB -sMAXIMUM_MEMORY=4GB
     # Meshes are read and built on all threads; the default allocator's one lock makes 8 threads
@@ -70,9 +70,12 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_link_options(usdcore PRIVATE -sASSERTIONS=1 -sSTACK_OVERFLOW_CHECK=2)
 endif()
 
-# The page loads the core from web/public/core/.
-add_custom_command(TARGET usdcore POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE_DIR:usdcore>/usdcore.js $<TARGET_FILE_DIR:usdcore>/usdcore.wasm
-        ${CMAKE_CURRENT_SOURCE_DIR}/../web/public/core/
-)
+# The page loads the core from web/public/core/ (OFF for side builds, e.g. -DCMAKE_EXE_LINKER_FLAGS=--profiling-funcs).
+option(COPY_TO_WEB "Copy the built core into web/public/core" ON)
+if(COPY_TO_WEB)
+    add_custom_command(TARGET usdcore POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE_DIR:usdcore>/usdcore.js $<TARGET_FILE_DIR:usdcore>/usdcore.wasm
+            ${CMAKE_CURRENT_SOURCE_DIR}/../web/public/core/
+    )
+endif()

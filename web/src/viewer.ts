@@ -189,6 +189,8 @@ export class UsdViewerElement extends HTMLElement {
   /** Between stageopen and stageloaded: the view is framed on the first meshes, then again at the end. */
   private loading = false;
   private framed = false;
+  /** A wire display mode asked the core for face edges (session.wantEdges). */
+  private edgesWanted = false;
   /** The selection behind the picker; its options are built when it is opened (selections can be huge). */
   private pickerPaths: readonly Path[] = [];
   private readonly unload = (event: BeforeUnloadEvent) => {
@@ -315,7 +317,7 @@ export class UsdViewerElement extends HTMLElement {
     await this.viewport.tool?.idle?.();
     await this.session.idle();
     await this.viewport.sync.settled();
-    await this.viewport.nextFrame();
+    await this.viewport.fullFrame();
   }
 
   dispose(): void {
@@ -371,7 +373,7 @@ export class UsdViewerElement extends HTMLElement {
   /** Frames the prims, or with no paths the whole stage and the shown overlay objects (but those with userData.frame = false). */
   frame(paths?: readonly Path[]): void {
     const v = this.viewport;
-    v.frame(paths?.length ? paths.flatMap((p) => v.sync.objectsFor(p)) : [v.sync.root, ...v.overlay.children.filter((o) => o.visible && o.userData.frame !== false)]);
+    v.frame(paths?.length ? v.sync.objectsUnder(paths) : [v.sync.root, ...v.overlay.children.filter((o) => o.visible && o.userData.frame !== false)]);
   }
 
   async pick(clientX: number, clientY: number): Promise<PickResult | null> {
@@ -575,6 +577,17 @@ export class UsdViewerElement extends HTMLElement {
   }
   set displayMode(mode: DisplayMode) {
     this.viewport.sync.setDisplayMode(mode);
+    // The wire modes draw the faces' edges, which the core sends from their first use on ('wire' shows nothing
+    // until they are in: say so on a stage that is open).
+    if (mode.includes('wire')) {
+      const first = !this.edgesWanted && !!this.session.stage;
+      this.edgesWanted = true;
+      const loaded = this.session.wantEdges();
+      if (first) {
+        this.setStatus('Loading edges…');
+        loaded.finally(() => this.status.textContent === 'Loading edges…' && this.setStatus(''));
+      }
+    }
     this.dispatchEvent(new Event('displaymodechange'));
   }
   /** Purposes drawn besides visibility (default and proxy unless changed). */

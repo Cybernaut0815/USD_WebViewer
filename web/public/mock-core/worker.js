@@ -32,6 +32,7 @@ const TYPES = { '/World': 'Xform', '/World/Cube': 'Mesh', '/World/Instances': 'P
 
 let open = false, time = 1, sent = false, timeDirty = false, selection = null, visible = true, visDirty = false;
 let sessionHidden = false; // the cube's session-layer visibility opinion
+let edgesOn = false, edgesSent = false; // setEdges: edges ride with the meshes only while on, like the real core
 
 function summary(path) {
   const name = path.split('/').pop();
@@ -89,6 +90,7 @@ const api = {
   findPrims: (text, type, limit) => Object.keys(TYPES).filter((p) => p.includes(text) && (!type || TYPES[p] === type)).slice(0, limit),
   readAsset: () => null,
   setTime(t) { time = Number.isNaN(t) ? 1 : t; timeDirty = true; },
+  setEdges(on) { edgesOn = on; },
   setRefineLevel() {},
   setRefineBudget() {},
   flush() {
@@ -97,9 +99,10 @@ const api = {
     if (!sent) {
       sent = true;
       const instances = new Float32Array([...translate(-2, 0, 2), ...translate(0, 0, 2), ...translate(2, 0, 2)]);
+      edgesSent = edgesOn;
       const cube = () => ({
         indices: new Uint32Array(CUBE.indices), positions: new Float32Array(CUBE.positions), normals: new Float32Array(CUBE.normals),
-        edges: new Uint32Array(CUBE.edges), counts: { points: 8, faces: 6, edges: 12 },
+        ...(edgesOn ? { edges: new Uint32Array(CUBE.edges) } : {}), counts: { points: 8, faces: 6, edges: 12 },
         primvars: [{ name: 'st', size: 2, data: new Float32Array(CUBE.uvs) }],
       });
       delta.meshes = [
@@ -122,6 +125,11 @@ const api = {
       delta.xforms = { rids: new Uint32Array([1, 3, 4, 5, 6]), matrices: new Float64Array([...cubeMatrix(), ...[1, 0, 0, 0, 0, 0.7, -0.7, 0, 0, 0.7, 0.7, 0, 0, 0, 0, 1], ...translate(0, 0, 0), ...translate(0, 0, 0), ...translate(0, 0, 0)]) };
     } else if (timeDirty) {
       delta.xforms = { rids: new Uint32Array([1]), matrices: new Float64Array(cubeMatrix()) };
+    }
+    if (edgesOn && !edgesSent) {
+      // Edges turned on for meshes the page already has: entries with the edges alone.
+      edgesSent = true;
+      delta.meshes = [1, 2].map((rid) => ({ rid, edges: new Uint32Array(CUBE.edges) }));
     }
     timeDirty = false;
     if (visDirty) { delta.visibility = { rids: new Uint32Array([1]), visible: new Uint8Array([visible && !sessionHidden ? 1 : 0]) }; visDirty = false; }

@@ -14,7 +14,10 @@ file(TO_CMAKE_PATH "$ENV{EMSDK}" EMSDK)
 set(SDK_PREFIX "${CMAKE_BINARY_DIR}/../sdk" CACHE PATH "Install prefix of the SDK")
 get_filename_component(P "${SDK_PREFIX}" ABSOLUTE)
 
-set(WASM_FLAGS "-pthread --use-port=zlib")
+# Native wasm exception handling: the JS-emulated kind (-fexceptions alone) routes every call that may unwind
+# through a JS trampoline, about a third of the core's time on large stages. USD adds -fexceptions itself;
+# -fwasm-exceptions takes precedence. Everything linked into the core must use the same model.
+set(WASM_FLAGS "-pthread --use-port=zlib -fwasm-exceptions")
 set(COMMON
     -DCMAKE_TOOLCHAIN_FILE:FILEPATH=${EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake
     -DCMAKE_BUILD_TYPE:STRING=Release
@@ -75,7 +78,7 @@ ExternalProject_Add(materialx
         -DMATERIALX_BUILD_RENDER:BOOL=OFF
         -DMATERIALX_BUILD_TESTS:BOOL=OFF
         -DMATERIALX_BUILD_USE_CCACHE:BOOL=OFF # ccache cannot launch the .bat compiler drivers
-        "-DCMAKE_CXX_FLAGS:STRING=-pthread -fexceptions"
+        "-DCMAKE_CXX_FLAGS:STRING=-pthread -fwasm-exceptions"
 )
 # usdMtlx embeds every file of the installed standard library into the wasm.
 # Only the .mtlx node definitions are needed, not the generator sources.
@@ -124,5 +127,5 @@ ExternalProject_Add(openusd
         -DOPENSUBDIV_OSDCPU_LIBRARY:FILEPATH=${P}/lib/libosdCPU.a
         -DCMAKE_C_FLAGS:STRING=${WASM_FLAGS}
         -DCMAKE_CXX_FLAGS:STRING=${WASM_FLAGS}
-        -DCMAKE_EXE_LINKER_FLAGS:STRING=-pthread
+        "-DCMAKE_EXE_LINKER_FLAGS:STRING=-pthread -fwasm-exceptions"
 )

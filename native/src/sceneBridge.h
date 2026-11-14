@@ -38,6 +38,9 @@ public:
     /// Re-converts one mesh (after its refinement attributes changed).
     void MarkMesh(const SdfPath& path);
     void SetSelection(const std::vector<SdfPath>& paths);
+    /// Face edges (wire display modes): off, meshes send only their counts; turning it on sends the
+    /// edges of every mesh the page has without them. Kept across stages.
+    void SetEdges(bool on);
 
     /// Everything dirtied since the previous flush, converting at most
     /// `maxItems` geometry prims; `more` is set when some are left.
@@ -91,6 +94,7 @@ private:
     HdSceneIndexBaseRefPtr _scene; // end of the filtering chain
     HdsiPrimManagingSceneIndexObserverRefPtr _observer;
     int _refineLevel = 0;  // like usdview and Omniverse; -1: automatic from a triangle budget
+    bool _edges = false;      // meshes send their face edges (SetEdges)
     double _autoBudget = 3e6; // output triangles the automatic level may produce (set from the page)
     int _autoLevel = 0;     // what automatic resolved to for this stage
     bool _autoDirty = true; // mesh records came or went since _autoLevel was computed

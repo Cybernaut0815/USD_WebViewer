@@ -34,6 +34,14 @@ struct MeshIn {
     VtVec3fArray points;
     std::vector<PrimvarIn> primvars; // authored normals travel as "normals"
     int refineLevel = 0;
+    /// The points cannot change over time. Only then may a polygonal mesh drop normals that just restate
+    /// its faces and weld coincident points: the layout is not reused for moved points (BuildMeshPoints).
+    bool staticPoints = false;
+    /// Build the face edges' line pairs (wire display modes); otherwise only count them.
+    bool edges = true;
+    /// The build may use every thread (a mesh of millions of corners built on its own); otherwise it stays on the
+    /// calling thread, as when many meshes are built at once.
+    bool parallel = false;
 };
 
 struct PrimvarOut {
@@ -47,7 +55,7 @@ struct MeshOut {
     std::vector<float> positions;
     std::vector<float> normals; // empty: none available, shade flat
     std::vector<PrimvarOut> primvars;
-    std::vector<int> triangleFace; // authored face each triangle came from
+    std::vector<int> triangleFace; // authored face each triangle came from; empty unless refined (then trianglePoly)
     /// The polygon each triangle was fanned from: the authored face, or the last-level face when
     /// refined. A polygon's triangles are consecutive, (c0, ci, ci+1) for i = 1..n-2.
     std::vector<int> trianglePoly;
@@ -61,13 +69,17 @@ struct MeshOut {
     size_t drawnFaces = 0, distinctEdges = 0;
     /// Output vertex -> mesh vertex. Corners are welded by their mesh vertex and the values of
     /// the faceVarying and uniform primvars, so only seams split vertices; empty when the
-    /// output vertices are the mesh vertices.
+    /// output vertices are the mesh vertices. On static polygonal meshes coincident points (same
+    /// position and per-point values) count as one mesh vertex: the first of them.
     std::vector<uint32_t> weld;
+    /// Mesh vertex -> output vertex, only when coincident points were welded (UINT32_MAX: not drawn).
+    std::vector<uint32_t> pointVertex;
     /// Corner -> output vertex, kept only for meshes with faceVarying normals (BuildMeshPoints needs it).
     std::vector<uint32_t> cornerVertex;
 };
 
-MeshOut BuildMesh(const MeshIn& in);
+/// Normals that only restate the faces of a static polygonal mesh are dropped from `in` (flat shading draws them).
+MeshOut BuildMesh(MeshIn& in);
 
 /// Positions and normals of a mesh whose points moved, in the layout (`weld`, `cornerVertex`)
 /// of its last BuildMesh: no triangulation, no edges. False when the mesh does not fit that

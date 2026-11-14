@@ -21,8 +21,10 @@ export default defineConfig(({ mode }) => ({
   publicDir: mode === 'lib' ? false : 'public',
   // three's addons import 'three'; point them at the same WebGPU entry the app uses.
   resolve: { alias: [{ find: /^three$/, replacement: 'three/webgpu' }] },
-  server: { headers: isolation },
-  preview: { headers: isolation },
+  // `--mode no-headers`: a host that sends no COOP/COEP (GitHub Pages), where sw.js isolates the page (e2e "hosting").
+  cacheDir: mode === 'no-headers' ? 'node_modules/.vite-no-headers' : undefined,
+  server: { headers: mode === 'no-headers' ? {} : isolation },
+  preview: { headers: mode === 'no-headers' ? {} : isolation },
   build:
     mode === 'lib'
       ? {

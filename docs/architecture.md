@@ -17,11 +17,11 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 - MaterialX provides material networks.
 
 **From the worker to the page:** the core sends render deltas, made of typed arrays that are transferred rather than copied:
-- meshes as triangles, with the authored face outlines for wireframes;
+- meshes as triangles: static meshes with coincident points welded and normals that only restate the faces dropped (flat shading draws the same), and the authored face outlines once a wireframe mode asks for them;
 - curves, points and instances;
 - materials, lights and cameras.
 
-**On the page:** three.js draws the deltas with WebGPU, falling back to WebGL2. Edits go back to the core as RPC calls and come back as new deltas.
+**On the page:** three.js draws the deltas with WebGPU, falling back to WebGL2. Static meshes that share a look are merged into a few batches, each drawn in one call (thousands of draw calls become a handful; in the wire modes their edges take one more call per batch), and while the view moves the batched parts out of view or under a pixel are skipped (full detail returns 150 ms after it stops). Edits go back to the core as RPC calls and come back as new deltas.
 
 **From outside the page:** other programs push whole layers to a small relay (`web/live-relay.ts`, HTTP and server-sent events); the page fetches them and the core replaces the layer's content in place, which USD diffs so only changed prims resync. The viewer's edits go back the same way. See [Live link](live.md).
 
@@ -51,7 +51,7 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 - **Editing:** gizmo editing with undo, change markers and Clear edits, saving, and reload-on-change.
 - **Live link:** layers pushed through the relay replace the open layer or add an overlay; viewer edits are published back.
 
-Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 MB, or 4 MB with brotli.
+Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 21 MB: 5.3 MB with gzip, 3.3 MB with brotli. The SDK and the core use native WebAssembly exceptions (`-fwasm-exceptions`); emulated in JavaScript, they routed every call that may unwind through a JS trampoline, about a third of the core's time on large stages.
 
 **Not built yet:** the Nucleus gateway. The CI workflow in `.github/workflows/ci.yml` has not run anywhere yet.
 
@@ -69,4 +69,4 @@ Pixar's Kitchen_set and UsdSkelExamples load as they are. `usdcore.wasm` is 23 M
   - The gizmo sits at the prim's origin, not at its pivot.
   - Undo re-authors earlier values rather than removing the layer's specs. A transform op added to a prim that had none therefore stays after undo, and so does its change marker. Clear edits removes it.
 - **Skinning** runs on the CPU. A frame of a deforming mesh is a positions-only update laid out like the last full conversion (no triangulation): the 90 meshes of UsdSkelExamples' HumanFemale take about 50 ms per frame in the core on a 2020 laptop.
-- **Memory:** the core is wasm32, so a stage has to fit in 4 GB. Meshes reach the page welded (vertices split only where a faceVarying or uniform primvar differs: about a third of the face corners on textured stages), a flush converts meshes 64 at a time within a 256 MB page, and ten 1-million-quad grids peak at about 2.5 GB.
+- **Memory:** the core is wasm32, so a stage has to fit in 4 GB. Meshes reach the page welded (vertices split only where a faceVarying or uniform primvar differs: about a third of the face corners on textured stages; static meshes also share coincident points), a flush converts meshes 64 at a time within a 256 MB page, and meshes over 5 million face corners convert one at a time. A single mesh of 13 million points and 26 million triangles peaks at about 2.8 GB (3.7 GB with texture coordinates). The wasm heap never shrinks, so the next stage reuses that memory.

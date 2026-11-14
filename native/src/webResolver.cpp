@@ -7,7 +7,11 @@
 
 #include <emscripten/fetch.h>
 
+#include <sys/stat.h>
+
+#include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -24,8 +28,40 @@ struct Gateway {
 };
 std::mutex gMutex;
 std::map<std::string, Gateway> gGateways;
-/// Bytes of URLs still in use, so a URL open twice is read once.
+/// Bytes of URLs and dropped files still in use, so a file open twice (the edit snapshot reopens the stage's
+/// layers) is read once and held once.
 std::map<std::string, std::pair<std::weak_ptr<const char>, size_t>> gCache;
+
+/// The bytes of a path still in use, or null.
+std::shared_ptr<ArAsset> Cached(const std::string& path)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    const auto cached = gCache.find(path);
+    if (cached == gCache.end()) return nullptr;
+    if (const std::shared_ptr<const char> bytes = cached->second.first.lock()) return ArInMemoryAsset::FromBuffer(bytes, cached->second.second);
+    gCache.erase(cached);
+    return nullptr;
+}
+
+void Cache(const std::string& path, const std::shared_ptr<const char>& bytes, size_t size)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gCache[path] = { bytes, size };
+}
+/// Dropped files read ahead by the worker (Provide), each taken by its first open.
+std::map<std::string, std::pair<std::shared_ptr<const char>, size_t>> gProvided;
+
+/// The bytes provided for a path, taken out of the map, or null.
+std::shared_ptr<ArAsset> TakeProvided(const std::string& path, std::shared_ptr<const char>* bytes, size_t* size)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    const auto found = gProvided.find(path);
+    if (found == gProvided.end()) return nullptr;
+    *bytes = found->second.first;
+    *size = found->second.second;
+    gProvided.erase(found);
+    return ArInMemoryAsset::FromBuffer(*bytes, *size);
+}
 /// Packages (URLs and dropped files), held until ReleasePackages: a usdz is reopened for every file read from it,
 /// textures included, long after the stage let go of it, and would be downloaded or read whole each time.
 std::map<std::string, std::pair<std::shared_ptr<const char>, size_t>> gPackages;
@@ -106,6 +142,19 @@ void WebResolver::Forget(const std::string& url)
     const std::lock_guard<std::mutex> lock(gMutex);
     gCache.erase(url);
     gPackages.erase(url);
+    gProvided.erase(url);
+}
+
+void WebResolver::Provide(const std::string& path, const std::shared_ptr<const char>& bytes, size_t size)
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gProvided[path] = { bytes, size };
+}
+
+void WebResolver::DropProvided()
+{
+    const std::lock_guard<std::mutex> lock(gMutex);
+    gProvided.clear();
 }
 
 void WebResolver::ReleasePackages()
@@ -144,36 +193,47 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
         // mapped the way ArFilesystemAsset wants; read them into memory instead.
         if (TfStringStartsWith(url, "/drop/")) {
             if (std::shared_ptr<ArAsset> held = HeldPackage(url)) return held;
+            std::shared_ptr<const char> provided;
+            size_t providedSize = 0;
+            if (std::shared_ptr<ArAsset> asset = TakeProvided(url, &provided, &providedSize)) {
+                Hold(url, provided, providedSize);
+                Cache(url, provided, providedSize);
+                return asset;
+            }
+            if (std::shared_ptr<ArAsset> cached = Cached(url)) return cached;
             std::FILE* file = std::fopen(url.c_str(), "rb");
             if (!file) return nullptr;
-            std::fseek(file, 0, SEEK_END);
-            const long size = std::ftell(file);
-            std::fseek(file, 0, SEEK_SET);
-            char* data = size > 0 ? static_cast<char*>(std::malloc(size_t(size))) : nullptr;
-            const bool ok = data && std::fread(data, 1, size_t(size), file) == size_t(size);
+            // 64-bit size (ftell's long is 32-bit here); the core is wasm32, so 4 GB can never fit.
+            struct stat info;
+            const bool sized = fstat(fileno(file), &info) == 0;
+            const uint64_t size = sized ? uint64_t(info.st_size) : 0;
+            char* data = sized && size > 0 && size < (uint64_t(4) << 30) ? static_cast<char*>(std::malloc(size_t(size))) : nullptr;
+            bool ok = data != nullptr;
+            // In slices: each is one read of the Blob behind WORKERFS (FileReaderSync), which then stays moderate.
+            for (uint64_t done = 0; ok && done < size;) {
+                const size_t slice = size_t(std::min<uint64_t>(size - done, uint64_t(256) << 20));
+                ok = std::fread(data + done, 1, slice, file) == slice;
+                done += slice;
+            }
             std::fclose(file);
             if (!ok) {
                 std::free(data);
+                if (sized && size > 0) TF_RUNTIME_ERROR("%s: could not read its %.2f GB into the core's memory (4 GB at most, with what is decoded from it)", url.c_str(), double(size) / 1e9);
                 return nullptr;
             }
             const std::shared_ptr<const char> bytes(data, [](const char* p) { std::free(const_cast<char*>(p)); });
             Hold(url, bytes, size_t(size));
+            Cache(url, bytes, size_t(size));
             return ArInMemoryAsset::FromBuffer(bytes, size_t(size));
         }
         return ArDefaultResolver::_OpenAsset(resolvedPath);
     }
 
     if (std::shared_ptr<ArAsset> held = HeldPackage(url)) return held;
+    if (std::shared_ptr<ArAsset> cached = Cached(url)) return cached;
     std::string request = url, auth;
     {
         const std::lock_guard<std::mutex> lock(gMutex);
-        const auto cached = gCache.find(url);
-        if (cached != gCache.end()) {
-            if (const std::shared_ptr<const char> bytes = cached->second.first.lock()) {
-                return ArInMemoryAsset::FromBuffer(bytes, cached->second.second);
-            }
-            gCache.erase(cached);
-        }
         const std::string name = url.substr(0, scheme - 3);
         if (name != "http" && name != "https") {
             const auto gateway = gGateways.find(name);
@@ -201,10 +261,7 @@ std::shared_ptr<ArAsset> WebResolver::_OpenAsset(const ArResolvedPath& resolvedP
     // The asset shares the fetch's buffer; closing the fetch frees it.
     const size_t size = size_t(fetch->numBytes);
     const std::shared_ptr<const char> bytes(fetch->data, [fetch](const char*) { emscripten_fetch_close(fetch); });
-    {
-        const std::lock_guard<std::mutex> lock(gMutex);
-        gCache[url] = { bytes, size };
-    }
+    Cache(url, bytes, size);
     Hold(url, bytes, size);
     return ArInMemoryAsset::FromBuffer(bytes, size);
 }

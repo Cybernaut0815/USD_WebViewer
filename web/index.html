@@ -8,9 +8,6 @@
     <style>
       html, body { margin: 0; height: 100%; background: #1e1f22; }
     </style>
-    <!-- Hosts that cannot send COOP/COEP headers (GitHub Pages) get cross-origin isolation from this
-         service worker instead; it does nothing where the headers are already present. -->
-    <script src="coi-serviceworker.min.js"></script>
   </head>
   <body>
     <usd-viewer id="viewer"></usd-viewer>
@@ -23,16 +20,32 @@
       if (query.has('panels')) viewer.setAttribute('panels', query.get('panels'));
       if (query.has('live')) viewer.setAttribute('live', query.get('live') === '1' ? '' : query.get('live')); // 1: live/ next to the page
       if (query.has('src')) viewer.setAttribute('src', query.get('src'));
+      const core = new URL(viewer.getAttribute('core-url') ?? 'core/', document.baseURI);
       // The core starts booting now, while the bundle loads; the element adopts this worker (see viewer.ts). What it
-      // posts before then is kept and handed over. Not before the page is cross-origin isolated: on a first visit to
-      // a host without the headers the service worker above reloads the page first, and the core needs isolation.
+      // posts before then is kept and handed over. Not before the page is cross-origin isolated: the core needs it.
       if (crossOriginIsolated) {
-        const url = new URL('worker.js', new URL(viewer.getAttribute('core-url') ?? 'core/', document.baseURI));
+        const url = new URL('worker.js', core);
         const worker = new Worker(url, { type: 'module' });
         const early = [];
         worker.onmessage = worker.onerror = (event) => early.push(event);
         window.usdCoreWorker = { url: url.href, worker, early };
       }
+      // Hosts that cannot send COOP/COEP headers (GitHub Pages) get cross-origin isolation from sw.js, which adds them
+      // to this page and the worker scripts. The first visit registers it and reloads once (a placeholder element
+      // keeps the viewer from starting meanwhile, and the wasm downloads into the HTTP cache). A page already under
+      // a service worker registers again so sw.js stays current (and replaces an older one at this scope). With site
+      // data blocked (both APIs throw) none of this works, and the viewer says the page is not isolated.
+      try {
+        const sw = navigator.serviceWorker;
+        if (sw && (!crossOriginIsolated || sw.controller)) sw.register('sw.js').catch(() => {});
+        if (crossOriginIsolated) sessionStorage.removeItem('usd-sw-reload');
+        else if (sw && !sessionStorage.getItem('usd-sw-reload')) {
+          sessionStorage.setItem('usd-sw-reload', '1'); // once: without isolation after it, the viewer says why
+          customElements.define('usd-viewer', class extends HTMLElement {});
+          const wasm = fetch(new URL('usdcore.wasm', core)).then((response) => response.arrayBuffer()).catch(() => {});
+          Promise.race([Promise.all([sw.ready, wasm]), new Promise((resolve) => setTimeout(resolve, 10000))]).then(() => location.reload());
+        }
+      } catch {}
     </script>
     <script type="module" src="/src/index.ts"></script>
   </body>

@@ -294,6 +294,7 @@ export class UsdSession extends EventTarget {
   private wantedTime: number | undefined;
   private needFlush = false;
   private pumping: Promise<void> | null = null;
+  private edges = false; // wantEdges() was called
   private playStart = 0;
   private playFrom = 0;
   private playRequest = 0;
@@ -487,6 +488,17 @@ export class UsdSession extends EventTarget {
     this.core.call('setSelection', this.selected);
     this.flush();
     this.emit('selectionchange', { paths: this.selected, source, active: this.activePath });
+  }
+
+  /**
+   * Face edges, for the wire display modes: asked for once and then kept, so later stages bring them too (the core
+   * sends them for the meshes the page already has in the next flush). Resolves when they are in.
+   */
+  wantEdges(): Promise<void> {
+    if (this.edges) return this.pumping ?? Promise.resolve();
+    this.edges = true;
+    this.core.call('setEdges', true).catch(() => {}); // an older core sends them anyway
+    return this.flush();
   }
 
   /** True when the prim or one of its ancestors is locked. */

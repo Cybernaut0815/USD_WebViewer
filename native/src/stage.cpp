@@ -56,6 +56,7 @@
 #include "pxr/usd/sdf/fileFormat.h"
 #include "pxr/usd/usd/editTarget.h"
 #include "pxr/usd/sdf/usdFileFormat.h"
+#include "pxr/usd/sdf/usdcFileFormat.h"
 #include "pxr/usd/usdGeom/xformCache.h"
 #include "pxr/usd/usdGeom/xformCommonAPI.h"
 #include "pxr/usd/usdGeom/xformOp.h"
@@ -72,6 +73,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -392,13 +394,18 @@ const TfToken kRefineEnable("refinementEnableOverride"), kRefineLevel("refinemen
 struct ChangeListener : TfWeakBase {
     SdfPathVector resynced; // prim resyncs only: property adds and removes are not subtree changes
     std::set<SdfPath> changed;
+    std::map<SdfPath, std::set<TfToken>> properties; // the properties it touched, by prim
     void Changed(const UsdNotice::ObjectsChanged& notice)
     {
         for (const SdfPath& path : notice.GetResyncedPaths()) {
             if (path.IsAbsoluteRootOrPrimPath()) resynced.push_back(path);
             changed.insert(path.GetPrimPath());
+            if (path.IsPropertyPath()) properties[path.GetPrimPath()].insert(path.GetNameToken());
         }
-        for (const SdfPath& path : notice.GetChangedInfoOnlyPaths()) changed.insert(path.GetPrimPath());
+        for (const SdfPath& path : notice.GetChangedInfoOnlyPaths()) {
+            changed.insert(path.GetPrimPath());
+            if (path.IsPropertyPath()) properties[path.GetPrimPath()].insert(path.GetNameToken());
+        }
     }
 };
 
@@ -450,6 +457,11 @@ Fields FieldsOf(const SdfLayerHandle& layer, const SdfPath& path)
 struct ChangeTracker {
     std::vector<std::pair<SdfLayerHandle, SdfLayerRefPtr>> snapshot;
     std::set<SdfPath> touched;
+    /// The properties tracked edits touched, by prim, and the prims they resynced (subtrees included): Differs()
+    /// compares only those properties, since the others still are what the file has (a mesh's points and
+    /// indices are hundreds of MB on a big one, read again by every comparison).
+    std::map<SdfPath, std::set<TfToken>> properties;
+    std::set<SdfPath> resynced;
     /// Differs() per touched prim, recomputed only for the prims an edit changes.
     std::unordered_map<SdfPath, bool, SdfPath::Hash> state;
     struct Stash {
@@ -466,6 +478,8 @@ struct ChangeTracker {
     {
         snapshot.clear();
         touched.clear();
+        properties.clear();
+        resynced.clear();
         state.clear();
         stashes.clear();
         pending = stage;
@@ -477,10 +491,28 @@ struct ChangeTracker {
         const UsdStageRefPtr stage = pending;
         pending = nullptr;
         for (const SdfLayerHandle& layer : stage->GetLayerStack(/*includeSessionLayers=*/false)) {
-            SdfLayerRefPtr copy = SdfLayer::CreateAnonymous("snapshot");
-            copy->TransferContent(layer);
+            // A clean crate layer is its file: open it again (its structure only; values are read when compared,
+            // from the same bytes, which the resolver shares). A copy would decode every value: on a 432 MB stage
+            // that took seconds and about a gigabyte. Text, dirty and anonymous layers are copied.
+            SdfLayerRefPtr copy;
+            if (!layer->IsDirty() && !layer->IsAnonymous() && layer->GetFileFormatArguments().empty() && IsCrate(layer)) {
+                copy = SdfLayer::OpenAsAnonymous(layer->GetIdentifier(), false, "snapshot");
+            }
+            if (!copy) {
+                copy = SdfLayer::CreateAnonymous("snapshot");
+                copy->TransferContent(layer);
+            }
             snapshot.emplace_back(layer, copy);
         }
+    }
+
+    static bool IsCrate(const SdfLayerHandle& layer)
+    {
+        const SdfFileFormatConstPtr format = layer->GetFileFormat();
+        if (!format) return false;
+        const TfToken id = format->GetFormatId();
+        return id == SdfUsdcFileFormatTokens->Id
+            || (id == SdfUsdFileFormatTokens->Id && SdfUsdFileFormat::GetUnderlyingFormatForLayer(*layer) == SdfUsdcFileFormatTokens->Id);
     }
 
     /// True while the prim's own specs (not its children) differ from the snapshot in some layer.
@@ -494,18 +526,25 @@ struct ChangeTracker {
             if (fields.empty()) fields[SdfFieldKeys->Specifier] = VtValue(SdfSpecifierOver);
             return fields;
         };
-        const auto properties = [&](const SdfLayerHandle& layer, std::set<TfToken>* names) {
+        const auto listNames = [&](const SdfLayerHandle& layer, std::set<TfToken>* names) {
             if (const SdfPrimSpecHandle spec = layer->GetPrimAtPath(path)) {
                 for (const SdfPropertySpecHandle& property : spec->GetProperties()) names->insert(property->GetNameToken());
             }
         };
+        bool all = false; // under a resynced prim: compare every property
+        for (SdfPath p = path; !all && !p.IsEmpty(); p = p.GetParentPath()) {
+            all = resynced.count(p) > 0;
+            if (p.IsAbsoluteRootPath()) break;
+        }
+        const auto edited = properties.find(path);
         for (const auto& [layer, copy] : snapshot) {
             if (!layer) continue;
             if (prim(layer) != prim(copy)) return true;
             std::set<TfToken> names;
-            properties(layer, &names);
-            properties(copy, &names);
+            listNames(layer, &names);
+            listNames(copy, &names);
             for (const TfToken& name : names) {
+                if (!all && (edited == properties.end() || !edited->second.count(name))) continue; // as in the file
                 Fields now = FieldsOf(layer, path.AppendProperty(name)), then = FieldsOf(copy, path.AppendProperty(name));
                 const auto strip = [&](Fields& fields) {
                     for (const TfToken& key : bookkeeping) fields.erase(key);
@@ -518,6 +557,26 @@ struct ChangeTracker {
         return false;
     }
 } gTracker;
+
+/// World bounds at one time, kept until the stage changes: a fresh cache per call read every point below the
+/// prim again (the props panel asks on each selection; the root of a large stage is millions of points).
+struct BoundsCache : TfWeakBase {
+    std::unique_ptr<UsdGeomBBoxCache> cache;
+    TfNotice::Key key;
+    void Reset(const UsdStageRefPtr& stage)
+    {
+        TfNotice::Revoke(key);
+        cache.reset();
+        if (stage) key = TfNotice::Register(TfCreateWeakPtr(this), &BoundsCache::Changed, UsdStageWeakPtr(stage));
+    }
+    void Changed(const UsdNotice::ObjectsChanged&) { cache.reset(); }
+    UsdGeomBBoxCache& At(UsdTimeCode at)
+    {
+        if (!cache) cache = std::make_unique<UsdGeomBBoxCache>(at, TfTokenVector{ UsdGeomTokens->default_, UsdGeomTokens->render, UsdGeomTokens->proxy }, true);
+        else cache->SetTime(at); // clears what it holds when the time differs
+        return *cache;
+    }
+} gBounds;
 
 /// Makes `path` in `layer` what it is in `from` (subtree included), or removes it when `from` has none.
 void ReplacePrimSpec(const SdfLayerHandle& from, const SdfLayerHandle& layer, const SdfPath& path)
@@ -544,7 +603,11 @@ std::string Edit(const UsdStageRefPtr& stage, Fn&& edit, bool track = true)
         TfNotice::Key key = TfNotice::Register(TfCreateWeakPtr(&listener), &ChangeListener::Changed, UsdStageWeakPtr(stage));
         error = edit();
         TfNotice::Revoke(key);
-        if (track) gTracker.touched.insert(listener.changed.begin(), listener.changed.end());
+        if (track) {
+            gTracker.touched.insert(listener.changed.begin(), listener.changed.end());
+            gTracker.resynced.insert(listener.resynced.begin(), listener.resynced.end());
+            for (const auto& [prim, names] : listener.properties) gTracker.properties[prim].insert(names.begin(), names.end());
+        }
     }
     std::ostringstream stream;
     JsWriter w(stream);
@@ -711,6 +774,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
     _stage = UsdStage::Open(url, loadPayloads ? UsdStage::LoadAll : UsdStage::LoadNone);
     _url = url;
     gTracker.Reset(_stage);
+    gBounds.Reset(_stage);
     std::ostringstream stream;
     JsWriter w(stream);
     w.BeginObject();
@@ -751,6 +815,7 @@ std::string Stage::Open(const std::string& url, bool loadPayloads)
 void Stage::Close()
 {
     gTracker.Reset(nullptr);
+    gBounds.Reset(nullptr);
     _stage.Reset();
     _overlays.clear();
     _url.clear();
@@ -807,9 +872,7 @@ std::string Stage::Bounds(const std::string& path, double time) const
     const UsdPrim prim = _stage && SdfPath::IsValidPathString(path) ? _stage->GetPrimAtPath(SdfPath(path)) : UsdPrim();
     const UsdGeomImageable imageable(prim);
     if (!imageable) return "null";
-    const UsdTimeCode at = Time(time);
-    UsdGeomBBoxCache cache(at, { UsdGeomTokens->default_, UsdGeomTokens->render, UsdGeomTokens->proxy }, true);
-    const GfRange3d range = cache.ComputeWorldBound(prim).ComputeAlignedRange();
+    const GfRange3d range = gBounds.At(Time(time)).ComputeWorldBound(prim).ComputeAlignedRange();
     if (range.IsEmpty()) return "null";
     std::ostringstream stream;
     JsWriter w(stream);
@@ -1114,6 +1177,11 @@ std::string Stage::ClearRefinementOverrides()
 std::string Stage::Reload()
 {
     return Edit(_stage, [&] {
+        // The resolver keeps the bytes of URLs and dropped files while a layer holds them: forgotten first, so the
+        // reload reads the files again (as ReloadLayers does).
+        for (const SdfLayerHandle& layer : _stage->GetUsedLayers()) {
+            if (!layer->IsAnonymous()) WebResolver::Forget(layer->GetIdentifier());
+        }
         _stage->Reload();
         return std::string();
     });

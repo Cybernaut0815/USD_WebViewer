@@ -2,7 +2,6 @@
 import * as THREE from 'three/webgpu';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { RectAreaLightTexturesLib } from 'three/addons/lights/RectAreaLightTexturesLib.js';
 import type { Path, Rid } from './protocol.ts';
 import { type SceneHost, SceneSync } from './scene.ts';
 import { boxClipped, clean, EMPTY, equal, keeps, rows, type Section, type SectionSource, type Vec3 } from './section.ts';
@@ -62,6 +61,15 @@ export class Viewport {
   /** Navigate's speed factor (the wheel's setting), kept while other tools are active. */
   flySpeed = 1;
   private readonly resizer: ResizeObserver;
+  private readonly host: Omit<SceneHost, 'invalidate'>;
+  /** The WebGPU device limits asked for (see init). */
+  private readonly limits: Record<string, number> = {};
+  /** The camera of the last frame and the pending full-detail frame (see cullDetail). */
+  private readonly lastView = new THREE.Matrix4();
+  private readonly lastProjection = new THREE.Matrix4();
+  private settle: ReturnType<typeof setTimeout> | 0 = 0;
+  /** The last frame left sub-pixel batched parts out. */
+  private culled = false;
   private dirty = false;
   private frameRequest = 0;
   private presented: (() => void)[] = [];
@@ -96,8 +104,10 @@ export class Viewport {
 
   constructor(canvas: HTMLCanvasElement, host: Omit<SceneHost, 'invalidate'>, forceWebGL: boolean) {
     this.canvas = canvas;
+    this.host = host;
     for (const camera of [this.freeCamera, this.orthoCamera]) camera.layers.enable(HELPERS);
-    this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL });
+    // three passes this object on to the device request; init() fills it first (three's backend keeps the reference).
+    this.renderer = new THREE.WebGPURenderer({ canvas, antialias: true, forceWebGL, requiredLimits: this.limits });
     this.renderer.setClearColor(DEFAULT_BACKGROUND);
     this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.shadowMap.enabled = true;
@@ -117,9 +127,28 @@ export class Viewport {
   }
 
   async init(): Promise<void> {
+    // three's area-light tables (about 250 KB of script) arrive as a chunk of their own, alongside the device and the
+    // core; installed before the first frame, since any RectAreaLight (the stage's or a host's) needs them.
+    const areaTables = import('three/addons/lights/RectAreaLightTexturesLib.js');
+    // WebGPU's default limits allow no buffer over 256 MiB, which one big mesh's index or vertices exceed (the pass
+    // then draws nothing). Ask the device for the adapter's own maxima: the same adapter options as three's request
+    // (WebGPUBackend: featureLevel 'compatibility'), so requestDevice cannot refuse them and fall back to WebGL2.
+    const gpu = (navigator as { gpu?: { requestAdapter(options: object): Promise<{ limits: Record<string, number> } | null> } }).gpu;
+    if ((this.renderer.backend as any).isWebGPUBackend && gpu) {
+      const adapter = await gpu.requestAdapter({ featureLevel: 'compatibility' }).catch(() => null);
+      for (const name of ['maxBufferSize', 'maxStorageBufferBindingSize']) if (adapter?.limits[name]) this.limits[name] = adapter.limits[name];
+    }
+    // GPU errors (a buffer the device refuses, a lost device) reach the session log, not only the console.
+    let reported = 0;
+    const report = (info: { message?: string }) => reported++ < 5 && this.host.warn(`GPU: ${info?.message ?? info}`);
+    const { onError, onDeviceLost } = this.renderer as unknown as Record<'onError' | 'onDeviceLost', (info: object) => void>;
+    Object.assign(this.renderer, {
+      onError: (info: object) => (onError.call(this.renderer, info), report(info)),
+      onDeviceLost: (info: object) => (onDeviceLost.call(this.renderer, info), report(info)),
+    });
     await this.renderer.init();
+    THREE.RectAreaLightNode.setLTC((await areaTables).RectAreaLightTexturesLib.init());
     this.backend = (this.renderer.backend as any).isWebGPUBackend ? 'webgpu' : 'webgl2';
-    THREE.RectAreaLightNode.setLTC(RectAreaLightTexturesLib.init());
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.sync.setStudioEnvironment(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
     pmrem.dispose();
@@ -151,6 +180,7 @@ export class Viewport {
       try {
         this.camera.updateMatrixWorld(); // hooks see this frame's camera (lookAt leaves its matrices a step behind)
         for (const hook of this.beforeRender) hook();
+        this.cullDetail();
         const start = performance.now();
         this.renderer.render(this.scene, this.camera);
         const end = performance.now();
@@ -161,6 +191,26 @@ export class Viewport {
         this.presented.splice(0).forEach((done) => done()); // waiters must not hang on a failed frame
       }
     });
+  }
+
+  /**
+   * While the view moves, batched parts out of view or under a pixel draw nothing (SceneSync.cullDetail): in an
+   * overview most triangles belong to them. A frame drawn 150 ms after the view stops shows everything again.
+   */
+  private cullDetail(): void {
+    const camera = this.camera;
+    const moving = !camera.matrixWorld.equals(this.lastView) || !camera.projectionMatrix.equals(this.lastProjection);
+    this.lastView.copy(camera.matrixWorld);
+    this.lastProjection.copy(camera.projectionMatrix);
+    // A frame that redraws the shadow map draws every part: the map keeps the casters it saw until content changes.
+    this.culled = moving && !this.sync.shadowDue;
+    this.sync.cullDetail(this.culled ? camera : null, this.renderer.domElement.height);
+    if (!moving) return;
+    clearTimeout(this.settle);
+    this.settle = setTimeout(() => {
+      this.settle = 0;
+      this.invalidate();
+    }, 150);
   }
 
   /** Frames drawn in the last second; null when nothing was drawn (the view renders on demand). */
@@ -176,6 +226,18 @@ export class Viewport {
       this.presented.push(resolve);
       this.invalidate();
     });
+  }
+
+  /**
+   * Resolves after a frame that drew every part and the sun's shadow map as things are: the next frame, unless it
+   * moved (sub-pixel parts left out: a host rendering the scene itself would miss them) or three has yet to draw the
+   * shadow (its pass may still compile); then later ones. A view that keeps moving, or a shadow nothing receives, is
+   * waited for 3 s at most.
+   */
+  async fullFrame(): Promise<void> {
+    await this.nextFrame();
+    const until = performance.now() + 3000;
+    while ((this.culled || this.sync.shadowDue) && performance.now() < until) await this.nextFrame();
   }
 
   /**
@@ -471,10 +533,18 @@ export class Viewport {
       ((clientX - rect.left) / rect.width) * 2 - 1,
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
-    // ponytail: CPU raycast, linear in triangles; add three-mesh-bvh or an id pass for huge meshes.
+    // CPU raycast of the items shown: three tests hidden objects in full (it checks layers only), and huge meshes go
+    // through their run boxes (clusters.ts). Batched items are picked through their own objects.
+    const objects: THREE.Object3D[] = [];
+    for (const item of this.sync.items.values()) {
+      if (!item.object || item.kind === 'light' || item.kind === 'camera') continue;
+      let shown = true;
+      for (let o: THREE.Object3D | null = item.object; o && shown; o = o.parent) shown = o.visible;
+      if (shown) objects.push(item.object);
+    }
     const raycaster = new THREE.Raycaster();
     raycaster.setFromCamera(ndc, this.camera);
-    for (const hit of raycaster.intersectObjects(this.sync.root.children, true)) {
+    for (const hit of raycaster.intersectObjects(objects, false)) {
       let object: THREE.Object3D | null = hit.object;
       let visible = true;
       let rid = 0;
@@ -551,8 +621,10 @@ export class Viewport {
 
   async screenshot(type = 'image/png', quality?: number): Promise<Blob> {
     await this.nextFrame();
-    // Read back in the same task as a render, before the drawing buffer is cleared; without the helpers.
+    // Read back in the same task as a render, before the drawing buffer is cleared; without the helpers, and with
+    // every part drawn (the last frame may have left sub-pixel ones out while the view moved).
     this.camera.layers.disable(HELPERS);
+    this.sync.cullDetail(null, 0);
     try {
       this.renderer.render(this.scene, this.camera);
     } finally {
@@ -566,6 +638,7 @@ export class Viewport {
 
   dispose(): void {
     WARM_UPS.delete(this.warm);
+    clearTimeout(this.settle);
     this.sectionTool?.dispose();
     this.sectionTool = null;
     this.tool = null;

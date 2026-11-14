@@ -16,6 +16,9 @@
 #include <emscripten/bind.h>
 
 #include <cmath>
+#include <cstdlib>
+#include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
 
@@ -87,6 +90,7 @@ std::string openStage(const std::string& url, bool loadPayloads)
     gBridge.SetStage(nullptr);
     WebResolver::ReleasePackages(); // the last stage's
     const std::string info = gStage.Open(url, loadPayloads);
+    WebResolver::DropProvided(); // read ahead for this open, not opened by it
     gBridge.SetStage(gStage.Get());
     return info;
 }
@@ -96,6 +100,45 @@ void closeStage()
     gBridge.SetStage(nullptr);
     gStage.Close();
     WebResolver::ReleasePackages();
+    WebResolver::DropProvided();
+}
+
+/// A dropped file the worker reads ahead (WebResolver::Provide): a block of `size` bytes it fills in chunks, as they
+/// arrive in any order, and hands to the resolver with endFile. 0 when the block cannot be allocated: the core then
+/// reads the file itself, as before.
+struct ProvidedFile {
+    std::string path;
+    std::shared_ptr<char> bytes;
+    size_t size = 0;
+};
+std::map<int, ProvidedFile> gFiles;
+int gNextFile = 1;
+
+int beginFile(const std::string& path, double size)
+{
+    if (size <= 0 || size >= double(uint64_t(4) << 30)) return 0;
+    char* data = static_cast<char*>(std::malloc(size_t(size)));
+    if (!data) return 0;
+    const int handle = gNextFile++;
+    gFiles[handle] = { path, std::shared_ptr<char>(data, [](char* p) { std::free(p); }), size_t(size) };
+    return handle;
+}
+
+bool writeFile(int handle, double offset, const val& bytes)
+{
+    const auto found = gFiles.find(handle);
+    const size_t length = bytes["byteLength"].as<size_t>();
+    if (found == gFiles.end() || offset < 0 || size_t(offset) + length > found->second.size) return false;
+    val(emscripten::typed_memory_view(length, reinterpret_cast<unsigned char*>(found->second.bytes.get() + size_t(offset)))).call<void>("set", bytes);
+    return true;
+}
+
+void endFile(int handle, bool complete)
+{
+    const auto found = gFiles.find(handle);
+    if (found == gFiles.end()) return;
+    if (complete) WebResolver::Provide(found->second.path, found->second.bytes, found->second.size);
+    gFiles.erase(found);
 }
 
 std::string reloadStage() { return gStage.Reload(); }
@@ -168,6 +211,7 @@ void setSelection(const val& paths)
 }
 
 std::string resolvePick(unsigned rid, int instanceIndex) { return gBridge.ResolvePick(rid, instanceIndex); }
+void setEdges(bool on) { gBridge.SetEdges(on); }
 
 std::string setVariant(const std::string& path, const std::string& variantSet, const std::string& variant)
 {
@@ -256,6 +300,9 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("registerScheme", &registerScheme);
     function("openStage", &openStage);
     function("closeStage", &closeStage);
+    function("beginFile", &beginFile);
+    function("writeFile", &writeFile);
+    function("endFile", &endFile);
     function("reloadStage", &reloadStage);
     function("primChildren", &primChildren);
     function("primSubtree", &primSubtree);
@@ -275,6 +322,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("setRefineBudget", &setRefineBudget);
     function("flush", &flush);
     function("setSelection", &setSelection);
+    function("setEdges", &setEdges);
     function("resolvePick", &resolvePick);
     function("setVariant", &setVariant);
     function("setVisible", &setVisible);

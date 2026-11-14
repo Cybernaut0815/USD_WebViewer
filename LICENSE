@@ -4,8 +4,8 @@ This repository's own code is licensed under the Apache License 2.0 with the
 Commons Clause License Condition v1.0, both below: you may use, modify and
 share it, but not sell it or a product or service that mainly consists of it.
 
-Third-party files keep their own licenses: the coi-serviceworker (MIT) and the
-skies in web/public/skies (CC0, see LICENSE.md there) in this repository; three.js
+Third-party files keep their own licenses: the skies in web/public/skies (CC0,
+see LICENSE.md there) in this repository; three.js
 (MIT) from npm; OpenUSD (Tomorrow Open Source Technology License), OpenSubdiv
 (Modified Apache 2.0), oneTBB and MaterialX (Apache 2.0) inside the built wasm core. The USD logo
 (web/src/usd-logo.svg) belongs to Pixar Animation Studios.

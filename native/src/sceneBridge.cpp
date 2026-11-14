@@ -177,13 +177,15 @@ bool ToFloats(const VtValue& value, std::vector<float>* out, int* size)
 }
 
 /// Reads one primvar. faceVarying primvars keep their authored indices when
-/// they have them, so UV seams stay welded through subdivision.
-bool ReadPrimvar(const HdPrimvarsSchema& primvars, const TfToken& name, PrimvarIn* out)
+/// they have them, so UV seams stay welded through subdivision. Without `constants`, a constant
+/// primvar is skipped before its value is read.
+bool ReadPrimvar(const HdPrimvarsSchema& primvars, const TfToken& name, PrimvarIn* out, bool constants = true)
 {
     const HdPrimvarSchema primvar = primvars.GetPrimvar(name);
     if (!primvar) return false;
-    out->name = name.GetString();
     out->interpolation = Value(primvar.GetInterpolation(), HdPrimvarSchemaTokens->constant);
+    if (!constants && out->interpolation == HdPrimvarSchemaTokens->constant) return false;
+    out->name = name.GetString();
     VtValue value;
     const bool faceVarying = out->interpolation == HdPrimvarSchemaTokens->faceVarying;
     if (faceVarying && primvar.IsIndexed()) {
@@ -216,6 +218,19 @@ VtVec3fArray ReadPoints(const HdPrimvarsSchema& primvars)
         return floats;
     }
     return {};
+}
+
+/// The points cannot change over time: no time sample reaches them (their attribute, or a skinning
+/// computation's inputs), or the stage is evaluated at its default time (a later numeric time dirties them).
+bool StaticPoints(const HdPrimvarsSchema& primvars)
+{
+    const HdPrimvarSchema primvar = primvars.GetPrimvar(HdPrimvarsSchemaTokens->points);
+    const HdSampledDataSourceHandle source = primvar ? primvar.GetPrimvarValue() : nullptr;
+    // A data source answers false when its value cannot vary (UsdImaging: !ValueMightBeTimeVarying) and otherwise lists
+    // the samples in the interval plus the ones bracketing it, so a small interval around the current time is enough.
+    // A wide one would open every layer of a value-clip set. A zero-width one never answers true.
+    std::vector<HdSampledDataSource::Time> times;
+    return !source || !source->GetContributingSampleTimesForInterval(-1.0f, 1.0f, &times);
 }
 
 /// True when only point positions (and normals) changed: the per-frame case of animation.
@@ -482,6 +497,10 @@ struct SceneBridge::Rec final : HdsiPrimManagingSceneIndexObserver::PrimBase {
     size_t vertexCount = 0, indexCount = 0;
     uint64_t indexHash = 0;                   // of the last full build's triangle list: the layout can change with the counts unchanged
     std::vector<uint32_t> weld, cornerVertex; // output layout of the last full build (MeshOut::weld)
+    std::vector<uint32_t> pointVertex;        // MeshOut::pointVertex of the last full build (MeshMap's points)
+    bool fastPoints = true;                   // moved points may reuse that layout (false: static meshes, welded by values)
+    bool edgesSent = false;                   // the page has this layout's face edges
+    bool edgesWanted = false;                 // SetEdges asked for them: convert again, send only the edges
     int level = -1;                           // refinement level of the last conversion (-1: not converted yet)
     std::vector<int> polys;                   // drawn triangle -> polygon (MeshOut::trianglePoly), in the drawn order
     bool refined = false, flipped = false;    // of the last full build (MeshOut)
@@ -717,6 +736,17 @@ void SceneBridge::SetSelection(const std::vector<SdfPath>& paths)
     }
 }
 
+void SceneBridge::SetEdges(bool on)
+{
+    _edges = on;
+    for (const auto& [path, rec] : _recs) {
+        // Meshes the page has without edges convert again (same layout) and send only those; turned off,
+        // what was still pending is dropped (the recs stay dirty with nothing to do).
+        rec->edgesWanted = on && rec->type == HdPrimTypeTokens->mesh && rec->created && !rec->edgesSent;
+        if (rec->edgesWanted) _dirty[path] = rec;
+    }
+}
+
 SceneBridge::Rec* SceneBridge::Find(const SdfPath& path) const
 {
     const auto it = _recs.find(path);
@@ -791,14 +821,45 @@ void SceneBridge::Removed(Rec* rec)
 }
 
 /// One mesh conversion: what GatherMesh read, and what BuildMeshJob made of it.
+/// The channels every rendered item has (transform, visibility, creation info), read from its data source on any
+/// thread and written into the delta on this one.
+struct CommonChannels {
+    GfMatrix4d matrix;
+    bool xform = false, visibility = false, visible = true, info = false;
+    std::string purpose;
+};
+
+namespace {
+
+void ReadCommon(const HdDataSourceLocatorSet& dirty, bool created, const HdContainerDataSourceHandle& source, CommonChannels* c)
+{
+    c->xform = dirty.Intersects(HdXformSchema::GetDefaultLocator());
+    if (c->xform) c->matrix = Xform(source);
+    c->visibility = dirty.Intersects(HdVisibilitySchema::GetDefaultLocator());
+    if (c->visibility) c->visible = Visible(source);
+    c->info = !created;
+    if (c->info) {
+        const HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(source);
+        const TfToken token = purpose ? Value(purpose.GetPurpose()) : TfToken();
+        c->purpose = token.IsEmpty() || token == HdRenderTagTokens->geometry ? std::string("default") : token.GetString();
+    }
+}
+
+} // namespace
+
 struct SceneBridge::MeshJob {
     Rec* rec = nullptr;
+    HdContainerDataSourceHandle source; // the prim's, fetched once
+    CommonChannels common;               // read on the threads with the mesh
+    SdfPath material;                    // bound material, when its binding is dirty
     bool created = false;
     bool ok = false; // GatherMesh found something to convert
     MeshIn in;
     bool topologyDirty = false, pointsOnly = false, doubleSided = false;
     bool fast = false;      // positions (and normals) only, in the layout of the last full build
+    bool edgesOnly = false; // nothing changed but the page wants this mesh's face edges
     bool forceFull = false; // GatherMesh: read everything although only the points changed
+    bool parallel = false;  // built on its own after the parallel loop: BuildMesh may use every thread
     bool full = false;      // the output layout differs from what the page has: send every stream
     uint64_t indexHash = 0;
     std::vector<float> constantColor;
@@ -823,22 +884,24 @@ val SceneBridge::Flush(int maxItems)
     _vis.clear();
 
     // Channels every rendered item has: transform, visibility, creation info.
-    const auto common = [&](Rec& rec, const HdContainerDataSourceHandle& source, val& entry) {
-        if (rec.dirty.Intersects(HdXformSchema::GetDefaultLocator())) {
+    const auto writeCommon = [&](const Rec& rec, const CommonChannels& c, val& entry) {
+        if (c.xform) {
             _xformRids.push_back(rec.rid);
-            const GfMatrix4d matrix = Xform(source);
-            _xforms.insert(_xforms.end(), matrix.data(), matrix.data() + 16);
+            _xforms.insert(_xforms.end(), c.matrix.data(), c.matrix.data() + 16);
         }
-        if (rec.dirty.Intersects(HdVisibilitySchema::GetDefaultLocator())) {
+        if (c.visibility) {
             _visRids.push_back(rec.rid);
-            _vis.push_back(Visible(source) ? 1 : 0);
+            _vis.push_back(c.visible ? 1 : 0);
         }
-        if (!rec.created) {
+        if (c.info) {
             entry.set("path", rec.path.GetString());
-            const HdPurposeSchema purpose = HdPurposeSchema::GetFromParent(source);
-            const TfToken token = purpose ? Value(purpose.GetPurpose()) : TfToken();
-            entry.set("purpose", token.IsEmpty() || token == HdRenderTagTokens->geometry ? std::string("default") : token.GetString());
+            entry.set("purpose", c.purpose);
         }
+    };
+    const auto common = [&](Rec& rec, const HdContainerDataSourceHandle& source, val& entry) {
+        CommonChannels c;
+        ReadCommon(rec.dirty, rec.created, source, &c);
+        writeCommon(rec, c, entry);
     };
 
     // Materials, lights, cameras and bookkeeping prims first: geometry refers to them.
@@ -984,7 +1047,7 @@ val SceneBridge::Flush(int maxItems)
         while (it != _dirty.end() && int(items.size()) < kChunk && emitted + int(items.size()) < maxItems) {
             Rec& rec = *it->second;
             const HdContainerDataSourceHandle source = _scene->GetPrim(rec.path).dataSource;
-            const bool cheap = source && rec.created && !rec.instancesDirty
+            const bool cheap = source && rec.created && !rec.instancesDirty && !rec.edgesWanted
                 && !rec.dirty.Intersects(HdPrimvarsSchema::GetDefaultLocator()) && !rec.dirty.Intersects(HdMeshSchema::GetDefaultLocator())
                 && !rec.dirty.Intersects(HdBasisCurvesSchema::GetDefaultLocator()) && !rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())
                 && !rec.dirty.Intersects(HdInstancedBySchema::GetDefaultLocator())
@@ -1001,13 +1064,16 @@ val SceneBridge::Flush(int maxItems)
             if (source) {
                 item.entry = val::object();
                 item.entry.set("rid", rec.rid);
-                common(rec, source, item.entry);
-                if (rec.type == HdPrimTypeTokens->mesh) {
+                if (rec.type == HdPrimTypeTokens->mesh) { // its common channels and binding are read on the threads
                     item.job = std::make_unique<MeshJob>();
                     item.job->rec = &rec;
+                    item.job->source = source;
                     item.job->created = item.created;
-                } else if (rec.type == HdPrimTypeTokens->basisCurves) ConvertCurves(rec, item.created, item.entry);
-                else ConvertPoints(rec, item.created, item.entry);
+                } else {
+                    common(rec, source, item.entry);
+                    if (rec.type == HdPrimTypeTokens->basisCurves) ConvertCurves(rec, item.created, item.entry);
+                    else ConvertPoints(rec, item.created, item.entry);
+                }
             }
             items.push_back(std::move(item));
             ++it;
@@ -1017,23 +1083,40 @@ val SceneBridge::Flush(int maxItems)
             if (item.job) jobs.push_back(item.job.get());
         }
         // Scene index reads are thread-safe (HdSceneIndexBase::GetPrim), and so are UsdPrim reads.
+        // Meshes of millions of corners build afterwards, one at a time: two at once could take the 4 GB heap. (Not
+        // under a lock in the loop: a thread waiting in a nested parallel loop may run another job of the loop.)
+        // ponytail: serial over a corner threshold; a byte-weighted semaphore if several big meshes should overlap.
+        constexpr size_t kExclusiveCorners = 5'000'000;
+        std::vector<uint8_t> later(jobs.size(), 0);
         WorkParallelForN(jobs.size(), [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; i++) {
                 MeshJob& job = *jobs[i];
+                ReadCommon(job.rec->dirty, job.rec->created, job.source, &job.common);
+                if (job.rec->dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) job.material = BoundMaterial(job.source);
                 job.ok = GatherMesh(*job.rec, job.created, &job);
-                if (job.ok) BuildMeshJob(job);
+                if (!job.ok) continue;
+                if (job.in.faceVertexIndices.size() > kExclusiveCorners) later[i] = 1;
+                else BuildMeshJob(job);
             }
         });
+        for (size_t i = 0; i < jobs.size(); i++) {
+            if (!later[i]) continue;
+            jobs[i]->parallel = true;
+            BuildMeshJob(*jobs[i]);
+        }
         for (Item& item : items) {
             Rec& rec = *item.rec;
             if (item.source) {
+                if (item.job) writeCommon(rec, item.job->common, item.entry);
                 if (item.job && item.job->ok) {
                     EmitMesh(*item.job, item.entry);
                     emittedBytes += item.job->bytes;
                     item.job->in = MeshIn(); // the JS copies exist now
                     item.job->out = MeshOut();
                 }
-                if (rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) item.entry.set("material", RidOf(BoundMaterial(item.source)));
+                if (rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) {
+                    item.entry.set("material", RidOf(item.job ? item.job->material : BoundMaterial(item.source)));
+                }
                 const bool instancing = UpdateInstancing(rec, item.source, item.entry);
                 if (rec.dirty.Intersects(HdSelectionsSchema::GetDefaultLocator())) UpdateSelection(rec, item.source);
                 // Items whose only change is a transform, visibility or selection travel in the packed channels.
@@ -1041,13 +1124,15 @@ val SceneBridge::Flush(int maxItems)
                     || rec.dirty.Intersects(HdMeshSchema::GetDefaultLocator())
                     || rec.dirty.Intersects(HdBasisCurvesSchema::GetDefaultLocator())
                     || rec.dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator());
-                if (!item.created || content || instancing) {
+                const bool edges = item.job && item.job->ok && item.job->edgesOnly;
+                if (!item.created || content || instancing || edges) {
                     Push(delta, rec.type == HdPrimTypeTokens->mesh ? "meshes" : rec.type == HdPrimTypeTokens->basisCurves ? "curves" : "points", item.entry);
                 }
                 rec.created = true;
             }
             rec.dirty = HdDataSourceLocatorSet();
             rec.instancesDirty = false;
+            rec.edgesWanted = false;
             _dirty.erase(rec.path); // not `it`: the chunk lies before it
         }
         emitted += int(items.size());
@@ -1119,9 +1204,11 @@ bool SceneBridge::GatherMesh(Rec& rec, bool created, MeshJob* job)
 {
     const HdDataSourceLocatorSet& dirty = rec.dirty;
     const bool topologyDirty = dirty.Intersects(HdMeshSchema::GetDefaultLocator());
-    if (!topologyDirty && !dirty.Intersects(HdPrimvarsSchema::GetDefaultLocator())) return false;
+    const bool primvarsDirty = dirty.Intersects(HdPrimvarsSchema::GetDefaultLocator());
+    if (!topologyDirty && !primvarsDirty && !rec.edgesWanted) return false;
+    job->edgesOnly = rec.edgesWanted && !topologyDirty && !primvarsDirty;
 
-    const HdContainerDataSourceHandle source = _scene->GetPrim(rec.path).dataSource;
+    const HdContainerDataSourceHandle source = job->source ? job->source : _scene->GetPrim(rec.path).dataSource;
     const HdMeshSchema mesh = HdMeshSchema::GetFromParent(source);
     const HdMeshTopologySchema topology = mesh.GetTopology();
     const HdPrimvarsSchema primvars = HdPrimvarsSchema::GetFromParent(source);
@@ -1138,11 +1225,16 @@ bool SceneBridge::GatherMesh(Rec& rec, bool created, MeshJob* job)
     in.holeIndices = Value(topology.GetHoleIndices());
     // Points-only updates (animation) keep the level and the output layout of the last full build
     // (unrefined meshes only: a refined surface is rebuilt from its cage).
-    const bool pointsOnly = !job->forceFull && created && rec.level == 0 && !topologyDirty && OnlyPointsDirty(dirty);
+    // A static mesh's layout was built from its point values (flat normals, coincident points): moved points
+    // (an edit) take the full build.
+    const bool pointsOnly = !job->forceFull && created && rec.level == 0 && rec.fastPoints && !rec.edgesWanted && !topologyDirty
+        && OnlyPointsDirty(dirty);
     job->pointsOnly = pointsOnly;
     in.refineLevel = pointsOnly ? rec.level : Refinable(in.scheme) ? MeshRefineLevel(rec.path, source) : 0;
     rec.level = in.refineLevel;
     in.points = ReadPoints(primvars);
+    if (!pointsOnly) in.staticPoints = StaticPoints(primvars);
+    in.edges = _edges;
     if (in.refineLevel > 0) {
         if (const HdSubdivisionTagsSchema tags = mesh.GetSubdivisionTags()) {
             if (const auto ds = tags.GetFaceVaryingLinearInterpolation()) in.tags.SetFaceVaryingInterpolationRule(ds->GetTypedValue(0.0f));
@@ -1164,8 +1256,8 @@ bool SceneBridge::GatherMesh(Rec& rec, bool created, MeshJob* job)
         if (name == HdPrimvarsSchemaTokens->points) continue;
         const bool isNormals = name == HdPrimvarsSchemaTokens->normals;
         if (pointsOnly && !isNormals) continue;
-        PrimvarIn primvar;
-        if (!ReadPrimvar(primvars, name, &primvar)) continue;
+        PrimvarIn primvar; // of the constant ones only the display colour and opacity are sent
+        if (!ReadPrimvar(primvars, name, &primvar, name == HdTokens->displayColor || name == HdTokens->displayOpacity)) continue;
         const bool constant = primvar.interpolation == HdPrimvarSchemaTokens->constant;
         if (name == HdTokens->displayColor && primvar.size == 3) {
             if (constant) constantColor = primvar.values;
@@ -1197,6 +1289,7 @@ void SceneBridge::BuildMeshJob(MeshJob& job)
         job.ok = GatherMesh(rec, job.created, &job);
         if (!job.ok) return;
     }
+    job.in.parallel = job.parallel;
     job.out = BuildMesh(job.in);
     const MeshOut& out = job.out;
     // Welding lays vertices out by primvar values, so the triangle list can change while the
@@ -1220,7 +1313,7 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
     const bool topologyDirty = job.topologyDirty, pointsOnly = job.pointsOnly;
     const std::vector<float>& constantColor = job.constantColor;
     const float constantOpacity = job.constantOpacity;
-    const HdContainerDataSourceHandle source = _scene->GetPrim(rec.path).dataSource;
+    const HdContainerDataSourceHandle source = job.source ? job.source : _scene->GetPrim(rec.path).dataSource;
     const bool full = !job.fast && job.full;
     if (!job.fast) {
         rec.vertexCount = out.positions.size() / 3;
@@ -1228,6 +1321,14 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
         rec.indexHash = job.indexHash;
         rec.weld = std::move(out.weld);
         rec.cornerVertex = std::move(out.cornerVertex);
+        rec.pointVertex = std::move(out.pointVertex);
+        rec.fastPoints = !in.staticPoints;
+    }
+    if (job.edgesOnly && !full) {
+        // The page has this layout: it only asked for the edges (SetEdges).
+        entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
+        rec.edgesSent = true;
+        return;
     }
 
     if (full) {
@@ -1253,13 +1354,14 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
                 }
             }
             std::vector<size_t> start(subsets.size() + 2, 0);
-            for (int face : out.triangleFace) start[group[face] + 1]++;
+            const std::vector<int>& triangleFace = out.triangleFace.empty() ? out.trianglePoly : out.triangleFace;
+            for (int face : triangleFace) start[group[face] + 1]++;
             for (size_t g = 1; g < start.size(); g++) start[g] += start[g - 1];
             std::vector<uint32_t> ordered(out.indices.size());
             std::vector<int> orderedPolys(out.trianglePoly.size());
             std::vector<size_t> cursor(start.begin(), start.end() - 1);
-            for (size_t t = 0; t < out.triangleFace.size(); t++) {
-                const size_t slot = cursor[group[out.triangleFace[t]]]++;
+            for (size_t t = 0; t < triangleFace.size(); t++) {
+                const size_t slot = cursor[group[triangleFace[t]]]++;
                 std::copy_n(&out.indices[t * 3], 3, &ordered[slot * 3]);
                 orderedPolys[slot] = out.trianglePoly[t]; // stable: a polygon's triangles stay consecutive
             }
@@ -1281,14 +1383,20 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
         rec.refined = out.refined;
         rec.flipped = out.flipped;
         entry.set("indices", Typed("Uint32Array", out.indices.data(), out.indices.size()));
-        entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
+        if (in.edges) entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
+        rec.edgesSent = in.edges;
         entry.set("doubleSided", job.doubleSided);
+        if (!in.staticPoints) entry.set("deforming", true); // the page keeps it out of batches
         const MeshCounts& counts = job.counts;
         val usd = val::object();
         usd.set("points", double(counts.points));
         usd.set("faces", double(counts.faces));
         usd.set("edges", double(counts.edges));
         entry.set("counts", usd);
+    } else if (in.edges && !rec.edgesSent && !job.fast) {
+        // Rebuilt for another change into the layout the page has: the edges it asked for come along (SetEdges).
+        entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
+        rec.edgesSent = true;
     }
     entry.set("positions", Floats(out.positions));
     entry.set("normals", out.normals.empty() ? val::null() : Floats(out.normals));
@@ -1502,6 +1610,7 @@ val SceneBridge::MeshMap(uint32_t rid) const
         map.set("counts", Typed("Int32Array", counts.cdata(), counts.size()));
     } else map.set("counts", val::null());
     map.set("weld", rec->weld.empty() ? val::null() : Typed("Uint32Array", rec->weld.data(), rec->weld.size()));
+    map.set("points", rec->pointVertex.empty() ? val::null() : Typed("Uint32Array", rec->pointVertex.data(), rec->pointVertex.size()));
     map.set("flipped", rec->flipped);
     map.set("authored", authored);
     return map;

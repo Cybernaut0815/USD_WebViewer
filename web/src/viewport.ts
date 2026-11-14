@@ -68,6 +68,8 @@ export class Viewport {
   private readonly lastView = new THREE.Matrix4();
   private readonly lastProjection = new THREE.Matrix4();
   private settle: ReturnType<typeof setTimeout> | 0 = 0;
+  /** The last frame left sub-pixel batched parts out. */
+  private culled = false;
   private dirty = false;
   private frameRequest = 0;
   private presented: (() => void)[] = [];
@@ -125,6 +127,9 @@ export class Viewport {
   }
 
   async init(): Promise<void> {
+    // three's area-light tables (about 250 KB of script) arrive as a chunk of their own, alongside the device and the
+    // core; installed before the first frame, since any RectAreaLight (the stage's or a host's) needs them.
+    const areaTables = import('three/addons/lights/RectAreaLightTexturesLib.js');
     // WebGPU's default limits allow no buffer over 256 MiB, which one big mesh's index or vertices exceed (the pass
     // then draws nothing). Ask the device for the adapter's own maxima: the same adapter options as three's request
     // (WebGPUBackend: featureLevel 'compatibility'), so requestDevice cannot refuse them and fall back to WebGL2.
@@ -142,6 +147,7 @@ export class Viewport {
       onDeviceLost: (info: object) => (onDeviceLost.call(this.renderer, info), report(info)),
     });
     await this.renderer.init();
+    THREE.RectAreaLightNode.setLTC((await areaTables).RectAreaLightTexturesLib.init());
     this.backend = (this.renderer.backend as any).isWebGPUBackend ? 'webgpu' : 'webgl2';
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.sync.setStudioEnvironment(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
@@ -196,7 +202,9 @@ export class Viewport {
     const moving = !camera.matrixWorld.equals(this.lastView) || !camera.projectionMatrix.equals(this.lastProjection);
     this.lastView.copy(camera.matrixWorld);
     this.lastProjection.copy(camera.projectionMatrix);
-    this.sync.cullDetail(moving ? camera : null, this.renderer.domElement.height);
+    // A frame that redraws the shadow map draws every part: the map keeps the casters it saw until content changes.
+    this.culled = moving && !this.sync.shadowDue;
+    this.sync.cullDetail(this.culled ? camera : null, this.renderer.domElement.height);
     if (!moving) return;
     clearTimeout(this.settle);
     this.settle = setTimeout(() => {
@@ -218,6 +226,18 @@ export class Viewport {
       this.presented.push(resolve);
       this.invalidate();
     });
+  }
+
+  /**
+   * Resolves after a frame that drew every part and the sun's shadow map as things are: the next frame, unless it
+   * moved (sub-pixel parts left out: a host rendering the scene itself would miss them) or three has yet to draw the
+   * shadow (its pass may still compile); then later ones. A view that keeps moving, or a shadow nothing receives, is
+   * waited for 3 s at most.
+   */
+  async fullFrame(): Promise<void> {
+    await this.nextFrame();
+    const until = performance.now() + 3000;
+    while ((this.culled || this.sync.shadowDue) && performance.now() < until) await this.nextFrame();
   }
 
   /**

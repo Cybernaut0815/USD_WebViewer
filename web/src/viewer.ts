@@ -317,7 +317,7 @@ export class UsdViewerElement extends HTMLElement {
     await this.viewport.tool?.idle?.();
     await this.session.idle();
     await this.viewport.sync.settled();
-    await this.viewport.nextFrame();
+    await this.viewport.fullFrame();
   }
 
   dispose(): void {

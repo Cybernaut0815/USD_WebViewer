@@ -47,12 +47,13 @@ const MIN_BATCH = 64;
 const BATCH_ITEM_VERTICES = 65_536;
 const BATCH_VERTICES = 4_194_304;
 const BATCH_INDICES = 25_165_824;
-/** While a flush pages in, a look's pending items become a batch once there are this many (or vertices). */
-const BATCH_PENDING_ITEMS = 4096;
-const BATCH_PENDING_VERTICES = 2_000_000;
-/** three's area-light tables (about 250 KB of script) arrive with the first rect or disk light. */
-let areaTables: Promise<void> | null = null;
-let areaReady = false;
+/**
+ * While a flush pages in, a look's pending items become a batch once there are this many (or vertices): about one
+ * batch per page. Until then they draw (and upload) one by one, which made the load's frames the slowest part of it;
+ * each batch costs a shader build of its own (three keys pipelines on its matrices texture), so not fewer.
+ */
+const BATCH_PENDING_ITEMS = 256;
+const BATCH_PENDING_VERTICES = 1_000_000;
 const MIRROR = new THREE.Matrix4().makeScale(-1, 1, 1);
 const MATRIX = new THREE.Matrix4();
 const COLOR = new THREE.Color();
@@ -304,6 +305,13 @@ export class SceneSync {
     }
   }
 
+  /** The sun's shadow map waits to be drawn: three draws it with the next frame (or a later one, while it compiles). */
+  get shadowDue(): boolean {
+    let shown = !!this.sun?.shadow.needsUpdate && this.sun.castShadow;
+    for (let o: THREE.Object3D | null = this.sun; shown && o; o = o.parent) shown = o.visible;
+    return shown;
+  }
+
   /** Forces the next frame to refit bounds and shadows (after a drag). */
   touch(): void {
     this.version++;
@@ -385,7 +393,13 @@ export class SceneSync {
 
   private track<T>(work: Promise<T>): Promise<T> {
     this.building.add(work);
-    work.finally(() => this.building.delete(work)).catch(() => {});
+    work
+      .finally(() => {
+        this.building.delete(work);
+        // A shadow redraw deferred while this built is due now, not up to half a second after settled() resolved.
+        if (!this.building.size && this.shadowLater) this.invalidate();
+      })
+      .catch(() => {});
     return work;
   }
 
@@ -877,21 +891,34 @@ export class SceneSync {
       this.loose.delete(item);
       item.own?.dispose();
       item.own = null;
-      item.geometry!.dispose(); // its GPU buffers, if it drew alone before; the arrays stay, for picking
       item.object!.frustumCulled = false; // its stand-in never draws: no per-frame sphere test
       this.assign(item);
       this.follow(item);
       this.updateVisible(item);
     }
-    // Uploaded by its first frame, the batch's arrays (as large as its items' geometry) are not read again: batches
-    // never change geometry. three computes each geometry's bounds lazily from them, so those come first.
-    mesh.onAfterRender = () => {
-      mesh.onAfterRender = () => {};
-      for (let id = 0; id < items.length; id++) mesh.getBoundingSphereAt(id, SPHERE);
+    // A batch never changes geometry, so once the renderer holds an attribute's buffer its array (the batch's arrays
+    // are as large as its items' geometry) is not read again and goes. three uploads an attribute when a pass first
+    // reads it (a shadow pass reads fewer than the look, a later look may read one more), so this looks after every
+    // pass until all are gone. three computes each geometry's bounds lazily from index and positions: those first.
+    let bounded = false;
+    mesh.onAfterRender = (renderer) => {
+      const backend = (renderer as unknown as { backend: { has(o: object): boolean; get(o: object): { buffer?: unknown; bufferGPU?: unknown } } }).backend;
       const g = mesh.geometry;
+      let left = false;
       for (const attribute of [g.index!, ...Object.values(g.attributes)] as THREE.BufferAttribute[]) {
+        if (!attribute.array.length) continue;
+        const data = backend?.has(attribute) ? backend.get(attribute) : null;
+        if (!data?.buffer && !data?.bufferGPU) {
+          left = true; // not uploaded (yet): kept
+          continue;
+        }
+        if (!bounded) {
+          bounded = true;
+          for (let id = 0; id < items.length; id++) mesh.getBoundingSphereAt(id, SPHERE);
+        }
         attribute.array = new (attribute.array.constructor as Float32ArrayConstructor)(0);
       }
+      if (!left) mesh.onAfterRender = () => {};
     };
     mesh.material = this.batchMaterial(b);
     this.batches.add(b);
@@ -1113,14 +1140,12 @@ export class SceneSync {
         const width = (p.width ?? 1) * scale.x;
         const height = (p.height ?? 1) * scale.y;
         const nits = units.rectNits(p, width, height);
-        if (!cone && !this.areaLights(item)) return;
         light = cone ? spot(nits * width * height) : new THREE.RectAreaLight(color, nits, width, height);
         break;
       }
       case 'diskLight': {
         // ponytail: disk drawn as an equal-area square; needs a custom light node to be round.
         const [side, nits] = units.diskAsRect(p, (p.radius ?? 0.5) * size);
-        if (!cone && !this.areaLights(item)) return;
         light = cone ? spot(nits * side * side) : new THREE.RectAreaLight(color, nits, side, side);
         break;
       }
@@ -1142,23 +1167,6 @@ export class SceneSync {
     item.matrix.decompose(position, rotation, new THREE.Vector3());
     this.attach(item, holder);
     holder.matrix.compose(position, rotation, new THREE.Vector3(1, 1, 1));
-  }
-
-  /** False until three's area-light tables are loaded (a RectAreaLight cannot draw without them); the light is built then. */
-  private areaLights(item: Item): boolean {
-    if (areaReady) return true;
-    areaTables ??= import('three/addons/lights/RectAreaLightTexturesLib.js').then(({ RectAreaLightTexturesLib }) => {
-      THREE.RectAreaLightNode.setLTC(RectAreaLightTexturesLib.init());
-      areaReady = true;
-    });
-    this.track(
-      areaTables.then(() => {
-        if (this.items.get(item.rid) !== item) return;
-        this.rebuildLight(item);
-        this.host.invalidate();
-      }),
-    );
-    return false;
   }
 
   /** Keeps the background colour even where a sky or the dome's texture would fill it (lighting unchanged). */

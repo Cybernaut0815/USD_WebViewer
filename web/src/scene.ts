@@ -877,11 +877,22 @@ export class SceneSync {
       this.loose.delete(item);
       item.own?.dispose();
       item.own = null;
+      item.geometry!.dispose(); // its GPU buffers, if it drew alone before; the arrays stay, for picking
       item.object!.frustumCulled = false; // its stand-in never draws: no per-frame sphere test
       this.assign(item);
       this.follow(item);
       this.updateVisible(item);
     }
+    // Uploaded by its first frame, the batch's arrays (as large as its items' geometry) are not read again: batches
+    // never change geometry. three computes each geometry's bounds lazily from them, so those come first.
+    mesh.onAfterRender = () => {
+      mesh.onAfterRender = () => {};
+      for (let id = 0; id < items.length; id++) mesh.getBoundingSphereAt(id, SPHERE);
+      const g = mesh.geometry;
+      for (const attribute of [g.index!, ...Object.values(g.attributes)] as THREE.BufferAttribute[]) {
+        attribute.array = new (attribute.array.constructor as Float32ArrayConstructor)(0);
+      }
+    };
     mesh.material = this.batchMaterial(b);
     this.batches.add(b);
     this.root.add(mesh);

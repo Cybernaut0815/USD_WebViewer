@@ -693,7 +693,8 @@ ${mesh('Split', `    point3f[] points = [${text(points)}]`)}${mesh('Moving', `  
     }`)}${mesh('Colored', `    point3f[] points = [${text(points)}]
     color3f[] primvars:displayColor = [(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
         interpolation = "vertex"
-    )`)}`);
+    )`)}${mesh('Holed', `    point3f[] points = [${text(points)}]
+    int[] holeIndices = [1]`)}`);
   core.setTime(1);
   const by = Object.fromEntries(flush().meshes.map((m) => [m.path, m]));
   const split = by['/Split'];
@@ -706,6 +707,8 @@ ${mesh('Split', `    point3f[] points = [${text(points)}]`)}${mesh('Moving', `  
   assert.equal(by['/Moving'].positions.length, 8 * 3, 'moving points are not welded');
   assert.equal(core.meshMap(by['/Moving'].rid).points, null);
   assert.equal(by['/Colored'].positions.length, 8 * 3, 'nor are points whose per-point values differ');
+  assert.deepEqual([...core.meshMap(by['/Holed'].rid).points], [0, 1, 2, 3, 1, 4294967295, 4294967295, 2],
+    'points only a hole uses draw nowhere (4 and 7 coincide with drawn points)');
   core.setTime(2);
   const frame = flush().meshes;
   assert.deepEqual(frame.map((m) => m.path ?? names.get(m.rid)), ['/Moving'], 'only the moving mesh is sent again');
@@ -770,6 +773,17 @@ def Cube "Box"
   const edited = flush().meshes[0];
   assert.ok(edited.indices);
   assert.equal(edited.edges.length, 8);
+  // Turned on in the flush of another change of a mesh whose layout stays: the edges come with that change.
+  core.setEdges(false);
+  JSON.parse(core.setAttribute('/Quad', 'faceVertexIndices', JSON.stringify([1, 2, 3, 0]), NaN));
+  assert.equal(flush().meshes[0].edges, undefined);
+  core.setEdges(true);
+  JSON.parse(core.setAttribute('/Quad', 'points', JSON.stringify([[0, 0, 0], [1, 0, 0], [1, 2, 0], [0, 1, 0]]), NaN));
+  const moved = flush().meshes.find((m) => m.rid === first['/Quad'].rid);
+  assert.ok(moved.positions, 'the points change is sent');
+  assert.equal(moved.indices, undefined, 'in the layout the page has');
+  assert.equal(moved.edges?.length, 8, 'with the edges asked for');
+  assert.equal(flush().meshes, undefined, 'which are not sent again');
   noErrors();
 }
 

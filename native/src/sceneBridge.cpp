@@ -58,7 +58,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -227,9 +226,11 @@ bool StaticPoints(const HdPrimvarsSchema& primvars)
 {
     const HdPrimvarSchema primvar = primvars.GetPrimvar(HdPrimvarsSchemaTokens->points);
     const HdSampledDataSourceHandle source = primvar ? primvar.GetPrimvarValue() : nullptr;
-    // A data source answers true when its value differs inside the interval (a zero-width one never does).
+    // A data source answers false when its value cannot vary (UsdImaging: !ValueMightBeTimeVarying) and otherwise lists
+    // the samples in the interval plus the ones bracketing it, so a small interval around the current time is enough.
+    // A wide one would open every layer of a value-clip set. A zero-width one never answers true.
     std::vector<HdSampledDataSource::Time> times;
-    return !source || !source->GetContributingSampleTimesForInterval(-1e9f, 1e9f, &times);
+    return !source || !source->GetContributingSampleTimesForInterval(-1.0f, 1.0f, &times);
 }
 
 /// True when only point positions (and normals) changed: the per-frame case of animation.
@@ -1081,10 +1082,11 @@ val SceneBridge::Flush(int maxItems)
             if (item.job) jobs.push_back(item.job.get());
         }
         // Scene index reads are thread-safe (HdSceneIndexBase::GetPrim), and so are UsdPrim reads.
-        // Meshes of millions of corners build one at a time: two at once could take the 4 GB heap.
-        // ponytail: one lock over a corner threshold; a byte-weighted semaphore if several big meshes should overlap.
+        // Meshes of millions of corners build afterwards, one at a time: two at once could take the 4 GB heap. (Not
+        // under a lock in the loop: a thread waiting in a nested parallel loop may run another job of the loop.)
+        // ponytail: serial over a corner threshold; a byte-weighted semaphore if several big meshes should overlap.
         constexpr size_t kExclusiveCorners = 5'000'000;
-        static std::mutex exclusive;
+        std::vector<uint8_t> later(jobs.size(), 0);
         WorkParallelForN(jobs.size(), [&](size_t begin, size_t end) {
             for (size_t i = begin; i < end; i++) {
                 MeshJob& job = *jobs[i];
@@ -1092,11 +1094,13 @@ val SceneBridge::Flush(int maxItems)
                 if (job.rec->dirty.Intersects(HdMaterialBindingsSchema::GetDefaultLocator())) job.material = BoundMaterial(job.source);
                 job.ok = GatherMesh(*job.rec, job.created, &job);
                 if (!job.ok) continue;
-                std::unique_lock<std::mutex> lock(exclusive, std::defer_lock);
-                if (job.in.faceVertexIndices.size() > kExclusiveCorners) lock.lock();
-                BuildMeshJob(job);
+                if (job.in.faceVertexIndices.size() > kExclusiveCorners) later[i] = 1;
+                else BuildMeshJob(job);
             }
         });
+        for (size_t i = 0; i < jobs.size(); i++) {
+            if (later[i]) BuildMeshJob(*jobs[i]);
+        }
         for (Item& item : items) {
             Rec& rec = *item.rec;
             if (item.source) {
@@ -1385,6 +1389,10 @@ void SceneBridge::EmitMesh(MeshJob& job, val& entry)
         usd.set("faces", double(counts.faces));
         usd.set("edges", double(counts.edges));
         entry.set("counts", usd);
+    } else if (in.edges && !rec.edgesSent && !job.fast) {
+        // Rebuilt for another change into the layout the page has: the edges it asked for come along (SetEdges).
+        entry.set("edges", Typed("Uint32Array", out.edges.data(), out.edges.size()));
+        rec.edgesSent = true;
     }
     entry.set("positions", Floats(out.positions));
     entry.set("normals", out.normals.empty() ? val::null() : Floats(out.normals));

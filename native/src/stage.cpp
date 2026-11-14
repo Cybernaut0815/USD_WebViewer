@@ -531,7 +531,11 @@ struct ChangeTracker {
                 for (const SdfPropertySpecHandle& property : spec->GetProperties()) names->insert(property->GetNameToken());
             }
         };
-        const bool all = std::any_of(resynced.begin(), resynced.end(), [&](const SdfPath& root) { return path.HasPrefix(root); });
+        bool all = false; // under a resynced prim: compare every property
+        for (SdfPath p = path; !all && !p.IsEmpty(); p = p.GetParentPath()) {
+            all = resynced.count(p) > 0;
+            if (p.IsAbsoluteRootPath()) break;
+        }
         const auto edited = properties.find(path);
         for (const auto& [layer, copy] : snapshot) {
             if (!layer) continue;
@@ -1173,6 +1177,11 @@ std::string Stage::ClearRefinementOverrides()
 std::string Stage::Reload()
 {
     return Edit(_stage, [&] {
+        // The resolver keeps the bytes of URLs and dropped files while a layer holds them: forgotten first, so the
+        // reload reads the files again (as ReloadLayers does).
+        for (const SdfLayerHandle& layer : _stage->GetUsedLayers()) {
+            if (!layer->IsAnonymous()) WebResolver::Forget(layer->GetIdentifier());
+        }
         _stage->Reload();
         return std::string();
     });

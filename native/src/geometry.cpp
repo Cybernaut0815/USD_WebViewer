@@ -727,7 +727,21 @@ MeshOut BuildMesh(MeshIn& in)
     // Last: the smooth normals above read the points in place.
     // Welded coincident points: which output vertex draws each mesh vertex (MeshMap's points), with seams the
     // vertex of the first drawn corner of its point.
-    if (!canon.empty() && !layout.pointVertex.empty()) out.pointVertex = std::move(layout.pointVertex);
+    if (!canon.empty() && !layout.pointVertex.empty()) {
+        out.pointVertex = std::move(layout.pointVertex);
+        // Points that no drawn face uses (holes, degenerate faces, unused points) draw nowhere, as at seams below.
+        std::vector<uint8_t> used(size_t(vertices), 0);
+        offset = 0;
+        for (size_t f = 0; f < poly.counts.size(); f++) {
+            const int n = poly.counts[f];
+            if (n < 0 || offset + n > corners) break;
+            for (int i = 0; drawn[f] && i < n; i++) used[canon[size_t(poly.indices[offset + i])]] = 1;
+            offset += n;
+        }
+        for (int v = 0; v < vertices; v++) {
+            if (!used[canon[v]]) out.pointVertex[v] = UINT32_MAX;
+        }
+    }
     else if (!canon.empty()) {
         std::vector<uint32_t> first(size_t(vertices), UINT32_MAX);
         offset = 0;

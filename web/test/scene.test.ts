@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three/webgpu';
-import { HIDDEN, HIDDEN_DOUBLE, PLAIN } from '../src/materials.ts';
+import { batchLook, HIDDEN, HIDDEN_DOUBLE, PLAIN } from '../src/materials.ts';
 import type { MeshEntry, RenderDelta } from '../src/protocol.ts';
-import { type Item, SceneSync } from '../src/scene.ts';
+import { type BatchMesh, type Item, SceneSync } from '../src/scene.ts';
 
 /** A unit cube as the core sends it: 24 vertices (4 per face, normals per face), 12 triangles. */
 function cube(rid: number, extra: Partial<MeshEntry> = {}): MeshEntry {
@@ -33,7 +33,7 @@ function row(n: number, from = 1, extra: Partial<MeshEntry> = {}): RenderDelta {
 
 function sync() {
   const s = new SceneSync(new THREE.Scene(), { readBytes: async () => null, warn() {}, invalidate() {} });
-  const batches = () => s.root.children.filter((o) => (o as THREE.BatchedMesh).isBatchedMesh) as THREE.BatchedMesh[];
+  const batches = () => s.root.children.filter((o) => (o as BatchMesh).isBatch) as BatchMesh[];
   const item = (rid: number) => s.items.get(rid) as Item;
   return { s, batches, item };
 }
@@ -88,9 +88,10 @@ test('visibility, purposes and display colours reach the instances', () => {
   assert.equal(mesh.getVisibleAt(item(4).batched!.instance), true);
   s.apply({ meshes: [{ rid: 9, displayColor: [0, 0, 1] }] });
   assert.deepEqual(mesh.getColorAt(item(9).batched!.instance, new THREE.Color()).toArray(), [0, 0, 1]);
+  assert.ok((mesh.material as THREE.MeshStandardNodeMaterial).colorNode, 'the display-colour look draws each item in its colour');
   s.setDisplayMode('plain');
-  assert.equal(mesh.material, PLAIN.double);
-  assert.deepEqual(mesh.getColorAt(item(9).batched!.instance, new THREE.Color()).toArray(), [1, 1, 1], 'plain is grey for all');
+  assert.equal(mesh.material, batchLook(PLAIN.double));
+  assert.equal((mesh.material as THREE.MeshStandardNodeMaterial).colorNode, null, 'plain is grey for all');
   s.setDisplayMode('wire');
   assert.equal(mesh.material, HIDDEN);
 });
@@ -140,7 +141,8 @@ test('while the view moves, sub-pixel batched parts draw nothing; stage visibili
   camera.position.set(64, 0, 50); // 50 units: a cube spans pixels
   camera.updateMatrixWorld();
   s.cullDetail(camera, 1000);
-  assert.equal(mesh.getVisibleAt(item(1).batched!.instance), true);
+  assert.equal(mesh.getVisibleAt(item(33).batched!.instance), true, 'in view (x 64)');
+  assert.equal(mesh.getVisibleAt(item(1).batched!.instance), false, 'out of view (x 0)');
   assert.equal(mesh.getVisibleAt(item(7).batched!.instance), false, 'a hidden prim stays hidden');
   camera.position.set(64, 0, 1e5);
   camera.updateMatrixWorld();
@@ -166,6 +168,52 @@ test('culling back faces swaps the batch material; picking from behind still hit
   single.s.setCullBackfaces(true);
   assert.equal((single.batches()[0].material as THREE.Material).side, THREE.FrontSide);
   assert.equal((single.item(1).object as THREE.Mesh).material, HIDDEN);
+});
+
+test('a batch merges its items: their vertices one after another, each tagged with its slot', () => {
+  const { s, batches, item } = sync();
+  s.apply(row(64));
+  const g = batches()[0].geometry;
+  assert.equal(g.attributes.position.count, 64 * 24);
+  assert.equal(g.index!.count, 64 * 36);
+  const slot = item(10).batched!.instance;
+  assert.equal(g.attributes.batchItem.getX(slot * 24 + 5), slot);
+  assert.equal(g.index!.getX(slot * 36 + 2), item(10).geometry!.index!.getX(2) + slot * 24);
+  // A second batch of the same look (mirrored items) draws with the same material: one shader for both.
+  const mirrored = row(64, 200);
+  mirrored.xforms!.matrices.forEach((_, i, m) => i % 16 === 0 && (m[i] = -1));
+  s.apply(mirrored);
+  assert.equal(batches().length, 2);
+  assert.equal(batches()[0].material, batches()[1].material);
+});
+
+test("in the wire modes a batch draws its items' edges as one line draw sharing its positions", () => {
+  const { s, batches, item } = sync();
+  // The outline of each cube face (4 corners): 24 edges, 48 indices.
+  const outline = new Uint32Array(Array.from({ length: 6 }, (_, f) => [0, 1, 1, 2, 2, 3, 3, 0].map((v) => f * 4 + v)).flat());
+  s.apply(row(64, 1, { edges: outline }));
+  const mesh = batches()[0];
+  assert.equal(mesh.lines, null, 'shaded: none made');
+  s.setDisplayMode('shaded-wire');
+  const lines = mesh.lines!;
+  assert.ok(lines.visible);
+  assert.equal(lines.geometry.attributes.position, mesh.geometry.attributes.position, 'the positions are shared');
+  const slot = item(3).batched!.instance;
+  assert.equal(lines.geometry.index!.getX(slot * 48 + 1), 1 + slot * 24);
+  assert.equal(item(3).object!.children.length, 0, 'no lines of its own');
+  // Edges alone for one item: the batch's lines are redone.
+  s.apply({ meshes: [{ rid: 3, edges: new Uint32Array([0, 2]) }] });
+  assert.equal(mesh.lines, lines);
+  assert.equal(lines.geometry.index!.count, 63 * 48 + 2);
+  s.setDisplayMode('shaded');
+  assert.equal(lines.visible, false);
+  s.setDisplayMode('wire');
+  assert.ok(lines.visible);
+  // An item leaving its batch draws its own lines at once; its slot draws nothing.
+  s.apply({ meshes: [{ rid: 5, positions: new Float32Array(24 * 3) }] });
+  assert.equal(item(5).batched, null);
+  assert.ok(item(5).object!.children.some((o) => (o as THREE.LineSegments).isLineSegments));
+  assert.equal(mesh.getVisibleAt(4), false);
 });
 
 test('objectsUnder finds the items at and below the given paths, not siblings sharing a prefix', () => {

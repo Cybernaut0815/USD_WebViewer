@@ -970,6 +970,21 @@ test.describe('mock core', () => {
     const result = await page.evaluate(async (list) => {
       const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
       const renderer = viewer.three.renderer as any;
+      // 64 cubes with edges below the stage: a batch, whose looks and lines are sectioned too.
+      const g = (viewer.three.objectsFor('/World/Cube')[0] as any).geometry;
+      const index = g.index.array as Uint32Array;
+      const edges = new Uint32Array([...index].flatMap((_, t) => (t % 3 ? [] : [index[t], index[t + 1], index[t + 1], index[t + 2], index[t + 2], index[t]])));
+      const rids = Array.from({ length: 64 }, (_, i) => 500 + i);
+      viewer.session.emit('delta', {
+        meshes: rids.map((rid) => ({
+          rid, path: `/World/Batched/C${rid}`, purpose: 'default', indices: new Uint32Array(index), positions: new Float32Array(g.attributes.position.array),
+          normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, edges: new Uint32Array(edges),
+          displayColor: [0.6, 0.6, 0.3], subsets: null, material: 0, instances: null,
+        })),
+        xforms: { rids: new Uint32Array(rids), matrices: new Float64Array(rids.flatMap((_, i) => [0.3, 0, 0, 0, 0, 0.3, 0, 0, 0, 0, 0.3, 0, (i % 8) * 0.4 - 1.4, -1.5, Math.floor(i / 8) * 0.4 - 1.4, 1])) },
+      } as any);
+      await viewer.idle();
+      if (!viewer.three.root.children.some((o: any) => o.isBatch)) return 'no batch';
       // Materials never drawn (wire's surface, HIDDEN) are not sectioned.
       const unsectioned = () => {
         const missing: string[] = [];
@@ -1667,7 +1682,7 @@ test.describe('mock core', () => {
         await v.idle();
         await new Promise((resolve) => setTimeout(resolve, 300)); // the full-detail frame after the view moved
         await v.idle();
-        return v.three.root.children.filter((o: any) => o.isBatchedMesh).map((o: any) => o.instanceCount);
+        return v.three.root.children.filter((o: any) => o.isBatch).map((o: any) => o.instanceCount);
       }, { rids, positionsOnly });
     expect(await inject(false)).toEqual([80]);
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched.png', shot(page));
@@ -1689,6 +1704,58 @@ test.describe('mock core', () => {
     // Points updates take each item out of its batch for good: the same picture, drawn one by one.
     expect(await inject(true)).toEqual([]);
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched.png', shot(page));
+    expect(errors).toEqual([]);
+  });
+
+  test('in the wire modes batches draw their items\' edges in one draw each, looking as drawn one by one', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const rids = Array.from({ length: 144 }, (_, i) => 300 + i);
+    // 144 copies of the cube with its triangles' edges in a grid below the stage, the last 64 mirrored: two batches of
+    // one look. With positionsOnly, a points update for each, which takes it out of its batch.
+    const inject = (positionsOnly: boolean) =>
+      page.evaluate(async ({ rids, positionsOnly }) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        const g = (v.three.objectsFor('/World/Cube')[0] as any).geometry;
+        const positions = () => new Float32Array(g.attributes.position.array);
+        const index = g.index.array as Uint32Array;
+        const edges = new Uint32Array([...index].flatMap((_, t) => (t % 3 ? [] : [index[t], index[t + 1], index[t + 1], index[t + 2], index[t + 2], index[t]])));
+        const place = (i: number) => [i < 80 ? 0.4 : -0.4, 0, 0, 0, 0, 0.4, 0, 0, 0, 0, 0.4, 0, (i % 12) * 0.6 - 3.3, -1.4 - Math.floor(i / 12) * 0.3, -2, 1];
+        v.session.emit('delta', positionsOnly ? { meshes: rids.map((rid) => ({ rid, positions: positions() })) } : {
+          meshes: rids.map((rid) => ({
+            rid, path: `/World/Wired/C${rid}`, purpose: 'default', indices: new Uint32Array(index), positions: positions(),
+            normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, edges: new Uint32Array(edges),
+            displayColor: [0.3, 0.5 + (rid % 3) * 0.15, 0.8], subsets: null, material: 0, instances: null,
+          })),
+          xforms: { rids: new Uint32Array(rids), matrices: new Float64Array(rids.flatMap((_, i) => place(i))) },
+        } as any);
+        v.frame();
+        await v.idle();
+        await new Promise((resolve) => setTimeout(resolve, 300)); // the full-detail frame after the view moved
+        await v.idle();
+        const batches = v.three.root.children.filter((o: any) => o.isBatch) as any[];
+        return {
+          batches: batches.map((b) => b.instanceCount),
+          oneLook: batches.every((b) => b.material === batches[0].material),
+          lines: batches.map((b) => !!b.lines?.visible),
+          ownLines: rids.filter((rid) => v.three.objectsFor(`/World/Wired/C${rid}`)[0].children.some((o: any) => o.isLineSegments)).length,
+        };
+      }, { rids, positionsOnly });
+    const mode = (displayMode: DisplayMode) =>
+      page.evaluate(async (displayMode) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.displayMode = displayMode;
+        await v.idle();
+      }, displayMode);
+    await mode('shaded-wire');
+    expect(await inject(false)).toEqual({ batches: [80, 64], oneLook: true, lines: [true, true], ownLines: 0 });
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-shaded-wire.png', shot(page));
+    await mode('wire');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-wire.png', shot(page));
+    // Out of their batches, each item draws its own lines: the same pictures.
+    expect(await inject(true)).toEqual({ batches: [], oneLook: true, lines: [], ownLines: 144 });
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-wire.png', shot(page));
+    await mode('shaded-wire');
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-shaded-wire.png', shot(page));
     expect(errors).toEqual([]);
   });
 

@@ -194,8 +194,8 @@ export class Viewport {
   }
 
   /**
-   * While the view moves, batched parts under a pixel draw nothing (SceneSync.cullDetail): in an overview most
-   * triangles belong to them. A frame drawn 150 ms after the view stops shows everything again.
+   * While the view moves, batched parts out of view or under a pixel draw nothing (SceneSync.cullDetail): in an
+   * overview most triangles belong to them. A frame drawn 150 ms after the view stops shows everything again.
    */
   private cullDetail(): void {
     const camera = this.camera;

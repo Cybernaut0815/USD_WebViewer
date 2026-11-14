@@ -21,7 +21,7 @@ Page, main thread (TypeScript)                 Web Worker: usdcore.wasm (C++)
 - curves, points and instances;
 - materials, lights and cameras.
 
-**On the page:** three.js draws the deltas with WebGPU, falling back to WebGL2. Static meshes that share a look draw in a few `THREE.BatchedMesh`es (thousands of draw calls become a handful), and while the view moves the batched parts under a pixel are skipped (full detail returns 150 ms after it stops). Edits go back to the core as RPC calls and come back as new deltas.
+**On the page:** three.js draws the deltas with WebGPU, falling back to WebGL2. Static meshes that share a look are merged into a few batches, each drawn in one call (thousands of draw calls become a handful; in the wire modes their edges take one more call per batch), and while the view moves the batched parts out of view or under a pixel are skipped (full detail returns 150 ms after it stops). Edits go back to the core as RPC calls and come back as new deltas.
 
 **From outside the page:** other programs push whole layers to a small relay (`web/live-relay.ts`, HTTP and server-sent events); the page fetches them and the core replaces the layer's content in place, which USD diffs so only changed prims resync. The viewer's edits go back the same way. See [Live link](live.md).
 

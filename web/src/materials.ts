@@ -5,13 +5,21 @@ import {
   attribute,
   cameraPosition,
   float,
+  Fn,
   instancedBufferAttribute,
+  int,
+  ivec2,
   mat4,
   modelWorldMatrixInverse,
+  normalLocal,
   normalMap,
   positionGeometry,
+  select,
   texture,
+  textureLoad,
+  textureSize,
   uv,
+  varyingProperty,
   vec2,
   vec3,
   vec4,
@@ -414,6 +422,81 @@ export function instancedLines(base: THREE.LineBasicNodeMaterial, buffer: THREE.
   const column = (offset: number): Node => instancedBufferAttribute(buffer as any, 'vec4', 16, offset);
   m.positionNode = mat4(column(0), column(4), column(8), column(12)).mul(vec4(positionGeometry, 1)).xyz;
   return m;
+}
+
+/* ---------- batches (BatchMesh in scene.ts) ---------- */
+
+// ponytail: relies on three 0.186.1 internals, re-check on an upgrade (the e2e batch screenshots are the tripwire):
+// a texture node's binding follows its `value` on every draw of a node material (bindings refresh in full when a
+// material has nodes; onBeforeRender runs before that, in the shadow pass too); texture nodes share one binding by
+// texture uuid within a build; the shadow pass takes the material's positionNode; normalLocal assigned in the
+// positionNode reaches the lighting, as three's own Batch.js assigns it in setupPosition.
+const placeholder = () => {
+  const t = new THREE.DataTexture(new Float32Array(4), 1, 1, THREE.RGBAFormat, THREE.FloatType);
+  t.needsUpdate = true;
+  return t;
+};
+/** Two different textures, so a build without a batch at hand still gets two bindings. */
+const PLACEHOLDERS = [placeholder(), placeholder()];
+/** The textures of the batch being drawn (see useBatch): every batch draws with the same shader. */
+const BATCH_MATRICES: Node = textureLoad(PLACEHOLDERS[0]);
+const BATCH_STATE: Node = textureLoad(PLACEHOLDERS[1]);
+/** A batched item's displayColor, for the display-colour look. */
+const BATCH_TINT: Node = varyingProperty('vec3', 'vBatchTint');
+
+/** Points the batch looks at a batch's textures: called right before each of its draws. */
+export function useBatch(matrices: THREE.Texture, state: THREE.Texture): void {
+  BATCH_MATRICES.value = matrices;
+  BATCH_STATE.value = state;
+}
+
+/** A disposed batch's textures are dropped by the looks (a later build would revive them). */
+export function noBatch(matrices: THREE.Texture, state: THREE.Texture): void {
+  if (BATCH_MATRICES.value === matrices) BATCH_MATRICES.value = PLACEHOLDERS[0];
+  if (BATCH_STATE.value === state) BATCH_STATE.value = PLACEHOLDERS[1];
+}
+
+/**
+ * The vertex stage of every batch. Item i (attribute batchItem) reads its state (rgb displayColor, a drawn) from texel
+ * i of the state texture and its matrix from texels 4i..4i+3 of the matrices texture (rows hold whole matrices). The
+ * matrix places the position and, as its cofactor, the normal; an item not drawn collapses to a point (no fragments).
+ */
+const PLACE: Node = Fn((builder: any) => {
+  const item = int(attribute('batchItem', 'uint')).toConst();
+  const width = (t: Node): Node => int((textureSize as Node)(t, 0).x).toConst();
+  const side = width(BATCH_STATE);
+  const state = BATCH_STATE.load(ivec2(item.mod(side), item.div(side))).toConst();
+  BATCH_TINT.assign(state.rgb);
+  const row = width(BATCH_MATRICES);
+  const first = item.mul(4).toConst();
+  const x = first.mod(row).toConst();
+  const y = first.div(row).toConst();
+  const [c0, c1, c2, c3] = [0, 1, 2, 3].map((k) => BATCH_MATRICES.load(ivec2(x.add(k), y)).toConst());
+  if (builder.geometry.hasAttribute('normal')) {
+    const [a, b, c] = [c0.xyz, c1.xyz, c2.xyz];
+    normalLocal.assign(b.cross(c).mul(normalLocal.x).add(c.cross(a).mul(normalLocal.y)).add(a.cross(b).mul(normalLocal.z)));
+  }
+  return select(state.a.greaterThan(0.5), mat4(c0, c1, c2, c3).mul(vec4(positionGeometry, 1)).xyz, vec3(0));
+})();
+
+const BATCH_LOOKS = new WeakMap<THREE.Material, THREE.Material>();
+/**
+ * A look as batches draw it (with `tint`, coloured by each item's displayColor): one copy per look, so every batch of a
+ * look shares its shader. It goes when the look is disposed.
+ */
+export function batchLook(look: THREE.Material, tint = false): THREE.Material {
+  let copy = BATCH_LOOKS.get(look);
+  if (!copy) {
+    const m = section(look.clone()) as THREE.NodeMaterial;
+    m.positionNode = PLACE;
+    if (tint) m.colorNode = vec4(BATCH_TINT, 1);
+    BATCH_LOOKS.set(look, (copy = m));
+    look.addEventListener('dispose', () => {
+      BATCH_LOOKS.delete(look);
+      m.dispose();
+    });
+  }
+  return copy;
 }
 
 // One pass for both sides: three draws a transparent DoubleSide material twice (back faces, then front faces), which

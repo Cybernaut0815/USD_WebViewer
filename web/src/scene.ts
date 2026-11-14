@@ -80,6 +80,8 @@ interface Batch {
   spheres: Float32Array;
   /** Slots culled for the frame being drawn: under a pixel, or out of view (see cullDetail). */
   culled: Uint8Array;
+  /** Slots whose item the stage shows (visibility, purpose); holes are 0. */
+  shown: Uint8Array;
   /** Its items' edges changed since its lines were built (or they never were). */
   linesDirty: boolean;
 }
@@ -355,6 +357,21 @@ export class SceneSync {
   private sky: THREE.Texture | null = null;
   private plainBackground = false;
   private readonly building = new Set<Promise<unknown>>(); // materials and textures still loading
+  /** Some batched slot is culled (cullDetail): a still view must draw them again. */
+  private anyCulled = false;
+  /** stats(), kept until something it counts changes. */
+  private counted: SceneStats | null = null;
+  /** Objects detach() took out, leaving root.children in one pass (dropLeaving). */
+  private readonly leaving = new Set<THREE.Object3D>();
+  /** root.children as three walks them while the viewer draws (see drawing); null: rebuild it. */
+  private walked: THREE.Object3D[] | null = null;
+  /** root's child count when `walked` was built: writing root.children directly fires no event. */
+  private walkedFrom = -1;
+  /** The whole list while drawing() has it swapped out. */
+  private whole: THREE.Object3D[] | null = null;
+  private readonly stale = (): void => {
+    this.walked = null;
+  };
   private readonly scene: THREE.Scene;
   private readonly host: SceneHost;
 
@@ -363,6 +380,80 @@ export class SceneSync {
     this.host = host;
     this.textures = new TextureCache(host);
     scene.add(this.root);
+    // A change to root redoes the walked list; one made while that list is swapped in goes into the whole list too.
+    this.root.addEventListener('childadded', ({ child }) => {
+      this.walked = null;
+      if (this.whole && !this.whole.includes(child)) this.whole.push(child);
+    });
+    this.root.addEventListener('childremoved', ({ child }) => {
+      this.walked = null;
+      const at = this.whole ? this.whole.indexOf(child) : -1;
+      if (at >= 0) this.whole!.splice(at, 1);
+    });
+  }
+
+  /**
+   * Runs one of the viewer's own renders with root.children leaving out the batched items' stand-ins that have
+   * nothing to show under them: three's two walks of every pass (matrices, then what to draw; the shadow map's pass
+   * runs inside the render) skip them, tens of thousands on big stages. Everything outside this call sees the whole
+   * list: traversals, raycasts, bounds, hosts' own renders.
+   */
+  drawing(render: () => void): void {
+    this.dropLeaving();
+    const whole = this.root.children;
+    if (whole.length !== this.walkedFrom) this.walked = null;
+    if (!this.walked) {
+      this.walked = whole.filter((o) => !this.skipped(o)); // root's order: three keys the lights' shaders on it
+      this.walkedFrom = whole.length;
+    }
+    if (this.walked.length === whole.length) {
+      render();
+      return;
+    }
+    this.whole = whole;
+    this.root.children = this.walked;
+    try {
+      render();
+    } finally {
+      this.root.children = whole;
+      this.whole = null;
+    }
+  }
+
+  /** A batched item's stand-in (see standIn) with nothing to show under it: no children, or its own fill, hidden. */
+  private skipped(o: THREE.Object3D): boolean {
+    if ((o.updateMatrixWorld as unknown) !== standInMatrixWorld) return false; // by batch membership, never by look
+    const fill = this.items.get(o.userData.rid)?.fill;
+    return o.children.every((c) => c === fill && !c.visible);
+  }
+
+  /**
+   * Takes the objects detach() let go out of root.children in one pass, with remove()'s events: removing them one
+   * by one looks each up in root.children, which made closing a stage of 50k items take seconds.
+   */
+  private dropLeaving(): void {
+    if (!this.leaving.size) return;
+    const children = this.root.children;
+    let kept = 0;
+    for (const child of children) if (!this.leaving.has(child)) children[kept++] = child;
+    children.length = kept;
+    for (const child of this.leaving) {
+      if (child.parent !== this.root) continue;
+      child.parent = null;
+      child.dispatchEvent({ type: 'removed' });
+      this.root.dispatchEvent({ type: 'childremoved', child });
+    }
+    this.leaving.clear();
+  }
+
+  /** False when a ray in stage space misses a batched item's bounding sphere: a pick's pre-test. */
+  mayHit(item: Item, ray: THREE.Ray): boolean {
+    const batched = item.batched;
+    if (!batched) return true;
+    const s = batched.batch.spheres, i = batched.instance * 4;
+    SPHERE.center.set(s[i], s[i + 1], s[i + 2]);
+    SPHERE.radius = s[i + 3];
+    return ray.intersectsSphere(SPHERE);
   }
 
   /** Environment used while the stage has no lights of its own. */
@@ -418,6 +509,9 @@ export class SceneSync {
       });
     }
     if (delta.selected) this.selected = delta.selected;
+    // What stats() counts; positions, normals and primvars alone do not change it (deforming playback).
+    const counts = (m: MeshEntry) => m.indices || m.counts || m.instances !== undefined || m.material !== undefined || m.subsets !== undefined;
+    if (delta.removed || delta.materials || delta.curves || delta.points || delta.visibility || delta.meshes?.some(counts)) this.counted = null;
     const p = this.pending;
     p.rebuilt ||= rebuilt;
     p.structural ||= rebuilt || !!(delta.curves || delta.points || delta.lights || delta.cameras);
@@ -427,6 +521,7 @@ export class SceneSync {
     p.moved ||= !!(delta.xforms || delta.meshes);
     p.edges ||= !!delta.meshes?.some((m) => m.edges); // edges alone change no object: the lines are redone below
     if (this.batchDirty) this.batchUp(!delta.more);
+    this.dropLeaving();
     // Items draw as they arrive; the passes over every item below run once per flush, on its last
     // page. The bounds (clip planes, shadow fit) still follow the pages, at most twice a second.
     const now = performance.now();
@@ -549,7 +644,9 @@ export class SceneSync {
 
   clear(): void {
     for (const rid of [...this.items.keys()]) this.remove(rid); // the last item of a batch disposes it
+    this.dropLeaving();
     this.loose.clear();
+    this.counted = null;
     for (const record of this.materials.values()) disposeRecord(record);
     this.materials.clear();
     this.selected = [];
@@ -579,6 +676,7 @@ export class SceneSync {
 
   setPurposes(purposes: Iterable<string>): void {
     this.purposes = new Set(purposes);
+    this.counted = null;
     for (const item of this.items.values()) this.updateVisible(item);
     this.syncOverlayVisibility();
     this.invalidate();
@@ -624,23 +722,28 @@ export class SceneSync {
 
   /** USD counts of the visible meshes, the materials bound to them and those materials' textures. */
   stats(): SceneStats {
-    const stats: SceneStats = { meshes: 0, points: 0, faces: 0, edges: 0, materials: 0, textures: 0 };
-    const materials = new Set<Rid>();
-    for (const item of this.items.values()) {
-      if (item.kind !== 'mesh' || !item.object?.visible) continue;
-      const copies = item.instances ? item.instances.length / 16 : 1;
-      stats.meshes += copies;
-      stats.points += (item.counts?.points ?? 0) * copies;
-      stats.faces += (item.counts?.faces ?? 0) * copies;
-      stats.edges += (item.counts?.edges ?? 0) * copies;
-      // With subsets the mesh's own material is listed as the subset of the remaining faces.
-      for (const rid of item.subsets?.length ? item.subsets.map((s) => s.material) : [item.material]) if (rid) materials.add(rid);
+    if (!this.counted) {
+      const stats: SceneStats = { meshes: 0, points: 0, faces: 0, edges: 0, materials: 0, textures: 0 };
+      const materials = new Set<Rid>();
+      for (const item of this.items.values()) {
+        if (item.kind !== 'mesh' || !item.object?.visible) continue;
+        const copies = item.instances ? item.instances.length / 16 : 1;
+        stats.meshes += copies;
+        stats.points += (item.counts?.points ?? 0) * copies;
+        stats.faces += (item.counts?.faces ?? 0) * copies;
+        stats.edges += (item.counts?.edges ?? 0) * copies;
+        // With subsets the mesh's own material is listed as the subset of the remaining faces.
+        if (!item.subsets?.length) {
+          if (item.material) materials.add(item.material);
+        } else for (const subset of item.subsets) if (subset.material) materials.add(subset.material);
+      }
+      const textures = new Set<string>();
+      for (const rid of materials) this.materials.get(rid)?.entry.textures?.forEach((t) => textures.add(t));
+      stats.materials = materials.size;
+      stats.textures = textures.size;
+      this.counted = stats;
     }
-    const textures = new Set<string>();
-    for (const rid of materials) this.materials.get(rid)?.entry.textures?.forEach((t) => textures.add(t));
-    stats.materials = materials.size;
-    stats.textures = textures.size;
-    return stats;
+    return { ...this.counted };
   }
 
   /** The active prim gets the brighter highlight. */
@@ -752,7 +855,7 @@ export class SceneSync {
     for (const proxy of item.overlays) dispose(proxy);
     item.overlays = [];
     item.fill = null; // one of the overlays
-    this.root.remove(item.object);
+    this.leaving.add(item.object); // out of root.children with the others (dropLeaving)
     item.object.traverse((o) => (o as any).isLight && (o as THREE.Light).dispose());
     if ((item.object as THREE.InstancedMesh).isInstancedMesh) (item.object as THREE.InstancedMesh).dispose();
     else released(item.object);
@@ -773,7 +876,10 @@ export class SceneSync {
   private updateVisible(item: Item): void {
     if (item.object) item.object.visible = item.usdVisible && this.purposes.has(item.purpose);
     const batched = item.batched;
-    if (batched) batched.batch.mesh.setVisibleAt(batched.instance, item.object!.visible && !batched.batch.culled[batched.instance]);
+    if (!batched) return;
+    const b = batched.batch, slot = batched.instance;
+    b.shown[slot] = item.object!.visible ? 1 : 0;
+    b.mesh.setVisibleAt(slot, !!b.shown[slot] && !b.culled[slot]);
   }
 
   /* ---------- materials ---------- */
@@ -1063,6 +1169,7 @@ export class SceneSync {
       items: new Set(),
       spheres: new Float32Array(items.length * 4),
       culled: new Uint8Array(items.length),
+      shown: new Uint8Array(items.length),
       linesDirty: true,
     };
     mesh.castShadow = mesh.receiveShadow = true;
@@ -1076,6 +1183,7 @@ export class SceneSync {
       item.own?.dispose();
       item.own = null;
       standIn(item.object!, true);
+      item.object!.addEventListener('childadded', this.stale); // something to show under it: walked again (skipped)
       this.assign(item);
       this.follow(item);
       this.updateVisible(item);
@@ -1096,13 +1204,18 @@ export class SceneSync {
     const b = batched.batch;
     item.batched = null;
     b.items.delete(item);
+    b.shown[batched.instance] = 0; // a hole
     if (b.items.size) b.mesh.setVisibleAt(batched.instance, false);
     else {
       b.mesh.removeFromParent();
       b.mesh.dispose();
       this.batches.delete(b);
     }
-    if (item.object) standIn(item.object, false);
+    if (item.object) {
+      standIn(item.object, false);
+      item.object.removeEventListener('childadded', this.stale);
+    }
+    this.walked = null; // it draws again: no root event says so
     if (restore) this.assign(item);
     const look = lines && item.object ? this.wireLook() : null;
     const proxy = look && this.lines(item, look);
@@ -1135,7 +1248,9 @@ export class SceneSync {
       return;
     }
     b.mesh.setMatrixAt(batched.instance, b.mirrored ? MATRIX.multiplyMatrices(MIRROR, m) : m);
-    item.object!.matrixWorldNeedsUpdate = true; // see standIn()
+    // At once, children too: the viewer's render no longer walks stand-ins (drawing), and picks and hosts read it.
+    item.object!.matrixWorldNeedsUpdate = true;
+    item.object!.updateMatrixWorld();
     const sphere = SPHERE.copy(item.geometry!.boundingSphere!).applyMatrix4(m);
     b.spheres.set([sphere.center.x, sphere.center.y, sphere.center.z, sphere.radius], batched.instance * 4);
   }
@@ -1146,6 +1261,7 @@ export class SceneSync {
    * again. `height` is the drawing buffer's height in pixels.
    */
   cullDetail(camera: THREE.Camera | null, height: number): void {
+    if (!camera && !this.anyCulled) return; // a still view with nothing culled
     let scale = 0; // pixels per unit at depth 1 (perspective) or at any depth (orthographic)
     const perspective = (camera as THREE.PerspectiveCamera | null)?.isPerspectiveCamera;
     if (camera && perspective) scale = height / (2 * Math.tan(((camera as THREE.PerspectiveCamera).fov * Math.PI) / 360));
@@ -1156,10 +1272,11 @@ export class SceneSync {
     const view = MATRIX.multiplyMatrices(camera?.matrixWorldInverse ?? MATRIX.identity(), this.root.matrixWorld).elements;
     // The view's planes in stage space, where the spheres are.
     if (camera) FRUSTUM.setFromProjectionMatrix(CLIP.multiplyMatrices(camera.projectionMatrix, MATRIX), camera.coordinateSystem, camera.reversedDepth);
+    // Over the slots' typed arrays (holes included: they stay hidden), not the items.
+    let any = false;
     for (const b of this.batches) {
-      const s = b.spheres;
-      for (const item of b.items) {
-        const i = item.batched!.instance;
+      const { spheres: s, culled: was, shown } = b;
+      for (let i = 0; i < was.length; i++) {
         let culled = false;
         if (camera) {
           const x = s[i * 4], y = s[i * 4 + 1], z = s[i * 4 + 2], r = s[i * 4 + 3];
@@ -1171,11 +1288,13 @@ export class SceneSync {
             culled = !FRUSTUM.intersectsSphere(SPHERE);
           }
         }
-        if (culled === !!b.culled[i]) continue;
-        b.culled[i] = culled ? 1 : 0;
-        b.mesh.setVisibleAt(i, item.object!.visible && !culled);
+        any ||= culled;
+        if (culled === !!was[i]) continue;
+        was[i] = culled ? 1 : 0;
+        b.mesh.setVisibleAt(i, !!shown[i] && !culled);
       }
     }
+    this.anyCulled = any;
   }
 
   /** The look a batch draws with: the one materialsFor gives its items, as batches draw it (batchLook). */
@@ -1432,6 +1551,7 @@ export class SceneSync {
     }
     for (const item of this.lit) if (!lit.has(item) && item.fill) item.fill.visible = false;
     this.lit = lit;
+    this.walked = null; // fills shown or hidden fire no event
   }
 
   /**
@@ -1512,7 +1632,10 @@ function style(material: THREE.Material, flat: boolean, single: boolean): THREE.
 }
 
 // ponytail: own-property overrides of two three 0.186.1 methods (Renderer._projectObject culls through
-// intersectsFrustum when frustumCulled; Object3D.updateMatrixWorld as below). Re-check on a three upgrade.
+// intersectsFrustum when frustumCulled; Object3D.updateMatrixWorld as below), and SceneSync.drawing relies on three
+// making both walks of root (Renderer._renderScene: scene.updateMatrixWorld, _projectObject) synchronously inside
+// render(), the shadow map's pass nested in it. Re-check on a three upgrade. drawing() rebuilds its list with one
+// pass over root's children whenever they change; keep it current from the events if streaming frames show it.
 const NEVER_IN_VIEW = () => false;
 function standInMatrixWorld(this: THREE.Object3D, force?: boolean): void {
   force = this.matrixWorldNeedsUpdate;
@@ -1525,9 +1648,9 @@ function standInMatrixWorld(this: THREE.Object3D, force?: boolean): void {
 }
 
 /**
- * A batched item's object draws nothing but stays a plain mesh for picks, bounds and hosts. three would still visit
- * each one every frame (thousands of them took most of a frame's CPU): it is never in view, so three skips it at
- * once, and its world matrix is recomputed only when marked (follow, setUpAxis), not on every frame's update.
+ * A batched item's object draws nothing but stays a plain mesh for picks, bounds and hosts. The viewer's own renders
+ * leave it out of root's children (SceneSync.drawing) unless something shows under it; other walks still visit it:
+ * three then finds it never in view, and its world matrix is recomputed only when marked (follow, setUpAxis).
  */
 function standIn(object: THREE.Object3D, on: boolean): void {
   const o = object as unknown as Record<string, unknown>;

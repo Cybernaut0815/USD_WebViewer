@@ -1701,9 +1701,21 @@ test.describe('mock core', () => {
       return { rid: hit?.rid, hidden, standIn: (object as any).material.visible };
     });
     expect(batched).toEqual({ rid: 105, hidden: true, standIn: false });
-    // Points updates take each item out of its batch for good: the same picture, drawn one by one.
+    // A selected batched item shows its highlight (its object is drawn again while the fill shows).
+    const select = (rids: number[]) =>
+      page.evaluate(async (rids) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.session.emit('delta', { selected: rids.map((rid) => ({ rid })) } as any);
+        await v.idle();
+      }, rids);
+    await select([105, 117]);
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-selected.png', shot(page));
+    await select([]);
+    // Points updates take each item out of its batch for good: the same pictures, drawn one by one.
     expect(await inject(true)).toEqual([]);
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched.png', shot(page));
+    await select([105, 117]);
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-selected.png', shot(page));
     expect(errors).toEqual([]);
   });
 

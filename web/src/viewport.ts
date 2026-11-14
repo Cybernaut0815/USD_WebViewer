@@ -182,7 +182,7 @@ export class Viewport {
         for (const hook of this.beforeRender) hook();
         this.cullDetail();
         const start = performance.now();
-        this.renderer.render(this.scene, this.camera);
+        this.sync.drawing(() => this.renderer.render(this.scene, this.camera));
         const end = performance.now();
         this.frameMs = end - start;
         this.frameTimes.push(end);
@@ -534,16 +534,18 @@ export class Viewport {
       -((clientY - rect.top) / rect.height) * 2 + 1,
     );
     // CPU raycast of the items shown: three tests hidden objects in full (it checks layers only), and huge meshes go
-    // through their run boxes (clusters.ts). Batched items are picked through their own objects.
+    // through their run boxes (clusters.ts). Batched items are picked through their own objects, once the ray meets
+    // the bounding sphere their batch keeps in stage space (a cheap pre-test where batches hold most of the items).
+    const raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(ndc, this.camera);
+    const ray = raycaster.ray.clone().applyMatrix4(this.sync.root.matrixWorld.clone().invert());
     const objects: THREE.Object3D[] = [];
     for (const item of this.sync.items.values()) {
-      if (!item.object || item.kind === 'light' || item.kind === 'camera') continue;
+      if (!item.object || item.kind === 'light' || item.kind === 'camera' || !this.sync.mayHit(item, ray)) continue;
       let shown = true;
       for (let o: THREE.Object3D | null = item.object; o && shown; o = o.parent) shown = o.visible;
       if (shown) objects.push(item.object);
     }
-    const raycaster = new THREE.Raycaster();
-    raycaster.setFromCamera(ndc, this.camera);
     for (const hit of raycaster.intersectObjects(objects, false)) {
       let object: THREE.Object3D | null = hit.object;
       let visible = true;
@@ -626,7 +628,7 @@ export class Viewport {
     this.camera.layers.disable(HELPERS);
     this.sync.cullDetail(null, 0);
     try {
-      this.renderer.render(this.scene, this.camera);
+      this.sync.drawing(() => this.renderer.render(this.scene, this.camera));
     } finally {
       this.camera.layers.enable(HELPERS);
     }

@@ -206,6 +206,10 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .props tr.meta td { padding-left: 16px; }
 .props .twisty { cursor: pointer; margin-right: 2px; }
 .props input[type='number'] { width: 4em; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); }
+.props .xyz { display: flex; gap: 4px; }
+.props td:has(> .xyz) { width: 100%; } /* the labels keep their width, the fields take the rest */
+.props .xyz input { flex: 1 1 0; min-width: 0; width: 0; } /* share the row, never widen the table */
+.props .actions { display: flex; gap: 6px; margin: 4px 0; }
 
 .props { flex: 1; overflow: auto; padding: 6px 8px; }
 .props .hint { color: var(--dim); }

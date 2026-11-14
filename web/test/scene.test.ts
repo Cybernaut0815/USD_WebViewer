@@ -113,6 +113,16 @@ test('a material that builds later swaps in place; a transparent one sends the i
   assert.equal((item(1).object as THREE.Mesh).material, s.shadedMaterials(1));
 });
 
+test('cutouts keep their alpha test in batches and in flat variants (three r186 clones drop it)', async () => {
+  const { s, batches, item } = sync();
+  const cutout = { rid: 900, path: '/Looks/Leaf', network: { surface: 'S', nodes: { S: { type: 'UsdPreviewSurface', params: { opacityThreshold: 0.5 }, inputs: {} } } } };
+  s.apply({ materials: [cutout], ...row(64, 1, { material: 900, normals: null }) });
+  s.apply(row(3, 100, { material: 900, normals: null }));
+  await s.settled();
+  assert.equal((batches()[0].material as THREE.Material).alphaTest, 0.5, 'the batch of flat items');
+  assert.equal(((item(100).object as THREE.Mesh).material as THREE.Material).alphaTest, 0.5, 'a flat item drawn alone');
+});
+
 test('moving points, removal and clear', () => {
   const { s, batches, item } = sync();
   s.apply(row(64));

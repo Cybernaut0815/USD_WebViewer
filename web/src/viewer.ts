@@ -80,6 +80,7 @@ const SHORTCUTS: [string, [string, string][]][] = [
       ['Shift+drag up', 'Add everything the rectangle touches'],
       ['Shift+drag down', 'Add everything fully inside the rectangle'],
       ['Ctrl+drag up / down', 'Remove, the same way'],
+      ['Esc', 'Select nothing'],
     ],
   ],
   [
@@ -720,10 +721,11 @@ export class UsdViewerElement extends HTMLElement {
       const plain = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
       const gizmo = e.key === 'Escape' && this.viewport.sectionGizmo !== null;
       const removing = (e.key === 'Delete' || e.key === 'Backspace') && this.viewport.sectionGizmo !== null;
+      const none = e.key === 'Escape' && !gizmo && this.selection.length > 0 && !this.help.open; // as a click on nothing
       // readonly: F and the H keys only (hiding writes the session layer, never saved; the Help window lists editing
-      // keys), and Esc and Del for the section's selection (they edit the view only)
+      // keys), and Esc and Del for the selection (they edit the view only)
       const tools = plain && ((TOOL_KEYS[key] && TOOL_KEYS[key] !== 'scale') || key === 'n'); // readonly: Move and Rotate move sections only
-      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH' && !gizmo && !removing && !tools) return;
+      if (this.hasAttribute('readonly') && !(key === 'f' && plain) && e.code !== 'KeyH' && !gizmo && !removing && !none && !tools) return;
       if (key === 'f' && plain) this.frame(this.selection);
       else if (e.ctrlKey && key === 'z') (e.shiftKey ? this.redo() : this.undo());
       else if (e.ctrlKey && key === 'y') this.redo();
@@ -741,6 +743,7 @@ export class UsdViewerElement extends HTMLElement {
       else if ((e.key === ',' || e.key === '.') && !e.ctrlKey && !e.metaKey && this.stage?.hasTimeRange) this.step(e.key === '.' ? 1 : -1);
       else if (e.key === 'F1' || e.key === '?') this.showHelp();
       else if (gizmo) this.viewport.escapeSectionGizmo();
+      else if (none) modifySelect(this.session, [], 'replace', 'viewport');
       else if (removing) this.viewport.removeSelectedSections();
       else return;
       e.preventDefault();
@@ -824,29 +827,40 @@ export class UsdViewerElement extends HTMLElement {
         disabled: empty,
       },
       { label: 'Clear', action: () => set(EMPTY), disabled: empty },
+      {
+        label: 'Select all',
+        action: () => (v.sectionGizmo = { planes: s.planes.map((_, i) => i), boxes: s.boxes.map((_, box) => ({ box })) }),
+        disabled: empty || !s.on,
+      },
+      ...this.selectedSectionItems(true),
     ];
     showMenu(this.shadowRoot!, x, y, items);
   }
 
   /** The menu of the selected planes and boxes (a right click on one): flip, show inside or cut out, delete. */
   private selectedSectionMenu(x: number, y: number): void {
+    showMenu(this.shadowRoot!, x, y, this.selectedSectionItems(false));
+  }
+
+  /** Flip, show inside or cut out, delete the selected planes and boxes; `all` lists them disabled when they do not apply. */
+  private selectedSectionItems(all: boolean): MenuItem[] {
     const v = this.viewport;
     const s = this.section;
     const { planes, boxes } = v.sectionSelected;
     const inside = boxes.every((i) => s.boxes[i].keep === 'inside');
     const many = (n: number, one: string, more: string) => (n > 1 ? more : one);
     const items: MenuItem[] = [];
-    if (planes.length) {
+    if (planes.length || all) {
       const flipped = s.planes.map((p, i) => (planes.includes(i) ? { point: p.point, normal: p.normal.map((n) => -n || 0) as Vec3 } : p));
-      items.push({ label: many(planes.length, 'Flip plane', 'Flip planes'), action: () => v.setSection({ ...s, planes: flipped }, 'ui') });
+      items.push({ label: many(planes.length, 'Flip plane', 'Flip planes'), action: () => v.setSection({ ...s, planes: flipped }, 'ui'), disabled: !planes.length });
     }
-    if (boxes.length) {
+    if (boxes.length || all) {
       const keep = inside ? 'outside' : 'inside';
       const kept = s.boxes.map((b, i) => (boxes.includes(i) ? { ...b, keep } : b));
-      items.push({ label: inside ? 'Cut out' : 'Show inside', action: () => v.setSection({ ...s, boxes: kept }, 'ui') });
+      items.push({ label: inside ? 'Cut out' : 'Show inside', action: () => v.setSection({ ...s, boxes: kept }, 'ui'), disabled: !boxes.length });
     }
-    items.push({ label: 'Delete', action: () => v.removeSelectedSections() });
-    showMenu(this.shadowRoot!, x, y, items);
+    items.push({ label: all ? 'Delete selected' : 'Delete', action: () => v.removeSelectedSections(), disabled: !planes.length && !boxes.length });
+    return items;
   }
 
   /** A draggable border between a side panel and the viewport, with a tab in its middle that shows or hides the panel. */
@@ -913,9 +927,13 @@ export class UsdViewerElement extends HTMLElement {
     for (const type of MIRRORED) {
       on(type, (e) => this.dispatchEvent(new CustomEvent(type, { detail: (e as CustomEvent).detail })));
     }
-    this.viewport.onsection = (source) => this.dispatchEvent(new CustomEvent('sectionchange', { detail: { source } }));
+    this.viewport.onsection = (source) => {
+      this.showSectionProps();
+      this.dispatchEvent(new CustomEvent('sectionchange', { detail: { source } }));
+    };
     this.viewport.onsectiongizmo = () => {
       if (this.viewport.sectionGizmo && this.selection.length) this.session.select([], 'api'); // never both selected
+      this.showSectionProps();
       this.dispatchEvent(new Event('sectiongizmochange'));
     };
     this.viewport.onsectionmenu = (x, y) => this.selectedSectionMenu(x, y);
@@ -981,6 +999,8 @@ export class UsdViewerElement extends HTMLElement {
     this.props.onnavigate = (path) => this.select(path, { reveal: true });
     this.props.onframe = (path) => this.frame([path]);
     this.props.onrefinement = (path, enabled, level) => this.usd.setRefinement(path, enabled, level).catch(() => {});
+    this.props.onsectionedit = (next) => this.viewport.setSection(next, 'ui');
+    this.props.onsectiondelete = (planes, boxes) => this.viewport.removeSections(planes, boxes, 'ui');
     // Values in the panel are truncated; the clipboard gets the whole thing.
     this.props.attributeValue = (path, name) => this.usd.attribute(path, name);
     this.props.attributeHead = (path, name) => this.usd.attributeHead(path, name);
@@ -1013,8 +1033,17 @@ export class UsdViewerElement extends HTMLElement {
 
   /** Shows a prim in the property panel, ignoring answers for a selection that changed meanwhile. */
   private async showProps(path: Path | null): Promise<void> {
-    const info = path ? await this.usd.prim(path).catch(() => null) : null;
+    if (!path) return this.showSectionProps();
+    const info = await this.usd.prim(path).catch(() => null);
     if (this.active === path) this.props.show(info);
+  }
+
+  /** With no prim selected, the property panel edits the selected planes and boxes, or shows its hint. */
+  private showSectionProps(): void {
+    if (this.active) return;
+    const v = this.viewport;
+    if (v.sectionGizmo) this.props.showSection(v.section, v.sectionSelected, v.sync.upAxis);
+    else this.props.show(null);
   }
 
   /** Redraws the stats overlay once per frame at most. */

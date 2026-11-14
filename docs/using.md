@@ -12,6 +12,7 @@ Open files with File ▸ Open… or File ▸ Folder…, or by dropping them on t
 | `N`, then `W` `A` `S` `D` | Navigate mode, game-style: hold a mouse button to look around, `W` `A` `S` `D` fly forward, left, back, right. The wheel sets the speed (shown at the top left), `Shift` flies faster and `Alt` slower. `N` again (or `Q`) leaves it |
 | `F` | Frame the selection, or everything |
 | Click | Select one prim; clicking empty space clears the selection |
+| `Esc` | Clear the selection, like a click on empty space (with planes or boxes selected, see Sections) |
 | Shift+click | Add a prim and make it the **active** one. On a prim that is already selected, it only makes it active |
 | Ctrl+click | Remove a prim from the selection |
 | Shift+Ctrl+click | Add the prim's parent. Each further Shift+Ctrl+click adds the next level up |
@@ -118,12 +119,14 @@ The prim menu (right-click) also copies the prim's USD, either the composed subt
 
 **Section**, after the tool buttons at the top left of the view, cuts the view open with clipping planes and boxes. It changes only what is drawn: the stage, its files and the shadows stay whole, and picking goes through to what is behind a cut.
 
-- **The Section menu** adds planes and boxes and acts on all of them; everything else happens in the view.
+- **The Section menu** adds planes and boxes, acts on all of them, and edits the selected ones.
   - **Plane X / Y / Z** through the stage's centre keeps its negative side: below the horizontal one, which the menu marks.
   - **Plane facing the view** goes through the orbit target and keeps what lies beyond it.
   - **Box around the selection** (around the stage when nothing is selected) shows only what is inside it.
   - A new plane or box is selected at once. At most 8 planes and 8 boxes. A point shows when every plane keeps it, no "cut out" box holds it, and, if there are "show inside" boxes, one of them holds it.
   - **Hide handles** hides the outlines and dots (the cut stays) and **Show handles** brings them back. **Sections off** shows everything but keeps the entries, and hides their handles too; **Clear** removes them all.
+  - **Select all** selects every plane and box. **Flip plane**, **Cut out** / **Show inside** and **Delete selected** act on the selected ones, as the right-click menu does; they are greyed out while nothing they apply to is selected.
+- **The details panel** on the right edits the selected planes and boxes while no prim is selected, in stage units and axes: a plane's point and normal, a box's Show inside / Cut out, bottom, top and the four corners in plan. Each has **Flip** (planes) and **Delete** buttons. A value takes effect on Enter or when the field loses focus; one that would make the entry unusable (a zero normal, a top at or below the bottom, a footprint crossing itself) is refused and the old value comes back. The values follow the gizmo while it drags.
 - **Selecting**, like prims. Every plane and box shows its outline and dots. Click a dot or an outline (in Select, Move, Rotate or Scale; not in Navigate). **Shift+click** or **Ctrl+click** adds or removes it. A click on anything else selects none of them. Prims and sections are never selected together: selecting one clears the other.
   - A box's dot chooses that handle of the box; its outline chooses the whole box. A plane has one dot, in the middle of its outline.
   - **Esc** clears the box handles chosen; pressed again, it selects none.

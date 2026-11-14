@@ -479,6 +479,17 @@ const PLACE: Node = Fn((builder: any) => {
   return select(state.a.greaterThan(0.5), mat4(c0, c1, c2, c3).mul(vec4(positionGeometry, 1)).xyz, vec3(0));
 })();
 
+/**
+ * A copy of a look to change (a batch's placement, a flat or single-sided variant). three r186's NodeMaterial.copy()
+ * skips Material.copy() and so the non-enumerable alphaTest: a cutout's copy would draw its quad opaque.
+ * ponytail: drop this once three's copy keeps alphaTest.
+ */
+export function copyLook<T extends THREE.Material>(look: T): T {
+  const copy = look.clone() as T;
+  copy.alphaTest = look.alphaTest;
+  return copy;
+}
+
 const BATCH_LOOKS = new WeakMap<THREE.Material, THREE.Material>();
 /**
  * A look as batches draw it (with `tint`, coloured by each item's displayColor): one copy per look, so every batch of a
@@ -487,7 +498,7 @@ const BATCH_LOOKS = new WeakMap<THREE.Material, THREE.Material>();
 export function batchLook(look: THREE.Material, tint = false): THREE.Material {
   let copy = BATCH_LOOKS.get(look);
   if (!copy) {
-    const m = section(look.clone()) as THREE.NodeMaterial;
+    const m = section(copyLook(look)) as THREE.NodeMaterial;
     m.positionNode = PLACE;
     if (tint) m.colorNode = vec4(BATCH_TINT, 1);
     BATCH_LOOKS.set(look, (copy = m));

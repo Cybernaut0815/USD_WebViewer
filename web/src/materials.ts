@@ -279,7 +279,8 @@ async function buildPreviewSurface(
 
 /* ---------- MaterialX ---------- */
 
-const WHITE = new ImageData(new Uint8ClampedArray([255, 255, 255, 255]), 1, 1);
+/** A white pixel for images a MaterialX document misses; made on first use (Node has no ImageData: tests load this module). */
+let white: ImageData | null = null;
 
 async function buildMaterialX(xml: string, textures: TextureCache, host: MaterialHost): Promise<THREE.Material | null> {
   const { MaterialXLoader } = await import('three/addons/loaders/MaterialXLoader.js');
@@ -291,7 +292,7 @@ async function buildMaterialX(xml: string, textures: TextureCache, host: Materia
     // three's MaterialX loader asks for image data and wraps it in its own texture.
     load(uri: string, onLoad: (image: unknown) => void) {
       loading.push(
-        textures.get(uri, THREE.NoColorSpace).then((loaded) => onLoad(loaded ? loaded.image : WHITE)), // missing: white pixel
+        textures.get(uri, THREE.NoColorSpace).then((loaded) => onLoad(loaded ? loaded.image : (white ??= new ImageData(new Uint8ClampedArray([255, 255, 255, 255]), 1, 1)))),
       );
     },
   } as any);
@@ -400,8 +401,12 @@ export const LINE_ALONE = section(new THREE.LineBasicNodeMaterial({ color: 0xa8a
 /** Selection edges in the selection-wire modes; the active prim is brighter. */
 export const SELECTED_LINE = section(new THREE.LineBasicNodeMaterial({ color: 0xd01818 }));
 export const ACTIVE_LINE = section(new THREE.LineBasicNodeMaterial({ color: 0xff6a6a }));
-/** Wireframe mode: the surface is not drawn but stays pickable (never drawn, so never sectioned). */
+/**
+ * Wireframe mode, and items a batch draws: the surface is not drawn but stays pickable (never drawn, so never
+ * sectioned). Its side is the look's, since raycasts skip the back faces of FrontSide materials.
+ */
 export const HIDDEN = new THREE.MeshBasicNodeMaterial({ visible: false });
+export const HIDDEN_DOUBLE = new THREE.MeshBasicNodeMaterial({ visible: false, side: THREE.DoubleSide });
 
 /** A copy of a line material that places instance i with the matrix at buffer[16i..16i+16] (draw with object.count = instances). */
 export function instancedLines(base: THREE.LineBasicNodeMaterial, buffer: THREE.InstancedInterleavedBuffer): THREE.Material {
@@ -411,6 +416,8 @@ export function instancedLines(base: THREE.LineBasicNodeMaterial, buffer: THREE.
   return m;
 }
 
+// One pass for both sides: three draws a transparent DoubleSide material twice (back faces, then front faces), which
+// for one flat tint without depth writes only costs a second pass over the selected geometry.
 const highlight = (color: number, opacity: number) =>
   section(
     new THREE.MeshBasicNodeMaterial({
@@ -419,6 +426,7 @@ const highlight = (color: number, opacity: number) =>
       opacity,
       depthWrite: false,
       side: THREE.DoubleSide,
+      forceSinglePass: true,
       polygonOffset: true,
       polygonOffsetFactor: -2,
       polygonOffsetUnits: -2,

@@ -33,6 +33,13 @@ test('select posts setSelection then flush and tells listeners', async () => {
   assert.deepEqual(s.selection, ['/a']);
 });
 
+test('wantEdges asks the core once and flushes; later calls only wait for a running flush', async () => {
+  const { worker, s } = session();
+  await s.wantEdges();
+  await s.wantEdges();
+  assert.deepEqual(worker.posted.map((m) => [m.method, m.args]), [['setEdges', [true]], ['flush', [128]]]);
+});
+
 test('shift adds and activates (or only activates a selected prim), ctrl removes and keeps the active prim', () => {
   const { s } = session();
   s.select(['/a']);

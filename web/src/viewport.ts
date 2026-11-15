@@ -82,6 +82,8 @@ export class Viewport {
   private frameTimes: number[] = []; // when the frames of the last second were drawn
   /** CPU time of the last renderer.render call, in milliseconds. */
   frameMs = 0;
+  /** The adapter that draws, once init() is done: 'webgpu <vendor architecture description>' or 'webgl2 <renderer>'. */
+  gpuName = '';
   /** Called before each frame is drawn, with the camera of that frame in place (gizmos, overlays). */
   readonly beforeRender = new Set<() => void>();
   /** Host objects (the element's three.overlay): framed and clipped with the stage, never picked. */
@@ -133,9 +135,11 @@ export class Viewport {
     // WebGPU's default limits allow no buffer over 256 MiB, which one big mesh's index or vertices exceed (the pass
     // then draws nothing). Ask the device for the adapter's own maxima: the same adapter options as three's request
     // (WebGPUBackend: featureLevel 'compatibility'), so requestDevice cannot refuse them and fall back to WebGL2.
-    const gpu = (navigator as { gpu?: { requestAdapter(options: object): Promise<{ limits: Record<string, number> } | null> } }).gpu;
+    type Adapter = { limits: Record<string, number>; info?: Record<'vendor' | 'architecture' | 'description', string> };
+    const gpu = (navigator as { gpu?: { requestAdapter(options: object): Promise<Adapter | null> } }).gpu;
+    let adapter: Adapter | null = null;
     if ((this.renderer.backend as any).isWebGPUBackend && gpu) {
-      const adapter = await gpu.requestAdapter({ featureLevel: 'compatibility' }).catch(() => null);
+      adapter = await gpu.requestAdapter({ featureLevel: 'compatibility' }).catch(() => null);
       for (const name of ['maxBufferSize', 'maxStorageBufferBindingSize']) if (adapter?.limits[name]) this.limits[name] = adapter.limits[name];
     }
     // GPU errors (a buffer the device refuses, a lost device) reach the session log, not only the console.
@@ -149,6 +153,12 @@ export class Viewport {
     await this.renderer.init();
     THREE.RectAreaLightNode.setLTC((await areaTables).RectAreaLightTexturesLib.init());
     this.backend = (this.renderer.backend as any).isWebGPUBackend ? 'webgpu' : 'webgl2';
+    // The adapter above is three's (the same options); WebGL2 names its renderer where the browser exposes it.
+    const gl = (this.renderer.backend as { gl?: WebGL2RenderingContext }).gl;
+    const info = adapter?.info;
+    this.gpuName = gl
+      ? `webgl2 ${gl.getParameter(gl.getExtension('WEBGL_debug_renderer_info')?.UNMASKED_RENDERER_WEBGL ?? gl.RENDERER)}`
+      : ['webgpu', info?.vendor, info?.architecture, info?.description].filter(Boolean).join(' ');
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.sync.setStudioEnvironment(pmrem.fromScene(new RoomEnvironment(), 0.04).texture);
     pmrem.dispose();

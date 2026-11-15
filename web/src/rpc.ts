@@ -1,6 +1,9 @@
 import type { Boot, CoreApi, LogEntry, Response } from './protocol.ts';
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void };
+/** Calls whose typed-array arguments are transferred to the worker, not copied (the caller's arrays are left detached):
+ *  an export's value arrays reach hundreds of MB, and a copy doubles the peak. */
+const TAKES = new Set<string>(['exportVariants']);
 
 /** Promise RPC to the wasm core's worker. Calls are answered strictly in order. */
 export class CoreClient {
@@ -36,7 +39,8 @@ export class CoreClient {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method, args });
+      const transfer = TAKES.has(method) ? [...new Set(args.flatMap((a) => (ArrayBuffer.isView(a) ? [a.buffer as ArrayBuffer] : [])))] : [];
+      this.worker.postMessage({ id, method, args }, transfer);
     });
   }
 

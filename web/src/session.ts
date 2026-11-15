@@ -64,7 +64,10 @@ export interface UsdStageApi {
   setEditTarget(identifier: string): Promise<void>;
   /** A layer as usda text or usdc binary, or the whole stage flattened (any identifier). */
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Promise<Uint8Array<ArrayBuffer> | null>;
-  /** The stage flattened as shown, as usdc, with a variant set per prim of the spec (ExportVariantsSpec). */
+  /**
+   * The stage flattened as shown, as usdc, with a variant set per prim of the spec (ExportVariantsSpec); with
+   * `flatten: false` the spec's overlay alone. `floats` and `ints` are transferred to the core: left detached.
+   */
   exportVariants(spec: ExportVariantsSpec, floats: Float32Array, ints: Int32Array): Promise<ExportVariantsResult>;
   /** Re-reads layers from their files or URLs (all of them when omitted), discarding unsaved edits and the undo history. */
   reload(identifiers?: string[]): Promise<void>;

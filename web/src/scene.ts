@@ -15,7 +15,9 @@ import {
   instancedLines,
   LINE,
   LINE_ALONE,
+  NO_VALUE,
   noBatch,
+  paintLook,
   PLAIN,
   type MaterialHost,
   pointsMaterial,
@@ -61,13 +63,26 @@ const BATCH_PENDING_ITEMS = 256;
 const BATCH_PENDING_VERTICES = 1_000_000;
 const MIRROR = new THREE.Matrix4().makeScale(-1, 1, 1);
 const MATRIX = new THREE.Matrix4();
+const SLOT = new THREE.Matrix4();
+const ORIGIN = new THREE.Vector3();
 const CLIP = new THREE.Matrix4();
 const FRUSTUM = new THREE.Frustum();
 const COLOR = new THREE.Color();
 const SPHERE = new THREE.Sphere();
 
+/** The slots of one BatchMesh: a batch's items, or a paint piece's parts of items. */
+interface Slots {
+  mesh: BatchMesh;
+  /** Bounding sphere of each slot in stage space (x, y, z, radius), for culling. */
+  spheres: Float32Array;
+  /** Slots culled for the frame being drawn: under a pixel, or out of view (see cullDetail). */
+  culled: Uint8Array;
+  /** Slots whose item the stage shows (visibility, purpose); holes are 0. */
+  shown: Uint8Array;
+}
+
 /** Many small static items of one look drawn by one BatchMesh; each item's own object then draws nothing. */
-interface Batch {
+interface Batch extends Slots {
   key: string;
   material: Rid; // the look: a material record, or the display-colour fallback while it has none
   flat: boolean;
@@ -75,16 +90,35 @@ interface Batch {
   /** Items whose matrix mirrors: the batch's own matrix mirrors too, so three culls the right faces. */
   mirrored: boolean;
   vertexColors: boolean;
-  mesh: BatchMesh;
   items: Set<Item>;
-  /** Bounding sphere of each slot in stage space (x, y, z, radius), for culling. */
-  spheres: Float32Array;
-  /** Slots culled for the frame being drawn: under a pixel, or out of view (see cullDetail). */
-  culled: Uint8Array;
-  /** Slots whose item the stage shows (visibility, purpose); holes are 0. */
-  shown: Uint8Array;
   /** Its items' edges changed since its lines were built (or they never were). */
   linesDirty: boolean;
+}
+
+/** Triangles first..first+count of a painted item (entry `entry` of its paint call); item null: dropped, a hole. */
+interface Part {
+  item: Item | null;
+  entry: number;
+  first: number;
+  count: number;
+  /** Its corners 1 and 2 swapped (see corner). */
+  flip: boolean;
+}
+
+/** Painted items' triangles, de-indexed, drawn by one BatchMesh with a value per corner (see SceneSync.paint). */
+interface Piece extends Slots {
+  /** By slot. */
+  parts: Part[];
+  /** Parts whose item is still painted: the piece goes with the last. */
+  live: number;
+}
+
+/** A paint() item as accepted: its values, and its geometry's arrays as they were (the pieces are cut from them). */
+interface PaintEntry {
+  item: Item;
+  values: ArrayLike<number>;
+  index: ArrayLike<number>;
+  position: ArrayLike<number>;
 }
 
 /**
@@ -92,6 +126,7 @@ interface Batch {
  * own on WebGPU): slot k's vertices start at starts[k] and carry k in the `batchItem` attribute; its matrix and state
  * (displayColor, drawn) sit in two float textures read by the shared vertex stage of the batch looks (materials.ts).
  * The items' face edges draw as one LineSegments child sharing the positions. Never grown: holes stay until it is empty.
+ * Paint pieces are BatchMeshes too: de-indexed parts of items, with a `paintValue` per corner.
  */
 export class BatchMesh extends THREE.Mesh {
   readonly isBatch = true;
@@ -102,33 +137,9 @@ export class BatchMesh extends THREE.Mesh {
   private readonly matrices: THREE.DataTexture;
   private readonly state: THREE.DataTexture;
 
-  /** Geometries of one layout (the items'), indexed. */
-  constructor(geometries: THREE.BufferGeometry[]) {
-    const n = geometries.length;
-    const starts = new Uint32Array(n + 1);
-    let indices = 0;
-    geometries.forEach((g, k) => {
-      starts[k + 1] = starts[k] + g.attributes.position.count;
-      indices += g.index!.count;
-    });
-    const merged = new THREE.BufferGeometry();
-    for (const name of Object.keys(geometries[0].attributes)) {
-      const { array, itemSize, normalized } = geometries[0].attributes[name] as THREE.BufferAttribute;
-      const out = new (array.constructor as Float32ArrayConstructor)(starts[n] * itemSize);
-      geometries.forEach((g, k) => out.set((g.attributes[name] as THREE.BufferAttribute).array as Float32Array, starts[k] * itemSize));
-      merged.setAttribute(name, new THREE.BufferAttribute(out, itemSize, normalized));
-    }
-    const item = new Uint32Array(starts[n]);
-    const index = new Uint32Array(indices);
-    let at = 0;
-    geometries.forEach((g, k) => {
-      item.fill(k, starts[k], starts[k + 1]);
-      const source = g.index!.array;
-      for (let i = 0; i < source.length; i++) index[at + i] = source[i] + starts[k];
-      at += source.length;
-    });
-    merged.setAttribute('batchItem', new THREE.BufferAttribute(item, 1));
-    merged.setIndex(new THREE.BufferAttribute(index, 1));
+  /** A merged geometry (see merge) whose `batchItem` attribute holds each vertex's slot; slot k's start at starts[k]. */
+  constructor(merged: THREE.BufferGeometry, starts: Uint32Array) {
+    const n = starts.length - 1;
     merged.boundingBox = new THREE.Box3(); // empty: bounds and framing keep measuring the items
     merged.boundingSphere = new THREE.Sphere();
     super(merged, HIDDEN);
@@ -143,17 +154,48 @@ export class BatchMesh extends THREE.Mesh {
     this.matrixAutoUpdate = false;
     this.raycast = () => {}; // the items are picked
     this.onBeforeRender = () => useBatch(this.matrices, this.state);
-    // The batch never changes geometry: once the renderer holds a buffer, its array (as large as the items') goes.
-    // three uploads an attribute when a pass first reads it (a shadow pass reads fewer than the look, a later look
-    // may read one more), so this looks after every pass until all are gone.
+    this.release();
+  }
+
+  /** A paint piece's new paintValue, as long as the last: the next draw writes it into the same buffer, then it goes. */
+  values(array: Float32Array): void {
+    const attribute = this.geometry.attributes.paintValue as THREE.BufferAttribute;
+    attribute.array = array;
+    attribute.needsUpdate = true;
+    this.release();
+  }
+
+  /**
+   * The geometry changes no more (but for values()): once the renderer holds a buffer, its array (as large as the
+   * items') goes. three uploads an attribute when a pass first reads it (a shadow pass reads fewer than the look, a
+   * later look may read one more), so this looks after every pass until all are gone.
+   */
+  private release(): void {
+    const g = this.geometry;
     this.onAfterRender = (renderer) => {
-      if (!releaseUploaded(renderer, [merged.index!, ...Object.values(merged.attributes)] as THREE.BufferAttribute[])) this.onAfterRender = () => {};
+      if (!releaseUploaded(renderer, [g.index, ...Object.values(g.attributes)] as THREE.BufferAttribute[])) this.onAfterRender = () => {};
     };
   }
 
-  setMatrixAt(slot: number, matrix: THREE.Matrix4): void {
+  /** The inverse of `matrix`: the slots' matrices are stored relative to it (see origin). */
+  private readonly inverse = new THREE.Matrix4();
+
+  /**
+   * Places the mesh at `at` (stage space; a mirroring batch mirrors too: three culls faces by the mesh's determinant).
+   * Slot matrices are kept relative to it, worked out in float64: the float32 texture then holds small translations,
+   * and a stage far from its origin (survey coordinates) keeps its precision through three's float64 modelView.
+   */
+  origin(at: THREE.Vector3, mirrored: boolean): void {
+    this.matrix.makeTranslation(at.x, at.y, at.z);
+    if (mirrored) this.matrix.multiply(MIRROR);
+    this.inverse.copy(this.matrix).invert();
+    this.matrixWorldNeedsUpdate = true;
+  }
+
+  /** Sets slot's stage-space matrix (stored relative to the mesh's origin). */
+  setMatrixAt(slot: number, stage: THREE.Matrix4): void {
     const data = this.matrices.image.data as Float32Array;
-    const e = matrix.elements;
+    const e = SLOT.multiplyMatrices(this.inverse, stage).elements;
     let changed = false;
     for (let i = 0; i < 16; i++) {
       if (data[slot * 16 + i] === Math.fround(e[i])) continue;
@@ -163,8 +205,9 @@ export class BatchMesh extends THREE.Mesh {
     if (changed) this.matrices.needsUpdate = true;
   }
 
+  /** Slot's stage-space matrix, as stored (float32, relative to the origin). */
   getMatrixAt(slot: number, target: THREE.Matrix4): THREE.Matrix4 {
-    return target.fromArray(this.matrices.image.data as Float32Array, slot * 16);
+    return target.fromArray(this.matrices.image.data as Float32Array, slot * 16).premultiply(this.matrix);
   }
 
   setVisibleAt(slot: number, visible: boolean): void {
@@ -235,22 +278,98 @@ export class BatchMesh extends THREE.Mesh {
 }
 
 /**
- * Drops the arrays of the attributes the renderer holds a buffer for (their count stays, so draws keep their size);
- * true while some are not uploaded yet.
+ * Drops the arrays of the attributes whose current version the renderer has uploaded (their count stays, so draws
+ * keep their size); true while some wait. A swapped array (BatchMesh.values) waits for the pass that writes it.
+ * ponytail: reads three 0.186.1's private attribute records (Renderer._attributes: the version last uploaded, on
+ * either backend); re-check on an upgrade: without them nothing is dropped.
  */
-function releaseUploaded(renderer: unknown, attributes: THREE.BufferAttribute[]): boolean {
-  const backend = (renderer as unknown as { backend: { has(o: object): boolean; get(o: object): { buffer?: unknown; bufferGPU?: unknown } } }).backend;
+function releaseUploaded(renderer: unknown, attributes: (THREE.BufferAttribute | null)[]): boolean {
+  const uploaded = (renderer as { _attributes?: { has(o: object): boolean; get(o: object): { version?: number } } })._attributes;
   let left = false;
   for (const attribute of attributes) {
-    if (!attribute.array.length) continue;
-    const data = backend?.has(attribute) ? backend.get(attribute) : null;
-    if (!data?.buffer && !data?.bufferGPU) {
-      left = true; // not uploaded (yet): kept
-      continue;
-    }
-    attribute.array = new (attribute.array.constructor as Float32ArrayConstructor)(0);
+    if (!attribute?.array.length) continue;
+    if (uploaded?.has(attribute) && uploaded.get(attribute).version === attribute.version) attribute.array = new (attribute.array.constructor as Float32ArrayConstructor)(0);
+    else left = true; // not uploaded (yet), or a newer version waits: kept
   }
   return left;
+}
+
+/** Geometries of one layout (the items'), indexed, one after another: the geometry and starts of a batch. */
+function merge(geometries: THREE.BufferGeometry[]): [THREE.BufferGeometry, Uint32Array] {
+  const n = geometries.length;
+  const starts = new Uint32Array(n + 1);
+  let indices = 0;
+  geometries.forEach((g, k) => {
+    starts[k + 1] = starts[k] + g.attributes.position.count;
+    indices += g.index!.count;
+  });
+  const merged = new THREE.BufferGeometry();
+  for (const name of Object.keys(geometries[0].attributes)) {
+    const { array, itemSize, normalized } = geometries[0].attributes[name] as THREE.BufferAttribute;
+    const out = new (array.constructor as Float32ArrayConstructor)(starts[n] * itemSize);
+    geometries.forEach((g, k) => out.set((g.attributes[name] as THREE.BufferAttribute).array as Float32Array, starts[k] * itemSize));
+    merged.setAttribute(name, new THREE.BufferAttribute(out, itemSize, normalized));
+  }
+  const item = new Uint32Array(starts[n]);
+  const index = new Uint32Array(indices);
+  let at = 0;
+  geometries.forEach((g, k) => {
+    item.fill(k, starts[k], starts[k + 1]);
+    const source = g.index!.array;
+    for (let i = 0; i < source.length; i++) index[at + i] = source[i] + starts[k];
+    at += source.length;
+  });
+  merged.setAttribute('batchItem', new THREE.BufferAttribute(item, 1));
+  merged.setIndex(new THREE.BufferAttribute(index, 1));
+  return [merged, starts];
+}
+
+/**
+ * Cuts items' triangles, in order, into pieces of at most `cap` corners and `slots` parts: per piece, its parts as
+ * [item, first triangle, triangles]. An item bigger than a piece spans several.
+ */
+export function paintPlan(tris: readonly number[], cap: number, slots = BATCH_ITEMS): [number, number, number][][] {
+  const room = Math.max(1, Math.floor(cap / 3));
+  const pieces: [number, number, number][][] = [];
+  let piece: [number, number, number][] = [];
+  let left = room;
+  tris.forEach((n, item) => {
+    for (let first = 0; first < n; ) {
+      if (!left || piece.length === slots) {
+        pieces.push(piece);
+        piece = [];
+        left = room;
+      }
+      const count = Math.min(n - first, left);
+      piece.push([item, first, count]);
+      first += count;
+      left -= count;
+    }
+  });
+  if (piece.length) pieces.push(piece);
+  return pieces;
+}
+
+/**
+ * Where corner j of triangle t sits in the index. A mirrored item's triangles turn (1 and 2 swap): three takes the
+ * front from the piece's matrix, not the item's, and the section greys back faces.
+ */
+const corner = (t: number, j: number, flip: boolean) => 3 * t + (flip && j ? 3 - j : j);
+
+/** A piece's paintValue per corner: its triangle's value ('face') or its vertex's ('vertex'); not finite: NO_VALUE. */
+function cornerValues(parts: readonly Part[], entries: readonly PaintEntry[], per: 'face' | 'vertex'): Float32Array {
+  const out = new Float32Array(3 * parts.reduce((sum, p) => sum + p.count, 0));
+  let c = 0;
+  for (const { entry, first, count, flip } of parts) {
+    const { values, index } = entries[entry];
+    for (let t = first; t < first + count; t++) {
+      for (let j = 0; j < 3; j++) {
+        const x = per === 'face' ? values[t] : values[index[corner(t, j, flip)]];
+        out[c++] = Number.isFinite(x) ? x : NO_VALUE;
+      }
+    }
+  }
+  return out;
 }
 
 export interface Item {
@@ -280,6 +399,8 @@ export interface Item {
   fill: THREE.Mesh | null;
   /** The batch drawing this mesh, and its slot there; its object then draws an invisible stand-in. */
   batched: { batch: Batch; instance: number } | null;
+  /** The paint pieces drawing this mesh, and its slot in each (see SceneSync.paint); its object is a stand-in then. */
+  painted: { piece: Piece; slot: number }[] | null;
   /** Its points move (deforming, or updated without new indices): never batched. */
   dynamic: boolean;
   curves: { points?: Float32Array; counts?: Uint32Array; widths?: Float32Array | null; colors?: Float32Array | null };
@@ -370,6 +491,14 @@ export class SceneSync {
   private walkedFrom = -1;
   /** The whole list while drawing() has it swapped out. */
   private whole: THREE.Object3D[] | null = null;
+  /** The paint pieces' look; setting its style recolours them. */
+  readonly paintLook = paintLook();
+  private readonly pieces = new Set<Piece>();
+  private readonly painted = new Set<Item>();
+  /** The kind and items the pieces paint: '' none; null: changed since (or not built yet), the next paint builds. */
+  private paintKey: string | null = '';
+  /** Bumped by each paint() and clear(): a paint still building stops at its next step. */
+  private paintGen = 0;
   private readonly stale = (): void => {
     this.walked = null;
   };
@@ -467,6 +596,7 @@ export class SceneSync {
     this.upAxis = axis;
     this.root.rotation.x = axis === 'Z' ? -Math.PI / 2 : 0;
     for (const b of this.batches) for (const item of b.items) item.object!.matrixWorldNeedsUpdate = true; // see standIn()
+    for (const item of this.painted) item.object!.matrixWorldNeedsUpdate = true;
     this.root.updateMatrixWorld(true);
   }
 
@@ -644,7 +774,9 @@ export class SceneSync {
   }
 
   clear(): void {
-    for (const rid of [...this.items.keys()]) this.remove(rid); // the last item of a batch disposes it
+    this.paintGen++; // a paint still building stops
+    for (const rid of [...this.items.keys()]) this.remove(rid); // the last item of a batch or paint piece disposes it
+    this.paintKey = '';
     this.dropLeaving();
     this.loose.clear();
     this.counted = null;
@@ -817,6 +949,7 @@ export class SceneSync {
         overlays: [],
         fill: null,
         batched: null,
+        painted: null,
         dynamic: false,
         curves: {},
         lightType: '',
@@ -848,6 +981,7 @@ export class SceneSync {
 
   private detach(item: Item): void {
     this.unbatch(item, false, false);
+    this.dropPaint(item, false);
     this.loose.delete(item);
     this.dropWire(item);
     if (!item.object) return;
@@ -876,11 +1010,10 @@ export class SceneSync {
 
   private updateVisible(item: Item): void {
     if (item.object) item.object.visible = item.usdVisible && this.purposes.has(item.purpose);
-    const batched = item.batched;
-    if (!batched) return;
-    const b = batched.batch, slot = batched.instance;
-    b.shown[slot] = item.object!.visible ? 1 : 0;
-    b.mesh.setVisibleAt(slot, !!b.shown[slot] && !b.culled[slot]);
+    for (const { piece: b, slot } of slotsOf(item)) {
+      b.shown[slot] = item.object!.visible ? 1 : 0;
+      b.mesh.setVisibleAt(slot, !!b.shown[slot] && !b.culled[slot]);
+    }
   }
 
   /* ---------- materials ---------- */
@@ -942,8 +1075,8 @@ export class SceneSync {
   private assign(item: Item): void {
     if (item.kind !== 'mesh' || !item.object || !item.geometry) return;
     if (item.batched && !this.fits(item)) this.unbatch(item, false);
-    if (item.batched) {
-      // The batch draws it: the object keeps an invisible stand-in with the look's side (raycasts honour it).
+    if (item.batched || item.painted) {
+      // The batch or the paint draws it: the object keeps an invisible stand-in with the look's side (raycasts honour it).
       (item.object as THREE.Mesh).material = this.cullBackfaces && !item.doubleSided ? HIDDEN : HIDDEN_DOUBLE;
       this.tint(item);
       return;
@@ -963,6 +1096,7 @@ export class SceneSync {
     if (e.deforming || (!e.indices && (e.positions || e.normals !== undefined || e.primvars))) {
       item.dynamic = true;
       this.unbatch(item);
+      this.dropPaint(item); // painted on the points it had; never again (see paint)
     }
     if (e.displayColor || e.displayOpacity !== undefined) {
       item.displayColor = e.displayColor ?? item.displayColor;
@@ -1100,7 +1234,7 @@ export class SceneSync {
   private batchable(item: Item): boolean {
     const g = item.geometry;
     const object = item.object as THREE.Mesh | null;
-    if (item.kind !== 'mesh' || item.dynamic || !g?.index || !object?.isMesh || (object as THREE.InstancedMesh).isInstancedMesh) return false;
+    if (item.kind !== 'mesh' || item.dynamic || item.painted || !g?.index || !object?.isMesh || (object as THREE.InstancedMesh).isInstancedMesh) return false;
     if (item.subsets?.length || g.attributes.position.count > BATCH_ITEM_VERTICES) return false;
     const material = this.materials.get(item.material)?.material;
     if (!material) return item.displayOpacity >= 1;
@@ -1158,7 +1292,7 @@ export class SceneSync {
   /** One batch of the items, in slot order. */
   private batch(key: string, items: Item[]): void {
     const first = items[0];
-    const mesh = new BatchMesh(items.map((item) => item.geometry!));
+    const mesh = new BatchMesh(...merge(items.map((item) => item.geometry!)));
     const b: Batch = {
       key,
       material: first.material,
@@ -1175,7 +1309,7 @@ export class SceneSync {
     };
     mesh.castShadow = mesh.receiveShadow = true;
     // three culls front faces by the object's determinant, not an item's: mirrored items get a mirrored batch.
-    if (b.mirrored) mesh.matrix.copy(MIRROR);
+    mesh.origin(ORIGIN.setFromMatrixPosition(first.object!.matrix), b.mirrored);
     items.forEach((item, slot) => {
       item.batched = { batch: b, instance: slot };
       b.items.add(item);
@@ -1183,8 +1317,7 @@ export class SceneSync {
       this.dropWire(item); // its batch draws its edges
       item.own?.dispose();
       item.own = null;
-      standIn(item.object!, true);
-      item.object!.addEventListener('childadded', this.stale); // something to show under it: walked again (skipped)
+      this.standInFor(item, true);
       this.assign(item);
       this.follow(item);
       this.updateVisible(item);
@@ -1212,11 +1345,7 @@ export class SceneSync {
       b.mesh.dispose();
       this.batches.delete(b);
     }
-    if (item.object) {
-      standIn(item.object, false);
-      item.object.removeEventListener('childadded', this.stale);
-    }
-    this.walked = null; // it draws again: no root event says so
+    this.standInFor(item, false);
     if (restore) this.assign(item);
     const look = lines && item.object ? this.wireLook() : null;
     const proxy = look && this.lines(item, look);
@@ -1238,22 +1367,27 @@ export class SceneSync {
     if (look) lines.material = batchLook(look);
   }
 
-  /** Moves a batched item's instance with its object's matrix; a determinant changing sign leaves the batch. */
+  /**
+   * Moves a batched item's instance, or a painted item's parts, with its object's matrix. A determinant changing sign
+   * leaves the batch, or drops the paint: its pieces' triangles wind for the old sign, and their arrays are gone.
+   */
   private follow(item: Item): void {
-    const batched = item.batched;
-    if (!batched) return;
-    const m = item.object!.matrix;
-    const b = batched.batch;
-    if (m.determinant() < 0 !== b.mirrored) {
-      this.unbatch(item);
+    const slots = slotsOf(item);
+    if (!slots.length) return;
+    const m = item.object!.matrix, flip = m.determinant() < 0, first = item.painted?.[0];
+    if (item.batched ? flip !== item.batched.batch.mirrored : first && flip !== first.piece.parts[first.slot].flip) {
+      if (item.batched) this.unbatch(item);
+      else this.dropPaint(item);
       return;
     }
-    b.mesh.setMatrixAt(batched.instance, b.mirrored ? MATRIX.multiplyMatrices(MIRROR, m) : m);
     // At once, children too: the viewer's render no longer walks stand-ins (drawing), and picks and hosts read it.
     item.object!.matrixWorldNeedsUpdate = true;
     item.object!.updateMatrixWorld();
-    const sphere = SPHERE.copy(item.geometry!.boundingSphere!).applyMatrix4(m);
-    b.spheres.set([sphere.center.x, sphere.center.y, sphere.center.z, sphere.radius], batched.instance * 4);
+    const sphere = SPHERE.copy(item.geometry!.boundingSphere!).applyMatrix4(m); // a part of a big item takes the item's
+    for (const { piece: b, slot } of slots) {
+      b.mesh.setMatrixAt(slot, m); // relative to the mesh's origin (and mirror), there
+      b.spheres.set([sphere.center.x, sphere.center.y, sphere.center.z, sphere.radius], slot * 4);
+    }
   }
 
   /**
@@ -1275,7 +1409,7 @@ export class SceneSync {
     if (camera) FRUSTUM.setFromProjectionMatrix(CLIP.multiplyMatrices(camera.projectionMatrix, MATRIX), camera.coordinateSystem, camera.reversedDepth);
     // Over the slots' typed arrays (holes included: they stay hidden), not the items.
     let any = false;
-    for (const b of this.batches) {
+    for (const b of [...this.batches, ...this.pieces]) {
       const { spheres: s, culled: was, shown } = b;
       for (let i = 0; i < was.length; i++) {
         let culled = false;
@@ -1333,6 +1467,157 @@ export class SceneSync {
     let variant = record.variants.get(key);
     if (!variant) record.variants.set(key, (variant = style(section(copyLook(record.material!)), flat, single)));
     return variant;
+  }
+
+  /** The item's object draws nothing (a batch or paint pieces draw it, see standIn), or draws itself again. */
+  private standInFor(item: Item, on: boolean): void {
+    const o = item.object;
+    if (o) {
+      standIn(o, on);
+      if (on) o.addEventListener('childadded', this.stale); // something to show under it: walked again (skipped)
+      else o.removeEventListener('childadded', this.stale);
+    }
+    this.walked = null; // drawn or not: no root event says so
+  }
+
+  /* ---------- paint ---------- */
+
+  /**
+   * Draws mesh items in colours from their values (paintLook's style), replacing what was painted ([] clears): one
+   * value per drawn triangle in geometry.index order ('face'), or per drawn vertex ('vertex'). Painted items leave
+   * their batches, free their own GPU copy and become stand-ins; pieces of their triangles, de-indexed (at most
+   * BATCH_VERTICES each), draw them through the batches' vertex stage. Painting the same items the same way again
+   * only refills the values. A step per piece: the caller draws a frame before the next, which uploads the piece and
+   * lets go of its arrays; a later paint() or clear() stops this one. The values are not kept.
+   * ponytail: a value per corner (12 B per triangle) rather than a texture read at vertex_index / 3, which would save
+   * 8 of them; and per-vertex values on the same de-indexed pieces (one builder), not indexed ones (32 B per triangle).
+   */
+  *paint(items: readonly { rid: Rid; values: ArrayLike<number> }[], per: 'face' | 'vertex'): Generator<void, void, void> {
+    const gen = ++this.paintGen;
+    const entries: PaintEntry[] = [];
+    const keep = new Set<Item>();
+    const skipped: string[] = [];
+    for (const { rid, values } of items) {
+      const item = this.items.get(rid);
+      const g = item?.geometry;
+      const count = !g?.index ? -1 : per === 'face' ? g.index.count / 3 : g.attributes.position.count;
+      // Instanced: one draw per instance would be needed; deforming: the values follow points that no longer exist.
+      if (!item?.object || item.kind !== 'mesh' || item.dynamic || instanced(item) || values?.length !== count || keep.has(item)) {
+        skipped.push(item?.path || `rid ${rid}`);
+        continue;
+      }
+      keep.add(item);
+      entries.push({ item, values, index: g!.index!.array, position: g!.attributes.position.array });
+    }
+    if (skipped.length) this.host.warn(`paint: ${skipped.length} skipped (not one value per drawn ${per === 'face' ? 'triangle' : 'vertex'}, not a mesh, instanced or deforming): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
+    const key = entries.length ? `${per}|${entries.map((e) => e.item.rid)}` : '';
+    if (key === this.paintKey) {
+      // All pieces in one step: a frame between them would show the host's new style over the old values (a new column
+      // and its legend set together). ponytail: 4 B per corner at once until the next frame uploads them (0.2 GB at 17M
+      // triangles); per piece if that peak hurts, with the style applied at the end
+      for (const piece of this.pieces) piece.mesh.values(cornerValues(piece.parts, entries, per));
+      this.host.invalidate(); // colours only: the shadows stay
+      yield;
+      return;
+    }
+    // A new set: the old pieces go; items no longer painted draw themselves again (and batch), new ones stop.
+    this.paintKey = null;
+    for (const item of this.painted) if (!keep.has(item)) this.dropPaint(item);
+    for (const piece of this.pieces) this.dropPiece(piece);
+    for (const { item } of entries) {
+      if (item.painted) item.painted = []; // its slots went with the old pieces
+      else this.toPaint(item);
+    }
+    this.batchUp(!this.paging);
+    for (const parts of paintPlan(entries.map((e) => e.index.length / 3), BATCH_VERTICES)) {
+      this.piece(parts.map(([entry, first, count]) => ({ item: entries[entry].item, entry, first, count, flip: false })), entries, per);
+      this.host.invalidate();
+      yield;
+      if (gen !== this.paintGen) return;
+    }
+    if (entries.every((e) => e.item.painted)) this.paintKey = key; // unless one dropped its paint meanwhile
+    this.invalidate(); // the casters changed: the shadow map too
+    yield;
+  }
+
+  /** One paint piece: its parts' triangles, de-indexed, with a value per corner. Parts dropped meanwhile are holes. */
+  private piece(parts: Part[], entries: readonly PaintEntry[], per: 'face' | 'vertex'): void {
+    const n = parts.length;
+    const starts = new Uint32Array(n + 1);
+    parts.forEach((part, k) => (starts[k + 1] = starts[k] + 3 * part.count));
+    const position = new Float32Array(3 * starts[n]);
+    const slot = new Uint32Array(starts[n]);
+    for (const [k, part] of parts.entries()) {
+      slot.fill(k, starts[k], starts[k + 1]);
+      if (!part.item?.painted) {
+        part.item = null; // its paint went meanwhile: a hole (drawn as nothing)
+        continue;
+      }
+      part.flip = part.item.object!.matrix.determinant() < 0;
+      const { index, position: p } = entries[part.entry];
+      for (let t = part.first, c = starts[k]; t < part.first + part.count; t++) {
+        for (let j = 0; j < 3; j++, c++) {
+          const v = 3 * index[corner(t, j, part.flip)];
+          position[3 * c] = p[v];
+          position[3 * c + 1] = p[v + 1];
+          position[3 * c + 2] = p[v + 2];
+        }
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(position, 3));
+    g.setAttribute('batchItem', new THREE.BufferAttribute(slot, 1));
+    g.setAttribute('paintValue', new THREE.BufferAttribute(cornerValues(parts, entries, per), 1));
+    const piece: Piece = { mesh: new BatchMesh(g, starts), parts, spheres: new Float32Array(n * 4), culled: new Uint8Array(n), shown: new Uint8Array(n), live: 0 };
+    piece.mesh.material = this.paintLook.material;
+    piece.mesh.castShadow = true;
+    const lead = parts.find((p) => p.item)?.item;
+    if (lead) piece.mesh.origin(ORIGIN.setFromMatrixPosition(lead.object!.matrix), false);
+    parts.forEach(({ item }, k) => {
+      if (!item) return;
+      item.painted!.push({ piece, slot: k });
+      piece.live++;
+      this.follow(item);
+      this.updateVisible(item);
+    });
+    if (!piece.live) return piece.mesh.dispose();
+    this.pieces.add(piece);
+    this.root.add(piece.mesh);
+  }
+
+  /** The item stops drawing itself: out of its batch (its own lines in a wire mode), its GPU copy freed, a stand-in. */
+  private toPaint(item: Item): void {
+    this.unbatch(item, false);
+    item.geometry!.dispose(); // the arrays stay: picks, bounds, a fill or a host child (which uploads it again)
+    item.painted = [];
+    this.painted.add(item);
+    this.standInFor(item, true);
+    this.assign(item);
+  }
+
+  /** The item's paint goes (its slots are holes); with `restore`, it draws itself again, and may batch. */
+  private dropPaint(item: Item, restore = true): void {
+    const parts = item.painted;
+    if (!parts) return;
+    item.painted = null;
+    this.painted.delete(item);
+    this.paintKey = null;
+    for (const { piece, slot } of parts) {
+      piece.parts[slot].item = null;
+      piece.shown[slot] = 0;
+      if (--piece.live) piece.mesh.setVisibleAt(slot, false);
+      else this.dropPiece(piece);
+    }
+    this.standInFor(item, false);
+    if (!restore) return;
+    this.assign(item);
+    this.unsettle(item);
+  }
+
+  private dropPiece(piece: Piece): void {
+    piece.mesh.removeFromParent();
+    piece.mesh.dispose();
+    this.pieces.delete(piece);
   }
 
   /* ---------- curves ---------- */
@@ -1683,6 +1968,11 @@ function fallbackLook(flat: boolean, single: boolean, vertexColors: boolean): TH
 /** The item draws as an InstancedMesh: more than one instance (a single one is a plain mesh placed by its matrix). */
 function instanced(item: Item): boolean {
   return !!(item.object as THREE.InstancedMesh | null)?.isInstancedMesh;
+}
+
+/** The slots that draw an item: its batch's, or its paint pieces'. */
+function slotsOf(item: Item): readonly { piece: Slots; slot: number }[] {
+  return item.batched ? [{ piece: item.batched.batch, slot: item.batched.instance }] : (item.painted ?? []);
 }
 
 /** 16 floats per chosen instance (a copy of all of them when `picked` is omitted). */

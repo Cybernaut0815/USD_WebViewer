@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three/webgpu';
-import { batchLook, HIDDEN, HIDDEN_DOUBLE, PLAIN } from '../src/materials.ts';
+import { batchLook, HIDDEN, HIDDEN_DOUBLE, paintEdge, PLAIN } from '../src/materials.ts';
 import type { MeshEntry, RenderDelta } from '../src/protocol.ts';
-import { type BatchMesh, type Item, SceneSync } from '../src/scene.ts';
+import { type BatchMesh, type Item, paintPlan, SceneSync } from '../src/scene.ts';
 
 /** A unit cube as the core sends it: 24 vertices (4 per face, normals per face), 12 triangles. */
 function cube(rid: number, extra: Partial<MeshEntry> = {}): MeshEntry {
@@ -32,10 +32,11 @@ function row(n: number, from = 1, extra: Partial<MeshEntry> = {}): RenderDelta {
 }
 
 function sync() {
-  const s = new SceneSync(new THREE.Scene(), { readBytes: async () => null, warn() {}, invalidate() {} });
+  const warnings: string[] = [];
+  const s = new SceneSync(new THREE.Scene(), { readBytes: async () => null, warn: (message) => warnings.push(message), invalidate() {} });
   const batches = () => s.root.children.filter((o) => (o as BatchMesh).isBatch) as BatchMesh[];
   const item = (rid: number) => s.items.get(rid) as Item;
-  return { s, batches, item };
+  return { s, batches, item, warnings };
 }
 
 test('64 or more static meshes of one look draw in one batch; their objects keep geometry and draw nothing', () => {
@@ -63,17 +64,27 @@ test('matrices follow xforms and drag previews; a mirrored item gets a mirrored 
   assert.equal(at(6).elements[13], 3, 'the preview moves the instance');
   s.endPreview();
   assert.equal(at(6).elements[13], 0);
-  // Mirrored: a scale of -1 flips the determinant; the batch mirrors, so batch x instance = the item's matrix.
+  // Mirrored: a scale of -1 flips the determinant; the batch mirrors (its own matrix), its slots keep stage matrices.
   const mirrored = row(64, 200);
   mirrored.xforms!.matrices.forEach((_, i, m) => i % 16 === 0 && (m[i] = -1));
   s.apply(mirrored);
   const flipped = batches().find((b) => b.matrix.determinant() < 0)!;
   assert.ok(flipped, 'a second batch for the mirrored items');
-  const product = new THREE.Matrix4().multiplyMatrices(flipped.matrix, flipped.getMatrixAt(item(200).batched!.instance, new THREE.Matrix4()));
-  assert.deepEqual(product.elements, item(200).object!.matrix.elements);
+  assert.deepEqual(flipped.getMatrixAt(item(200).batched!.instance, new THREE.Matrix4()).elements, item(200).object!.matrix.elements);
   // Turning one back leaves its batch (its determinant changed sign).
   s.apply({ xforms: { rids: new Uint32Array([200]), matrices: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) } });
   assert.equal(item(200).batched, null);
+});
+
+test('far from the stage origin a batch keeps float64 placement: its slots hold matrices relative to its own', () => {
+  const { s, batches, item } = sync();
+  const far = row(64);
+  far.xforms!.matrices.forEach((_, i, m) => i % 16 === 12 && (m[i] = 5_000_000.25 + 10.5 * Math.floor(i / 16)));
+  s.apply(far);
+  const mesh = batches()[0], k = item(3).batched!.instance;
+  assert.equal(mesh.matrix.elements[12], 5_000_000.25, 'the batch sits at its first item');
+  assert.equal((mesh as any).matrices.image.data[16 * k + 12], 21, 'a small float32 translation in the texture');
+  assert.equal(mesh.getMatrixAt(k, new THREE.Matrix4()).elements[12], item(3).object!.matrix.elements[12], 'exact in stage space');
 });
 
 test('visibility, purposes and display colours reach the instances', () => {
@@ -311,6 +322,82 @@ test('a pick skips batched items whose bounding sphere the ray misses', () => {
   assert.equal(s.mayHit(item(1), towards(0)), true, 'cube 1 sits at x 0');
   assert.equal(s.mayHit(item(1), towards(10)), false);
   assert.equal(s.mayHit(item(500), towards(10)), true, 'unbatched: always tested in full');
+});
+
+test('paint draws items from values in pieces and gives their drawing back', () => {
+  const { s, batches, item, warnings } = sync();
+  s.apply(row(80));
+  const base = batches()[0];
+  const paint = (items: { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' = 'face') => [...s.paint(items, per)];
+  const all = (value: (rid: number, f: number) => number) => Array.from({ length: 80 }, (_, i) => ({ rid: i + 1, values: Float32Array.from({ length: 12 }, (_, f) => value(i + 1, f)) }));
+  paint([...all((rid, f) => rid * 100 + f), { rid: 1, values: [1] }, { rid: 999, values: [] }]);
+  assert.equal(base.parent, null, 'the base batch went with its last item');
+  assert.equal(batches().length, 1);
+  const piece = batches()[0];
+  const g = piece.geometry;
+  const slot = (rid: number) => item(rid).painted![0].slot;
+  assert.equal(g.index, null, 'de-indexed');
+  assert.equal(g.attributes.position.count, 80 * 36);
+  for (let c = 0; c < 36; c++) assert.equal(g.attributes.paintValue.getX(slot(7) * 36 + c), 700 + Math.floor(c / 3), 'values[f] at corners 3f..3f+2');
+  assert.equal(g.attributes.batchItem.getX(slot(7) * 36 + 5), slot(7));
+  assert.equal(g.attributes.position.getY(slot(7) * 36 + 4), item(7).geometry!.attributes.position.getY(item(7).geometry!.index!.getX(4)), 'local positions');
+  assert.equal((item(7).object as THREE.Mesh).material, HIDDEN_DOUBLE, 'a stand-in');
+  assert.equal(warnings.length, 1, 'a second entry for rid 1 and a rid without a mesh: one warning');
+  // The same items the same way: the same piece and positions, new values.
+  const position = g.attributes.position;
+  paint(all((rid, f) => -rid - f));
+  assert.equal(batches()[0], piece);
+  assert.equal(g.attributes.position, position);
+  assert.equal(g.attributes.paintValue.getX(slot(7) * 36 + 3), -8);
+  // Visibility, xforms and a host's child.
+  s.apply({ visibility: { rids: new Uint32Array([3]), visible: new Uint8Array([0]) } });
+  assert.equal(piece.getVisibleAt(slot(3)), false, 'a hidden prim');
+  assert.equal(piece.getVisibleAt(slot(4)), true);
+  s.apply({ xforms: { rids: new Uint32Array([5]), matrices: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 7, 8, 9, 1]) } });
+  assert.deepEqual(piece.getMatrixAt(slot(5), new THREE.Matrix4()).elements.slice(12, 15), [7, 8, 9]);
+  item(4).object!.add(new THREE.Object3D());
+  let drawn: THREE.Object3D[] = [];
+  s.drawing(() => (drawn = [...s.root.children]));
+  assert.ok(drawn.includes(item(4).object!), "a host's child under a painted item is drawn");
+  assert.ok(!drawn.includes(item(2).object!), 'other stand-ins are not');
+  // Mirroring a painted item drops its paint (its pieces wind for the old sign): it draws itself, its slot is a hole.
+  const eight = slot(8);
+  s.apply({ xforms: { rids: new Uint32Array([8]), matrices: new Float64Array([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]) } });
+  assert.equal(item(8).painted, null);
+  assert.equal(piece.getVisibleAt(eight), false);
+  // New indices drop the item's paint; clearing gives the items back to one batch.
+  const six = slot(6);
+  s.apply({ meshes: [cube(6)] });
+  assert.equal(item(6).painted, null);
+  assert.equal(piece.getVisibleAt(six), false, 'its slot is a hole');
+  paint([]);
+  assert.deepEqual(batches().map((b) => [b.instanceCount, !!b.geometry.attributes.paintValue]), [[79, false]], 'all but the mirrored one, which draws alone');
+  assert.equal(piece.parent, null);
+  // Per vertex: values[index[c]] at corner c.
+  paint([{ rid: 3, values: Float32Array.from({ length: 24 }, (_, v) => v * 10) }], 'vertex');
+  const one = batches().find((b) => b.geometry.attributes.paintValue)!;
+  const index = item(3).geometry!.index!;
+  for (let c = 0; c < 36; c++) assert.equal(one.geometry.attributes.paintValue.getX(c), index.getX(c) * 10);
+});
+
+test('paint thresholds split float32 values as the doubles do', () => {
+  const below = (f: number, x: number) => f < paintEdge(x, true), above = (f: number, x: number) => f > paintEdge(x, false);
+  // a histogram's last bin keeps its top value: [5, 6 + 6e-9) holds 6, which float32(6 + 6e-9) = 6 would not
+  assert.ok(Math.fround(6) < paintEdge(6 + 6e-9, true));
+  for (const x of [0.7, -0.7, 6 + 6e-9, 1e-45, -1e-45, 3, 1 / 3, 1e30]) {
+    for (const v of [x, Math.fround(x) * (1 + 2 ** -23), Math.fround(x) * (1 - 2 ** -23), 0]) {
+      const f = Math.fround(v);
+      assert.equal(below(f, x), f < x, `${f} < ${x}`);
+      assert.equal(above(f, x), f > x, `${f} > ${x}`);
+    }
+  }
+  assert.equal(paintEdge(2.5, true), 2.5, 'a float32 stays');
+});
+
+test('paintPlan cuts the triangles in order into pieces by corners and parts, a big item across several', () => {
+  assert.deepEqual(paintPlan([5, 3], 9), [[[0, 0, 3]], [[0, 3, 2], [1, 0, 1]], [[1, 1, 2]]]);
+  assert.deepEqual(paintPlan([2, 0, 1], 9), [[[0, 0, 2], [2, 0, 1]]], 'an item without triangles takes no part');
+  assert.deepEqual(paintPlan([1, 1, 1], 99, 2), [[[0, 0, 1], [1, 0, 1]], [[2, 0, 1]]], 'at most 2 parts');
 });
 
 test('objectsUnder finds the items at and below the given paths, not siblings sharing a prefix', () => {

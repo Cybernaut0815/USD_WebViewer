@@ -1167,6 +1167,28 @@ def Xform "World"
   assert.ok(!crate.error && String.fromCharCode(...crate.bytes.slice(0, 8)) === 'PXR-USDC', 'usdc by default');
   assert.equal(core.exportVariants(JSON.stringify({ prims: [], overlay: 'not usda' }), ...none).error, 'invalid overlay usda');
   core.takeDiagnostics(); // the parse error of the bad overlay
+
+  // flatten: false: the overlay alone (its metadata and sublayers kept), arrays from the binary slices on overs; nothing
+  // of the stage comes along, and it composes over the stage's own files
+  const head = '#usda 1.0\n(\n    subLayers = [\n        @./scene.usda@\n    ]\n    upAxis = "Z"\n)\nover "World"\n{\n    over "Quad" (\n        prepend apiSchemas = ["MaterialBindingAPI"]\n    )\n    {\n        rel material:binding = </Daylight/Result>\n    }\n}\n';
+  const values = Float32Array.of(0.25, 0.5, 0.75, 7);
+  const only = core.exportVariants(JSON.stringify({ prims: [{ path: '/World/Quad', primvars: [
+    { name: 'primvars:displayColor', type: 'color3f[]', interpolation: 'uniform', data: [0, 3] },
+    { name: 'primvars:daylight_radiation', type: 'float[]', interpolation: 'uniform', data: [3, 1] },
+  ] }, { path: '/World/New/Deep', primvars: [{ name: 'primvars:daylight_x', type: 'float[]', data: [3, 1] }] }], overlay: head, flatten: false, format: 'usda' }), values, new Int32Array());
+  assert.ok(!only.error, only.error);
+  const layer = new TextDecoder().decode(only.bytes);
+  assert.ok(layer.includes('@./scene.usda@') && layer.includes('upAxis = "Z"'), 'its sublayers and metadata');
+  assert.ok(layer.includes('rel material:binding = </Daylight/Result>'), 'the overlay text');
+  assert.match(layer, /color3f\[\] primvars:displayColor = \[\(0\.25, 0\.5, 0\.75\)\] \(\s*interpolation = "uniform"/, 'colours from the floats');
+  assert.match(layer, /float\[\] primvars:daylight_radiation = \[7\]/, 'values from the floats');
+  assert.match(layer, /over "New"\s*\{\s*over "Deep"/, 'a path not in the overlay: overs down to it');
+  assert.ok(!layer.includes('def Cube') && !layer.includes('Hidden'), 'nothing of the stage itself');
+  assert.equal(only.assets.length, 0);
+  const binary = core.exportVariants(JSON.stringify({ prims: [], overlay: head, flatten: false }), ...none);
+  assert.ok(!binary.error && String.fromCharCode(...binary.bytes.slice(0, 8)) === 'PXR-USDC', 'usdc by default');
+  assert.equal(core.exportVariants(JSON.stringify({ prims: [{ path: '/World/Quad', primvars: [{ name: 'primvars:x', type: 'float[]', data: [0, 99] }] }], overlay: head, flatten: false }), values, new Int32Array()).error,
+    'bad data for primvars:x on /World/Quad', 'a slice past the arrays');
   noErrors();
 }
 

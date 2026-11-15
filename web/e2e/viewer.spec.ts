@@ -476,8 +476,10 @@ test.describe('mock core', () => {
     await open(page, MOCK);
     await expect(page.locator('usd-viewer .stats')).toContainText('FPS');
     await expect(page.locator('usd-viewer .stats')).toContainText(/Frame\d+\.\d ms/);
+    await expect(page.locator('usd-viewer .stats')).toContainText('GPU');
     const stats = await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).stats);
     expect(stats.frameMs).toBeGreaterThan(0);
+    expect(stats.gpu).toMatch(/^webgl2 \S/); // the adapter: SwiftShader, through the WebGL2 backend
     await page.locator('usd-viewer .toolbar button', { hasText: '?' }).click();
     await expect(page.locator('usd-viewer dialog.help')).toContainText('Has a payload');
     await expect(page.locator('usd-viewer dialog.help')).toContainText('Changed in this session');
@@ -1828,6 +1830,105 @@ test.describe('mock core', () => {
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-wire.png', shot(page));
     await mode('shaded-wire');
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('mock-batched-shaded-wire.png', shot(page));
+    expect(errors).toEqual([]);
+  });
+
+  test('paint draws values in their legend colours over the items, through visibility, a section and the selection', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const canvas = page.locator('usd-viewer canvas');
+    const rids = Array.from({ length: 80 }, (_, i) => 100 + i);
+    // 80 copies of the cube in a grid below the stage. Cube i has the value i on every triangle (cube 45 none), drawn
+    // from black at 10 to white at 79 and red under 10, tone mapping off: the app's Value view.
+    const style = { stops: ['#000000', '#ffffff'], min: 10, max: 79, below: { value: 10, color: '#ff0000' }, above: null, band: null };
+    const painted = await page.evaluate(async ({ rids, style }) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const g = (v.three.objectsFor('/World/Cube')[0] as any).geometry;
+      const place = (i: number) => [0.4, 0, 0, 0, 0, 0.4, 0, 0, 0, 0, 0.4, 0, (i % 10) * 0.8 - 3.6, -1.5 - Math.floor(i / 10) * 0.5, -2, 1];
+      v.session.emit('delta', {
+        meshes: rids.map((rid) => ({
+          rid, path: `/World/Paint/C${rid}`, purpose: 'default', indices: new Uint32Array(g.index.array), positions: new Float32Array(g.attributes.position.array),
+          normals: new Float32Array(g.attributes.normal.array), counts: { points: 8, faces: 6, edges: 12 }, displayColor: [0.3, 0.6, 0.3], subsets: null, material: 0, instances: null,
+        })),
+        xforms: { rids: new Uint32Array(rids), matrices: new Float64Array(rids.flatMap((_, i) => place(i))) },
+      } as any);
+      v.toneMapping = 'none';
+      v.paintStyle = style;
+      await v.paint(rids.map((rid, i) => ({ rid, values: new Float32Array(12).fill(i === 45 ? NaN : i) })));
+      v.frame();
+      await v.idle();
+      await new Promise((resolve) => setTimeout(resolve, 300)); // the full-detail frame after the view moved
+      await v.idle();
+      return v.three.root.children.filter((o: any) => o.isBatch).map((o: any) => {
+        const a = o.geometry.attributes;
+        return { slots: o.instanceCount, paint: !!a.paintValue, kept: a.position.array.length + (a.paintValue?.array.length ?? 0) };
+      });
+    }, { rids, style });
+    // One piece for all 80 (their batch went with them), its arrays let go once uploaded.
+    expect(painted).toEqual([{ slots: 80, paint: true, kept: 0 }]);
+    // A hidden prim's part draws nothing; a section cuts the paint (the cut cubes grey inside); the selection shows over it.
+    const view = (section: Section, visible: number, selected: number[]) =>
+      page.evaluate(async ({ section, visible, selected }) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.session.emit('delta', { visibility: { rids: new Uint32Array([105, 133]), visible: new Uint8Array([visible, visible]) }, selected: selected.map((rid) => ({ rid })) } as any);
+        v.sectionHandles = false;
+        v.section = section;
+        await v.idle();
+      }, { section, visible, selected });
+    const none: Section = { on: true, planes: [], boxes: [] };
+    await view(none, 0, []);
+    await expect(canvas).toHaveScreenshot('mock-paint-hidden.png', shot(page));
+    await view({ on: true, planes: [{ point: [0.4, 0, 0], normal: [-1, 0, 0] }], boxes: [] }, 1, []);
+    await expect(canvas).toHaveScreenshot('mock-paint-section.png', shot(page));
+    await view(none, 1, [110, 117]);
+    await expect(canvas).toHaveScreenshot('mock-paint-selected.png', shot(page));
+    await view(none, 1, []);
+    // Head on, the middle of each cube's front face shows its legend colour (the app's rgbFor: sRGB, within 1/255).
+    const legend = (value: number, band: number[] | null) => {
+      const c = Number.isNaN(value) ? [0.5, 0.5, 0.5] : value < 10 ? [1, 0, 0] : Array(3).fill(Math.min(Math.max((value - 10) / 69, 0), 1));
+      const k = band && !(value >= band[0] && value < band[1]) ? 0.15 : 1;
+      return c.map((x) => Math.round(255 * (k * x + (1 - k) * 0.6)));
+    };
+    const off = (band: number[] | null) =>
+      page.evaluate(async (rids) => {
+        const v = document.querySelector('usd-viewer') as UsdViewerElement;
+        v.view = { eye: [0, -3.25, 16], target: [0, -3.25, -2], fov: 30, projection: 'perspective', height: 1 };
+        await v.idle();
+        const image = await createImageBitmap(await v.screenshot(), { colorSpaceConversion: 'none' });
+        const pixels = new OffscreenCanvas(image.width, image.height).getContext('2d')!;
+        pixels.drawImage(image, 0, 0);
+        return rids.map((rid) => {
+          const o = v.three.objectsFor(`/World/Paint/C${rid}`)[0];
+          const p = o.localToWorld(o.position.clone().set(0, 0, 0.5)).project(v.three.camera); // the middle of its front face
+          return [...pixels.getImageData(Math.floor(((p.x + 1) / 2) * image.width), Math.floor(((1 - p.y) / 2) * image.height), 1, 1).data.slice(0, 3)];
+        });
+      }, rids).then((got) => got.flatMap((rgb, i) => {
+        const want = legend(i === 45 ? NaN : i, band);
+        return want.some((c, k) => Math.abs(c - rgb[k]) > 1) ? [{ cube: i, want, got: rgb }] : [];
+      }));
+    expect(await off(null)).toEqual([]);
+    // A band dims what lies outside it. A style change writes uniforms only: the same piece, no values uploaded again.
+    const restyled = await page.evaluate(async (style) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const pieces = () => JSON.stringify(v.three.root.children.filter((o: any) => o.isBatch).map((o: any) => [o.uuid, o.geometry.attributes.paintValue.version]));
+      const before = pieces();
+      v.paintStyle = { ...style, band: [30, 50] };
+      await v.idle();
+      return { same: pieces() === before, band: v.paintStyle.band };
+    }, style);
+    expect(restyled).toEqual({ same: true, band: [30, 50] });
+    expect(await off([30, 50])).toEqual([]);
+    // A painted cube picks as itself, through its own object; cleared, the cubes draw in one batch again.
+    const after = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const o = v.three.objectsFor('/World/Paint/C133')[0];
+      const p = o.localToWorld(o.position.clone().set(0, 0, 0.5)).project(v.three.camera);
+      const rect = v.shadowRoot!.querySelector('canvas')!.getBoundingClientRect();
+      const pick = (v as any).viewport.pick(rect.left + ((p.x + 1) / 2) * rect.width, rect.top + ((1 - p.y) / 2) * rect.height)?.rid;
+      await v.paint([]);
+      await v.idle();
+      return { pick, batches: v.three.root.children.filter((o: any) => o.isBatch).map((o: any) => [o.instanceCount, !!o.geometry.attributes.paintValue]) };
+    });
+    expect(after).toEqual({ pick: 133, batches: [[80, false]] });
     expect(errors).toEqual([]);
   });
 

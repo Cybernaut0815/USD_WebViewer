@@ -10,19 +10,24 @@ import {
   int,
   ivec2,
   mat4,
+  mix,
   modelWorldMatrixInverse,
   normalLocal,
   normalMap,
   positionGeometry,
   select,
+  sRGBTransferEOTF,
   texture,
   textureLoad,
   textureSize,
+  uniform,
+  uniformArray,
   uv,
   varyingProperty,
   vec2,
   vec3,
   vec4,
+  vertexStage,
 } from 'three/tsl';
 import type { AssetValue, Json, MaterialEntry, MaterialNetwork, MaterialNode } from './protocol.ts';
 import { section } from './sectionnode.ts';
@@ -508,6 +513,99 @@ export function batchLook(look: THREE.Material, tint = false): THREE.Material {
     });
   }
   return copy;
+}
+
+/* ---------- paint (SceneSync.paint in scene.ts) ---------- */
+
+/** The paintValue of corners without a value (not finite): finite itself, since WGSL may assume there is no NaN. */
+export const NO_VALUE = -3.4e38;
+
+/** No infinities or NaN reach the shader: a missing threshold is one no value passes. */
+const finiteValue = (x: number) => Math.min(Math.max(x, NO_VALUE), -NO_VALUE) || 0;
+const F32 = new Float32Array(1);
+const BITS = new Int32Array(F32.buffer);
+/**
+ * A paint threshold as the float32 that splits float32 values as the double does: the smallest float32 >= x (`up`, for
+ * `v < x` and `v >= x`) or the largest <= x (for `v > x`). The view then classes values as the legend does, a
+ * histogram bin's top edge included.
+ */
+export function paintEdge(x: number, up: boolean): number {
+  const d = finiteValue(x);
+  F32[0] = d;
+  if (F32[0] === d || F32[0] < d !== up) return F32[0];
+  if (F32[0] === 0) BITS[0] = up ? 1 : 0x80000001 | 0;
+  else BITS[0] += F32[0] > 0 === up ? 1 : -1; // one float32 further, past x
+  return F32[0];
+}
+
+/**
+ * How paint() colours values, as a host's legend draws them: `stops` ('#rrggbb', 2 to 16) evenly spaced from `min` to
+ * `max`, interpolated in sRGB; values under `below.value` / over `above.value` in their `color` instead; with a `band`
+ * [lo, hi), the values outside it faded towards grey (0.15 c + 0.51). Values that are not finite are grey.
+ */
+export interface PaintStyle {
+  stops: string[];
+  min: number;
+  max: number;
+  below?: { value: number; color: string } | null;
+  above?: { value: number; color: string } | null;
+  band?: [number, number] | null;
+}
+
+/**
+ * A viewer's paint look: unlit, each vertex coloured from its paintValue by the style's uniforms, so a new style
+ * rebuilds nothing. The legend's sRGB colour is turned linear, which the output turns back: with tone mapping 'none'
+ * (at exposure 0) the view shows the legend's colours exactly.
+ * ponytail: the stops are a uniform array, not a gradient texture (exact sRGB interpolation, no vertex-stage sampling,
+ * the section's own mechanism on both backends); a texture when a scale needs more than 16 stops.
+ */
+export function paintLook(): { readonly material: THREE.Material; style: PaintStyle } {
+  const stops = Array.from({ length: 16 }, () => new THREE.Vector4());
+  const STOPS: Node = uniformArray(stops, 'vec4');
+  const range: Node = uniform(new THREE.Vector3()); // min, max, stops in use
+  const below: Node = uniform(new THREE.Vector4()); // sRGB colour, value
+  const above: Node = uniform(new THREE.Vector4());
+  const band: Node = uniform(new THREE.Vector2());
+  // The legend's colorAt and rgbFor, in float32.
+  const colour = Fn(() => {
+    const v: Node = attribute('paintValue', 'float').toConst();
+    const span = range.y.sub(range.x);
+    const last = range.z.sub(1);
+    const u: Node = select(span.greaterThan(0), v.sub(range.x).div(span).clamp(), float(0)).mul(last).toConst();
+    const k: Node = u.floor().min(last.sub(1)).toConst();
+    const gradient = mix(STOPS.element(int(k)).xyz, STOPS.element(int(k).add(1)).xyz, u.sub(k));
+    const c: Node = select(v.lessThanEqual(NO_VALUE), vec3(0.5), select(v.lessThan(below.w), below.xyz, select(v.greaterThan(above.w), above.xyz, gradient))).toConst();
+    const linear: Node = sRGBTransferEOTF(select(v.greaterThanEqual(band.x).and(v.lessThan(band.y)), c, c.mul(0.15).add(0.51)));
+    return vec4(linear, 1);
+  });
+  const material = section(new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide }));
+  material.positionNode = PLACE;
+  material.colorNode = vertexStage(colour());
+  const srgb = new THREE.Color();
+  const color = (hex: string, out: THREE.Vector4, w: number) => {
+    srgb.setStyle(hex, THREE.LinearSRGBColorSpace); // the sRGB numbers as they are: the shader converts them
+    out.set(srgb.r, srgb.g, srgb.b, w);
+  };
+  let current: PaintStyle;
+  const look = {
+    material,
+    get style(): PaintStyle {
+      return structuredClone(current);
+    },
+    set style(s: PaintStyle) {
+      if (!(s.stops?.length >= 2 && s.stops.length <= 16)) throw new RangeError('paintStyle: 2 to 16 stops');
+      s.stops.forEach((hex, i) => color(hex, stops[i], 1));
+      range.value.set(finiteValue(s.min), finiteValue(s.max), s.stops.length);
+      if (s.below) color(s.below.color, below.value, paintEdge(s.below.value, true));
+      else below.value.w = NO_VALUE;
+      if (s.above) color(s.above.color, above.value, paintEdge(s.above.value, false));
+      else above.value.w = -NO_VALUE;
+      band.value.set(s.band ? paintEdge(s.band[0], true) : NO_VALUE, s.band ? paintEdge(s.band[1], true) : -NO_VALUE);
+      current = structuredClone(s);
+    },
+  };
+  look.style = { stops: ['#000000', '#ffffff'], min: 0, max: 1 };
+  return look;
 }
 
 // One pass for both sides: three draws a transparent DoubleSide material twice (back faces, then front faces), which

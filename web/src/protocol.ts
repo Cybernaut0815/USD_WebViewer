@@ -97,7 +97,11 @@ export interface CoreApi {
   setEditTarget(identifier: string): Edit;
   /** A layer as usda text or usdc binary, or the whole stage flattened; null when unknown. */
   exportLayer(identifier: string, format: 'usda' | 'usdc' | 'flat'): Uint8Array<ArrayBuffer> | null;
-  /** The stage flattened as shown (usdc, or usda) with a variant set per prim of the spec (JSON of ExportVariantsSpec). */
+  /**
+   * The stage flattened as shown (usdc, or usda) with a variant set per prim of the spec (JSON of ExportVariantsSpec).
+   * With `flatten: false`, the spec's `overlay` layer alone, each of its `prims` getting its primvars and geometry from
+   * the arrays: nothing is flattened, so any stage size works (a host packs it with the stage's files).
+   */
   exportVariants(specJson: string, floats: Float32Array, ints: Int32Array): ExportVariantsResult;
   /** Re-reads layers from their source (all non-anonymous used layers when empty), dropping local edits to them. */
   reloadLayers(identifiers: string[]): Edit;
@@ -264,8 +268,8 @@ export interface ExportAttribute { name: string; type: string; interpolation?: s
  */
 export interface ExportVariantsSpec {
   set: string; selection: string; material: Path; geometryRoot: Path; usda?: string; assets?: [string, string][];
-  overlay?: string; format?: 'usdc' | 'usda';
-  prims: { path: Path; geometry?: ExportAttribute[]; primvars?: ExportAttribute[]; variants: { name: string; primvars: ExportAttribute[] }[] }[];
+  overlay?: string; format?: 'usdc' | 'usda'; flatten?: boolean;
+  prims: { path: Path; geometry?: ExportAttribute[]; primvars?: ExportAttribute[]; variants?: { name: string; primvars: ExportAttribute[] }[] }[];
 }
 /** usdc (or usda) bytes and the package-relative asset paths they use, or what went wrong. */
 export type ExportVariantsResult = { bytes: Uint8Array<ArrayBuffer>; assets: string[]; error?: undefined } | { error: string; bytes?: undefined; assets?: undefined };

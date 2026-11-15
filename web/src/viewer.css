@@ -158,6 +158,7 @@ canvas { display: block; width: 100%; height: 100%; outline: none; }
 .bare .tools { display: none; }
 .stats span { color: var(--dim); }
 .stats output { min-width: 9ch; font-family: ui-monospace, monospace; text-align: right; } /* steady width while FPS changes */
+.stats output.gpu { max-width: 28ch; overflow-wrap: anywhere; } /* WebGL2 renderer names run long: they wrap */
 
 .status {
   position: absolute;

@@ -520,6 +520,24 @@ export function batchLook(look: THREE.Material, tint = false): THREE.Material {
 /** The paintValue of corners without a value (not finite): finite itself, since WGSL may assume there is no NaN. */
 export const NO_VALUE = -3.4e38;
 
+/** No infinities or NaN reach the shader: a missing threshold is one no value passes. */
+const finiteValue = (x: number) => Math.min(Math.max(x, NO_VALUE), -NO_VALUE) || 0;
+const F32 = new Float32Array(1);
+const BITS = new Int32Array(F32.buffer);
+/**
+ * A paint threshold as the float32 that splits float32 values as the double does: the smallest float32 >= x (`up`, for
+ * `v < x` and `v >= x`) or the largest <= x (for `v > x`). The view then classes values as the legend does, a
+ * histogram bin's top edge included.
+ */
+export function paintEdge(x: number, up: boolean): number {
+  const d = finiteValue(x);
+  F32[0] = d;
+  if (F32[0] === d || F32[0] < d !== up) return F32[0];
+  if (F32[0] === 0) BITS[0] = up ? 1 : 0x80000001 | 0;
+  else BITS[0] += F32[0] > 0 === up ? 1 : -1; // one float32 further, past x
+  return F32[0];
+}
+
 /**
  * How paint() colours values, as a host's legend draws them: `stops` ('#rrggbb', 2 to 16) evenly spaced from `min` to
  * `max`, interpolated in sRGB; values under `below.value` / over `above.value` in their `color` instead; with a `band`
@@ -563,8 +581,6 @@ export function paintLook(): { readonly material: THREE.Material; style: PaintSt
   const material = section(new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide }));
   material.positionNode = PLACE;
   material.colorNode = vertexStage(colour());
-  // No infinities or NaN reach the shader: a missing threshold is one no value passes.
-  const finite = (x: number) => Math.min(Math.max(x, NO_VALUE), -NO_VALUE) || 0;
   const srgb = new THREE.Color();
   const color = (hex: string, out: THREE.Vector4, w: number) => {
     srgb.setStyle(hex, THREE.LinearSRGBColorSpace); // the sRGB numbers as they are: the shader converts them
@@ -579,12 +595,12 @@ export function paintLook(): { readonly material: THREE.Material; style: PaintSt
     set style(s: PaintStyle) {
       if (!(s.stops?.length >= 2 && s.stops.length <= 16)) throw new RangeError('paintStyle: 2 to 16 stops');
       s.stops.forEach((hex, i) => color(hex, stops[i], 1));
-      range.value.set(finite(s.min), finite(s.max), s.stops.length);
-      if (s.below) color(s.below.color, below.value, finite(s.below.value));
+      range.value.set(finiteValue(s.min), finiteValue(s.max), s.stops.length);
+      if (s.below) color(s.below.color, below.value, paintEdge(s.below.value, true));
       else below.value.w = NO_VALUE;
-      if (s.above) color(s.above.color, above.value, finite(s.above.value));
+      if (s.above) color(s.above.color, above.value, paintEdge(s.above.value, false));
       else above.value.w = -NO_VALUE;
-      band.value.set(s.band ? finite(s.band[0]) : NO_VALUE, s.band ? finite(s.band[1]) : -NO_VALUE);
+      band.value.set(s.band ? paintEdge(s.band[0], true) : NO_VALUE, s.band ? paintEdge(s.band[1], true) : -NO_VALUE);
       current = structuredClone(s);
     },
   };

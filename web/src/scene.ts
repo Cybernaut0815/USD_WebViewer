@@ -63,6 +63,8 @@ const BATCH_PENDING_ITEMS = 256;
 const BATCH_PENDING_VERTICES = 1_000_000;
 const MIRROR = new THREE.Matrix4().makeScale(-1, 1, 1);
 const MATRIX = new THREE.Matrix4();
+const SLOT = new THREE.Matrix4();
+const ORIGIN = new THREE.Vector3();
 const CLIP = new THREE.Matrix4();
 const FRUSTUM = new THREE.Frustum();
 const COLOR = new THREE.Color();
@@ -175,9 +177,25 @@ export class BatchMesh extends THREE.Mesh {
     };
   }
 
-  setMatrixAt(slot: number, matrix: THREE.Matrix4): void {
+  /** The inverse of `matrix`: the slots' matrices are stored relative to it (see origin). */
+  private readonly inverse = new THREE.Matrix4();
+
+  /**
+   * Places the mesh at `at` (stage space; a mirroring batch mirrors too: three culls faces by the mesh's determinant).
+   * Slot matrices are kept relative to it, worked out in float64: the float32 texture then holds small translations,
+   * and a stage far from its origin (survey coordinates) keeps its precision through three's float64 modelView.
+   */
+  origin(at: THREE.Vector3, mirrored: boolean): void {
+    this.matrix.makeTranslation(at.x, at.y, at.z);
+    if (mirrored) this.matrix.multiply(MIRROR);
+    this.inverse.copy(this.matrix).invert();
+    this.matrixWorldNeedsUpdate = true;
+  }
+
+  /** Sets slot's stage-space matrix (stored relative to the mesh's origin). */
+  setMatrixAt(slot: number, stage: THREE.Matrix4): void {
     const data = this.matrices.image.data as Float32Array;
-    const e = matrix.elements;
+    const e = SLOT.multiplyMatrices(this.inverse, stage).elements;
     let changed = false;
     for (let i = 0; i < 16; i++) {
       if (data[slot * 16 + i] === Math.fround(e[i])) continue;
@@ -187,8 +205,9 @@ export class BatchMesh extends THREE.Mesh {
     if (changed) this.matrices.needsUpdate = true;
   }
 
+  /** Slot's stage-space matrix, as stored (float32, relative to the origin). */
   getMatrixAt(slot: number, target: THREE.Matrix4): THREE.Matrix4 {
-    return target.fromArray(this.matrices.image.data as Float32Array, slot * 16);
+    return target.fromArray(this.matrices.image.data as Float32Array, slot * 16).premultiply(this.matrix);
   }
 
   setVisibleAt(slot: number, visible: boolean): void {
@@ -1290,7 +1309,7 @@ export class SceneSync {
     };
     mesh.castShadow = mesh.receiveShadow = true;
     // three culls front faces by the object's determinant, not an item's: mirrored items get a mirrored batch.
-    if (b.mirrored) mesh.matrix.copy(MIRROR);
+    mesh.origin(ORIGIN.setFromMatrixPosition(first.object!.matrix), b.mirrored);
     items.forEach((item, slot) => {
       item.batched = { batch: b, instance: slot };
       b.items.add(item);
@@ -1349,16 +1368,16 @@ export class SceneSync {
   }
 
   /**
-   * Moves a batched item's instance, or a painted item's parts, with its object's matrix; a determinant changing sign
-   * leaves the batch.
+   * Moves a batched item's instance, or a painted item's parts, with its object's matrix. A determinant changing sign
+   * leaves the batch, or drops the paint: its pieces' triangles wind for the old sign, and their arrays are gone.
    */
   private follow(item: Item): void {
     const slots = slotsOf(item);
     if (!slots.length) return;
-    const m = item.object!.matrix;
-    const mirrored = !!item.batched?.batch.mirrored;
-    if (item.batched && m.determinant() < 0 !== mirrored) {
-      this.unbatch(item);
+    const m = item.object!.matrix, flip = m.determinant() < 0, first = item.painted?.[0];
+    if (item.batched ? flip !== item.batched.batch.mirrored : first && flip !== first.piece.parts[first.slot].flip) {
+      if (item.batched) this.unbatch(item);
+      else this.dropPaint(item);
       return;
     }
     // At once, children too: the viewer's render no longer walks stand-ins (drawing), and picks and hosts read it.
@@ -1366,7 +1385,7 @@ export class SceneSync {
     item.object!.updateMatrixWorld();
     const sphere = SPHERE.copy(item.geometry!.boundingSphere!).applyMatrix4(m); // a part of a big item takes the item's
     for (const { piece: b, slot } of slots) {
-      b.mesh.setMatrixAt(slot, mirrored ? MATRIX.multiplyMatrices(MIRROR, m) : m);
+      b.mesh.setMatrixAt(slot, m); // relative to the mesh's origin (and mirror), there
       b.spheres.set([sphere.center.x, sphere.center.y, sphere.center.z, sphere.radius], slot * 4);
     }
   }
@@ -1493,12 +1512,12 @@ export class SceneSync {
     if (skipped.length) this.host.warn(`paint: ${skipped.length} skipped (not one value per drawn ${per === 'face' ? 'triangle' : 'vertex'}, not a mesh, instanced or deforming): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
     const key = entries.length ? `${per}|${entries.map((e) => e.item.rid)}` : '';
     if (key === this.paintKey) {
-      for (const piece of this.pieces) {
-        piece.mesh.values(cornerValues(piece.parts, entries, per));
-        this.host.invalidate(); // colours only: the shadows stay
-        yield;
-        if (gen !== this.paintGen) return;
-      }
+      // All pieces in one step: a frame between them would show the host's new style over the old values (a new column
+      // and its legend set together). ponytail: 4 B per corner at once until the next frame uploads them (0.2 GB at 17M
+      // triangles); per piece if that peak hurts, with the style applied at the end
+      for (const piece of this.pieces) piece.mesh.values(cornerValues(piece.parts, entries, per));
+      this.host.invalidate(); // colours only: the shadows stay
+      yield;
       return;
     }
     // A new set: the old pieces go; items no longer painted draw themselves again (and batch), new ones stop.
@@ -1552,6 +1571,8 @@ export class SceneSync {
     const piece: Piece = { mesh: new BatchMesh(g, starts), parts, spheres: new Float32Array(n * 4), culled: new Uint8Array(n), shown: new Uint8Array(n), live: 0 };
     piece.mesh.material = this.paintLook.material;
     piece.mesh.castShadow = true;
+    const lead = parts.find((p) => p.item)?.item;
+    if (lead) piece.mesh.origin(ORIGIN.setFromMatrixPosition(lead.object!.matrix), false);
     parts.forEach(({ item }, k) => {
       if (!item) return;
       item.painted!.push({ piece, slot: k });

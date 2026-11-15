@@ -5,7 +5,7 @@ import type * as THREE from 'three/webgpu';
 import type { LocalFile } from './files.ts';
 import type { LiveLink } from './live.ts';
 import { copyText, type MenuItem, showMenu } from './menu.ts';
-import { ACTIVE, HIGHLIGHT, TextureCache } from './materials.ts';
+import { ACTIVE, HIGHLIGHT, type PaintStyle, TextureCache } from './materials.ts';
 import { h, Props } from './props.ts';
 import type { CameraParams, Path, PickResult, StageInfo } from './protocol.ts';
 import { EMPTY, MAX, type Section, type SectionBox, type SectionPlane, type SectionSource, type Vec3 } from './section.ts';
@@ -194,6 +194,8 @@ export class UsdViewerElement extends HTMLElement {
   private edgesWanted = false;
   /** The selection behind the picker; its options are built when it is opened (selections can be huge). */
   private pickerPaths: readonly Path[] = [];
+  /** The last paint(), settled once its pieces are drawn (idle() waits for it). */
+  private painting: Promise<void> = Promise.resolve();
   private readonly unload = (event: BeforeUnloadEvent) => {
     if (this.session.dirty.size) event.preventDefault();
   };
@@ -313,12 +315,53 @@ export class UsdViewerElement extends HTMLElement {
     return this.session.close();
   }
 
-  /** Resolves when the tool's core calls are done, no flush is pending, every texture is in, and a frame has been drawn. */
+  /**
+   * Resolves when the tool's core calls are done, no flush is pending, every texture is in, a paint() is drawn, and a
+   * frame has been drawn.
+   */
   async idle(): Promise<void> {
     await this.viewport.tool?.idle?.();
     await this.session.idle();
     await this.viewport.sync.settled();
+    await this.painting;
     await this.viewport.fullFrame();
+  }
+
+  /**
+   * Draws mesh items in colours from values (see paintStyle): one per drawn triangle in object.geometry.index order
+   * ('face'), or one per drawn vertex ('vertex'). Replaces what was painted ([] clears); resolves once all of it is
+   * drawn (in a hidden tab: built, for the next render). Items with the wrong number of values, more than one instance
+   * or moving points are skipped with a warning.
+   * The values are not kept: painting the same items the same way again only uploads the new ones.
+   */
+  paint(items: readonly { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' = 'face'): Promise<void> {
+    const steps = this.viewport.sync.paint(items, per);
+    // A frame after each piece uploads it and lets go of its arrays before the next is built. A hidden tab draws no
+    // frames: there the rest is built at once, and the next render (a host's own, as a capture) uploads it.
+    const frame = () =>
+      new Promise<void>((resolve) => {
+        const go = () => {
+          document.removeEventListener('visibilitychange', go);
+          resolve();
+        };
+        if (document.hidden) return go();
+        document.addEventListener('visibilitychange', go);
+        void this.viewport.nextFrame().then(go);
+      });
+    const done = (async () => {
+      while (!steps.next().done) await frame();
+    })();
+    this.painting = done.catch(() => {});
+    return done;
+  }
+
+  /** How paint() colours values, as a legend draws them (see PaintStyle); setting it changes uniforms only. */
+  get paintStyle(): PaintStyle {
+    return this.viewport.sync.paintLook.style;
+  }
+  set paintStyle(style: PaintStyle) {
+    this.viewport.sync.paintLook.style = style;
+    this.viewport.invalidate(); // not SceneSync's: the shadows stay
   }
 
   dispose(): void {
@@ -599,9 +642,9 @@ export class UsdViewerElement extends HTMLElement {
     this.viewport.sync.setPurposes(purposes);
     this.updateStats();
   }
-  /** USD counts of what the viewport draws (the overlay at its top right), and how fast it draws. */
-  get stats(): SceneStats & { fps: number | null; frameMs: number } {
-    return { ...this.viewport.sync.stats(), fps: this.viewport.fps, frameMs: this.viewport.frameMs };
+  /** USD counts of what the viewport draws (the overlay at its top right), how fast it draws, and on which adapter. */
+  get stats(): SceneStats & { fps: number | null; frameMs: number; gpu: string } {
+    return { ...this.viewport.sync.stats(), fps: this.viewport.fps, frameMs: this.viewport.frameMs, gpu: this.viewport.gpuName };
   }
 
   /** H: hides the selection (session layer, never saved; undoable). */
@@ -1068,6 +1111,9 @@ export class UsdViewerElement extends HTMLElement {
       this.statsBox.replaceChildren(
         ...rows.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value.toLocaleString())]),
         ...timing.flatMap(([label, value]) => [h('span', {}, label), h('output', {}, value)]),
+        // Which adapter draws: on a laptop with two GPUs, the one the browser took.
+        h('span', { className: 'gpu' }, 'GPU'),
+        h('output', { className: 'gpu' }, s.gpu),
       );
       this.statsBox.hidden = !this.session.stage;
     });

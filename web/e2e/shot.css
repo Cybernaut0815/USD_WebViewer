@@ -1,2 +1,4 @@
-/* While a golden is taken: no Section button, so the masked tool buttons cover what they covered before it came. */
+/* While a golden is taken: no Section button, so the masked tool buttons cover what they covered before it came;
+   no GPU row, so the masked stats do too (and the adapter's name, which varies, stays out). */
 .tools .section { display: none; }
+.stats .gpu { display: none; }

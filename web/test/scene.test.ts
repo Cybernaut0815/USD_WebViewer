@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import * as THREE from 'three/webgpu';
 import { batchLook, HIDDEN, HIDDEN_DOUBLE, PLAIN } from '../src/materials.ts';
 import type { MeshEntry, RenderDelta } from '../src/protocol.ts';
-import { type BatchMesh, type Item, SceneSync } from '../src/scene.ts';
+import { type BatchMesh, type Item, paintPlan, SceneSync } from '../src/scene.ts';
 
 /** A unit cube as the core sends it: 24 vertices (4 per face, normals per face), 12 triangles. */
 function cube(rid: number, extra: Partial<MeshEntry> = {}): MeshEntry {
@@ -32,10 +32,11 @@ function row(n: number, from = 1, extra: Partial<MeshEntry> = {}): RenderDelta {
 }
 
 function sync() {
-  const s = new SceneSync(new THREE.Scene(), { readBytes: async () => null, warn() {}, invalidate() {} });
+  const warnings: string[] = [];
+  const s = new SceneSync(new THREE.Scene(), { readBytes: async () => null, warn: (message) => warnings.push(message), invalidate() {} });
   const batches = () => s.root.children.filter((o) => (o as BatchMesh).isBatch) as BatchMesh[];
   const item = (rid: number) => s.items.get(rid) as Item;
-  return { s, batches, item };
+  return { s, batches, item, warnings };
 }
 
 test('64 or more static meshes of one look draw in one batch; their objects keep geometry and draw nothing', () => {
@@ -311,6 +312,63 @@ test('a pick skips batched items whose bounding sphere the ray misses', () => {
   assert.equal(s.mayHit(item(1), towards(0)), true, 'cube 1 sits at x 0');
   assert.equal(s.mayHit(item(1), towards(10)), false);
   assert.equal(s.mayHit(item(500), towards(10)), true, 'unbatched: always tested in full');
+});
+
+test('paint draws items from values in pieces and gives their drawing back', () => {
+  const { s, batches, item, warnings } = sync();
+  s.apply(row(80));
+  const base = batches()[0];
+  const paint = (items: { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' = 'face') => [...s.paint(items, per)];
+  const all = (value: (rid: number, f: number) => number) => Array.from({ length: 80 }, (_, i) => ({ rid: i + 1, values: Float32Array.from({ length: 12 }, (_, f) => value(i + 1, f)) }));
+  paint([...all((rid, f) => rid * 100 + f), { rid: 1, values: [1] }, { rid: 999, values: [] }]);
+  assert.equal(base.parent, null, 'the base batch went with its last item');
+  assert.equal(batches().length, 1);
+  const piece = batches()[0];
+  const g = piece.geometry;
+  const slot = (rid: number) => item(rid).painted![0].slot;
+  assert.equal(g.index, null, 'de-indexed');
+  assert.equal(g.attributes.position.count, 80 * 36);
+  for (let c = 0; c < 36; c++) assert.equal(g.attributes.paintValue.getX(slot(7) * 36 + c), 700 + Math.floor(c / 3), 'values[f] at corners 3f..3f+2');
+  assert.equal(g.attributes.batchItem.getX(slot(7) * 36 + 5), slot(7));
+  assert.equal(g.attributes.position.getY(slot(7) * 36 + 4), item(7).geometry!.attributes.position.getY(item(7).geometry!.index!.getX(4)), 'local positions');
+  assert.equal((item(7).object as THREE.Mesh).material, HIDDEN_DOUBLE, 'a stand-in');
+  assert.equal(warnings.length, 1, 'a second entry for rid 1 and a rid without a mesh: one warning');
+  // The same items the same way: the same piece and positions, new values.
+  const position = g.attributes.position;
+  paint(all((rid, f) => -rid - f));
+  assert.equal(batches()[0], piece);
+  assert.equal(g.attributes.position, position);
+  assert.equal(g.attributes.paintValue.getX(slot(7) * 36 + 3), -8);
+  // Visibility, xforms and a host's child.
+  s.apply({ visibility: { rids: new Uint32Array([3]), visible: new Uint8Array([0]) } });
+  assert.equal(piece.getVisibleAt(slot(3)), false, 'a hidden prim');
+  assert.equal(piece.getVisibleAt(slot(4)), true);
+  s.apply({ xforms: { rids: new Uint32Array([5]), matrices: new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 7, 8, 9, 1]) } });
+  assert.deepEqual(piece.getMatrixAt(slot(5), new THREE.Matrix4()).elements.slice(12, 15), [7, 8, 9]);
+  item(4).object!.add(new THREE.Object3D());
+  let drawn: THREE.Object3D[] = [];
+  s.drawing(() => (drawn = [...s.root.children]));
+  assert.ok(drawn.includes(item(4).object!), "a host's child under a painted item is drawn");
+  assert.ok(!drawn.includes(item(2).object!), 'other stand-ins are not');
+  // New indices drop the item's paint; clearing gives the items back to one batch.
+  const six = slot(6);
+  s.apply({ meshes: [cube(6)] });
+  assert.equal(item(6).painted, null);
+  assert.equal(piece.getVisibleAt(six), false, 'its slot is a hole');
+  paint([]);
+  assert.deepEqual(batches().map((b) => [b.instanceCount, !!b.geometry.attributes.paintValue]), [[80, false]]);
+  assert.equal(piece.parent, null);
+  // Per vertex: values[index[c]] at corner c.
+  paint([{ rid: 3, values: Float32Array.from({ length: 24 }, (_, v) => v * 10) }], 'vertex');
+  const one = batches().find((b) => b.geometry.attributes.paintValue)!;
+  const index = item(3).geometry!.index!;
+  for (let c = 0; c < 36; c++) assert.equal(one.geometry.attributes.paintValue.getX(c), index.getX(c) * 10);
+});
+
+test('paintPlan cuts the triangles in order into pieces by corners and parts, a big item across several', () => {
+  assert.deepEqual(paintPlan([5, 3], 9), [[[0, 0, 3]], [[0, 3, 2], [1, 0, 1]], [[1, 1, 2]]]);
+  assert.deepEqual(paintPlan([2, 0, 1], 9), [[[0, 0, 2], [2, 0, 1]]], 'an item without triangles takes no part');
+  assert.deepEqual(paintPlan([1, 1, 1], 99, 2), [[[0, 0, 1], [1, 0, 1]], [[2, 0, 1]]], 'at most 2 parts');
 });
 
 test('objectsUnder finds the items at and below the given paths, not siblings sharing a prefix', () => {

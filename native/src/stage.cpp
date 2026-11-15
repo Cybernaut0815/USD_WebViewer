@@ -1648,7 +1648,8 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
     if (!specValue.IsObject()) return "invalid spec: " + parseError.reason;
     const JsObject& spec = specValue.GetJsObject();
     const std::string setName = Text(spec, "set"), selection = Text(spec, "selection");
-    if (!List(spec, "prims").empty() && !SdfPath::IsValidIdentifier(setName)) return "invalid variant set name " + setName;
+    const bool flatten = !(Field(spec, "flatten").IsBool() && !Field(spec, "flatten").GetBool());
+    if (flatten && !List(spec, "prims").empty() && !SdfPath::IsValidIdentifier(setName)) return "invalid variant set name " + setName;
     const SdfPath material(Text(spec, "material")), geometryRoot(Text(spec, "geometryRoot"));
 
     // [offset, count] slices of the two arrays, as the value of an attribute of that type.
@@ -1705,6 +1706,42 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
         binding->GetTargetPathList().Add(material);
         prim->SetInfo(UsdTokens->apiSchemas, VtValue(SdfTokenListOp::Create({ TfToken("MaterialBindingAPI") })));
     };
+
+    // usdc bytes of a layer, through a scratch file in the memory filesystem of the module, as ExportLayer.
+    const auto write = [&](const SdfLayerRefPtr& layer) -> std::string {
+        if (Text(spec, "format") == "usda") return layer->ExportToString(bytes) ? "" : "the layer could not be written";
+        static const std::string scratch = "/tmp/__variants.usdc";
+        if (!layer->Export(scratch)) return "the layer could not be written";
+        {
+            std::ifstream file(scratch, std::ios::binary);
+            bytes->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        }
+        std::remove(scratch.c_str());
+        return "";
+    };
+
+    // flatten: false: the overlay alone, nothing flattened (a stage of any size). The overlay usda gives the layer (its
+    // metadata, sublayers, the prims' bindings and blocks); each of `prims` gets its primvars (and any geometry) from the
+    // arrays, on an over at its path. The host packs it with the stage's own files.
+    if (!flatten) {
+        const SdfLayerRefPtr layer = SdfLayer::CreateAnonymous("overlay.usdc");
+        if (const std::string text = Text(spec, "overlay"); !text.empty() && !layer->ImportFromString(text)) return "invalid overlay usda";
+        {
+            SdfChangeBlock block;
+            for (const JsValue& item : List(spec, "prims")) {
+                if (!item.IsObject()) continue;
+                const JsObject& p = item.GetJsObject();
+                const SdfPath path(Text(p, "path"));
+                if (!path.IsPrimPath()) return "invalid prim path " + path.GetString();
+                const SdfPrimSpecHandle prim = layer->GetPrimAtPath(path) ? layer->GetPrimAtPath(path) : SdfCreatePrimInLayer(layer, path); // overs
+                for (const JsValue& attribute : List(p, "geometry")) author(prim, attribute);
+                for (const JsValue& primvar : List(p, "primvars")) author(prim, primvar);
+                if (!error.empty()) return error;
+            }
+        }
+        assets->clear();
+        return write(layer);
+    }
 
     // An overlay composes over the stage before it is flattened: a second stage on the same root layer whose session
     // layer is the overlay over the live session layer (variant choices, hidden prims). Hydra never sees it.
@@ -1804,16 +1841,7 @@ std::string Stage::ExportVariants(const std::string& specJson, const std::vector
             if (!error.empty()) return error;
         }
     }
-    if (Text(spec, "format") == "usda") return layer->ExportToString(bytes) ? "" : "the layer could not be written";
-    // Binary through a scratch file in the memory filesystem of the module, as ExportLayer.
-    static const std::string scratch = "/tmp/__variants.usdc";
-    if (!layer->Export(scratch)) return "the layer could not be written";
-    {
-        std::ifstream file(scratch, std::ios::binary);
-        bytes->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-    }
-    std::remove(scratch.c_str());
-    return "";
+    return write(layer);
 }
 
 // Both import paths end in SdfLayer::_SetData, which diffs spec by spec and field by field, so only

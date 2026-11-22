@@ -328,7 +328,7 @@ test('paint draws items from values in pieces and gives their drawing back', () 
   const { s, batches, item, warnings } = sync();
   s.apply(row(80));
   const base = batches()[0];
-  const paint = (items: { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' = 'face') => [...s.paint(items, per)];
+  const paint = (items: { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' | 'corner' = 'face') => [...s.paint(items, per)];
   const all = (value: (rid: number, f: number) => number) => Array.from({ length: 80 }, (_, i) => ({ rid: i + 1, values: Float32Array.from({ length: 12 }, (_, f) => value(i + 1, f)) }));
   paint([...all((rid, f) => rid * 100 + f), { rid: 1, values: [1] }, { rid: 999, values: [] }]);
   assert.equal(base.parent, null, 'the base batch went with its last item');
@@ -378,6 +378,13 @@ test('paint draws items from values in pieces and gives their drawing back', () 
   const one = batches().find((b) => b.geometry.attributes.paintValue)!;
   const index = item(3).geometry!.index!;
   for (let c = 0; c < 36; c++) assert.equal(one.geometry.attributes.paintValue.getX(c), index.getX(c) * 10);
+  // Per corner: values[c] at corner c, so two corners at one vertex can differ; another mode is another set of pieces.
+  paint([{ rid: 3, values: Float32Array.from({ length: 36 }, (_, c) => c + 0.5) }], 'corner');
+  const cornered = batches().find((b) => b.geometry.attributes.paintValue)!;
+  assert.notEqual(cornered, one);
+  for (let c = 0; c < 36; c++) assert.equal(cornered.geometry.attributes.paintValue.getX(c), c + 0.5);
+  paint([{ rid: 3, values: new Float32Array(24) }], 'corner');
+  assert.equal(warnings.length, 2, 'one value per vertex is not one per corner: skipped');
 });
 
 test('paint thresholds split float32 values as the doubles do', () => {

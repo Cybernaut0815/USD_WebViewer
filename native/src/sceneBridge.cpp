@@ -1608,7 +1608,14 @@ val SceneBridge::MeshMap(uint32_t rid) const
         const HdMeshTopologySchema topology = HdMeshSchema::GetFromParent(source).GetTopology();
         const VtIntArray counts = topology ? Value(topology.GetFaceVertexCounts()) : VtIntArray();
         map.set("counts", Typed("Int32Array", counts.cdata(), counts.size()));
-    } else map.set("counts", val::null());
+        // The authored corners too: welded coincident points draw as one vertex, so the drawn indices no longer
+        // say which of them a corner names (a host that keeps disconnected parts apart needs that).
+        const VtIntArray indices = topology ? Value(topology.GetFaceVertexIndices()) : VtIntArray();
+        map.set("indices", Typed("Int32Array", indices.cdata(), indices.size()));
+    } else {
+        map.set("counts", val::null());
+        map.set("indices", val::null());
+    }
     map.set("weld", rec->weld.empty() ? val::null() : Typed("Uint32Array", rec->weld.data(), rec->weld.size()));
     map.set("points", rec->pointVertex.empty() ? val::null() : Typed("Uint32Array", rec->pointVertex.data(), rec->pointVertex.size()));
     map.set("flipped", rec->flipped);

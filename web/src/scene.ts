@@ -356,15 +356,22 @@ export function paintPlan(tris: readonly number[], cap: number, slots = BATCH_IT
  */
 const corner = (t: number, j: number, flip: boolean) => 3 * t + (flip && j ? 3 - j : j);
 
-/** A piece's paintValue per corner: its triangle's value ('face') or its vertex's ('vertex'); not finite: NO_VALUE. */
-function cornerValues(parts: readonly Part[], entries: readonly PaintEntry[], per: 'face' | 'vertex'): Float32Array {
+/** What paint() takes a value for: each drawn triangle, each drawn vertex, or each corner of each drawn triangle. */
+export type PaintPer = 'face' | 'vertex' | 'corner';
+
+/**
+ * A piece's paintValue per corner: its triangle's value ('face'), its vertex's ('vertex') or its own ('corner');
+ * not finite: NO_VALUE.
+ */
+function cornerValues(parts: readonly Part[], entries: readonly PaintEntry[], per: PaintPer): Float32Array {
   const out = new Float32Array(3 * parts.reduce((sum, p) => sum + p.count, 0));
   let c = 0;
   for (const { entry, first, count, flip } of parts) {
     const { values, index } = entries[entry];
     for (let t = first; t < first + count; t++) {
       for (let j = 0; j < 3; j++) {
-        const x = per === 'face' ? values[t] : values[index[corner(t, j, flip)]];
+        const at = corner(t, j, flip);
+        const x = per === 'face' ? values[t] : per === 'corner' ? values[at] : values[index[at]];
         out[c++] = Number.isFinite(x) ? x : NO_VALUE;
       }
     }
@@ -1484,7 +1491,8 @@ export class SceneSync {
 
   /**
    * Draws mesh items in colours from their values (paintLook's style), replacing what was painted ([] clears): one
-   * value per drawn triangle in geometry.index order ('face'), or per drawn vertex ('vertex'). Painted items leave
+   * value per drawn triangle in geometry.index order ('face'), per drawn vertex ('vertex'), or per corner of each drawn
+   * triangle, as geometry.index lists them ('corner': vertices that share a position can differ). Painted items leave
    * their batches, free their own GPU copy and become stand-ins; pieces of their triangles, de-indexed (at most
    * BATCH_VERTICES each), draw them through the batches' vertex stage. Painting the same items the same way again
    * only refills the values. A step per piece: the caller draws a frame before the next, which uploads the piece and
@@ -1492,7 +1500,7 @@ export class SceneSync {
    * ponytail: a value per corner (12 B per triangle) rather than a texture read at vertex_index / 3, which would save
    * 8 of them; and per-vertex values on the same de-indexed pieces (one builder), not indexed ones (32 B per triangle).
    */
-  *paint(items: readonly { rid: Rid; values: ArrayLike<number> }[], per: 'face' | 'vertex'): Generator<void, void, void> {
+  *paint(items: readonly { rid: Rid; values: ArrayLike<number> }[], per: PaintPer): Generator<void, void, void> {
     const gen = ++this.paintGen;
     const entries: PaintEntry[] = [];
     const keep = new Set<Item>();
@@ -1500,7 +1508,7 @@ export class SceneSync {
     for (const { rid, values } of items) {
       const item = this.items.get(rid);
       const g = item?.geometry;
-      const count = !g?.index ? -1 : per === 'face' ? g.index.count / 3 : g.attributes.position.count;
+      const count = !g?.index ? -1 : per === 'face' ? g.index.count / 3 : per === 'corner' ? g.index.count : g.attributes.position.count;
       // Instanced: one draw per instance would be needed; deforming: the values follow points that no longer exist.
       if (!item?.object || item.kind !== 'mesh' || item.dynamic || instanced(item) || values?.length !== count || keep.has(item)) {
         skipped.push(item?.path || `rid ${rid}`);
@@ -1509,7 +1517,7 @@ export class SceneSync {
       keep.add(item);
       entries.push({ item, values, index: g!.index!.array, position: g!.attributes.position.array });
     }
-    if (skipped.length) this.host.warn(`paint: ${skipped.length} skipped (not one value per drawn ${per === 'face' ? 'triangle' : 'vertex'}, not a mesh, instanced or deforming): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
+    if (skipped.length) this.host.warn(`paint: ${skipped.length} skipped (not one value per drawn ${per === 'face' ? 'triangle' : per}, not a mesh, instanced or deforming): ${skipped.slice(0, 5).join(', ')}${skipped.length > 5 ? ', …' : ''}`);
     const key = entries.length ? `${per}|${entries.map((e) => e.item.rid)}` : '';
     if (key === this.paintKey) {
       // All pieces in one step: a frame between them would show the host's new style over the old values (a new column
@@ -1541,7 +1549,7 @@ export class SceneSync {
   }
 
   /** One paint piece: its parts' triangles, de-indexed, with a value per corner. Parts dropped meanwhile are holes. */
-  private piece(parts: Part[], entries: readonly PaintEntry[], per: 'face' | 'vertex'): void {
+  private piece(parts: Part[], entries: readonly PaintEntry[], per: PaintPer): void {
     const n = parts.length;
     const starts = new Uint32Array(n + 1);
     parts.forEach((part, k) => (starts[k + 1] = starts[k] + 3 * part.count));

@@ -17,7 +17,7 @@ import { toolbar } from './toolbar.ts';
 import { NavigateTool, SelectTool, type TransformMode, TransformTool, typing } from './tools.ts';
 import { Tree } from './tree.ts';
 import css from './viewer.css?inline';
-import type { DisplayMode, Item, SceneStats } from './scene.ts';
+import type { DisplayMode, Item, PaintPer, SceneStats } from './scene.ts';
 import { type CameraSettings, DEFAULT_BACKGROUND, type ToneMapping, type ViewState, Viewport } from './viewport.ts';
 
 export type OpenSource = string | URL | File | readonly File[] | readonly LocalFile[] | FileSystemDirectoryHandle;
@@ -329,12 +329,13 @@ export class UsdViewerElement extends HTMLElement {
 
   /**
    * Draws mesh items in colours from values (see paintStyle): one per drawn triangle in object.geometry.index order
-   * ('face'), or one per drawn vertex ('vertex'). Replaces what was painted ([] clears); resolves once all of it is
+   * ('face'), one per drawn vertex ('vertex'), or one per corner of each drawn triangle in that index order ('corner':
+   * three per triangle, so vertices that share a position can differ). Replaces what was painted ([] clears); resolves once all of it is
    * drawn (in a hidden tab: built, for the next render). Items with the wrong number of values, more than one instance
    * or moving points are skipped with a warning.
    * The values are not kept: painting the same items the same way again only uploads the new ones.
    */
-  paint(items: readonly { rid: number; values: ArrayLike<number> }[], per: 'face' | 'vertex' = 'face'): Promise<void> {
+  paint(items: readonly { rid: number; values: ArrayLike<number> }[], per: PaintPer = 'face'): Promise<void> {
     const steps = this.viewport.sync.paint(items, per);
     // A frame after each piece uploads it and lets go of its arrays before the next is built. A hidden tab draws no
     // frames: there the rest is built at once, and the next render (a host's own, as a capture) uploads it.

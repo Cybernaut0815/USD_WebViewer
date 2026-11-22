@@ -1883,12 +1883,12 @@ test.describe('mock core', () => {
     await expect(canvas).toHaveScreenshot('mock-paint-selected.png', shot(page));
     await view(none, 1, []);
     // Head on, the middle of each cube's front face shows its legend colour (the app's rgbFor: sRGB, within 1/255).
-    const legend = (value: number, band: number[] | null) => {
+    const legend = (value: number, bands: number[][] | null) => {
       const c = Number.isNaN(value) ? [0.5, 0.5, 0.5] : value < 10 ? [1, 0, 0] : Array(3).fill(Math.min(Math.max((value - 10) / 69, 0), 1));
-      const k = band && !(value >= band[0] && value < band[1]) ? 0.15 : 1;
+      const k = bands && !bands.some((band) => value >= band[0] && value < band[1]) ? 0.15 : 1;
       return c.map((x) => Math.round(255 * (k * x + (1 - k) * 0.6)));
     };
-    const off = (band: number[] | null) =>
+    const off = (band: number[][] | null) =>
       page.evaluate(async (rids) => {
         const v = document.querySelector('usd-viewer') as UsdViewerElement;
         v.view = { eye: [0, -3.25, 16], target: [0, -3.25, -2], fov: 30, projection: 'perspective', height: 1 };
@@ -1916,7 +1916,15 @@ test.describe('mock core', () => {
       return { same: pieces() === before, band: v.paintStyle.band };
     }, style);
     expect(restyled).toEqual({ same: true, band: [30, 50] });
-    expect(await off([30, 50])).toEqual([]);
+    expect(await off([[30, 50]])).toEqual([]);
+    // Several bands (bars of a histogram that are not neighbours): a value in any of them keeps its colour.
+    const apart = [[5, 12], [30, 50], [70, 71]];
+    await page.evaluate(async ({ style, apart }) => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      v.paintStyle = { ...style, band: apart as [number, number][] };
+      await v.idle();
+    }, { style, apart });
+    expect(await off(apart)).toEqual([]);
     // A painted cube picks as itself, through its own object; cleared, the cubes draw in one batch again.
     const after = await page.evaluate(async () => {
       const v = document.querySelector('usd-viewer') as UsdViewerElement;

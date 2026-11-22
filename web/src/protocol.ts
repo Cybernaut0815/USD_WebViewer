@@ -243,11 +243,14 @@ export interface PickResult {
  * a drawn vertex to the vertex of that surface (null: the same index). On static polygonal meshes coincident points
  * (same position and per-point values) draw as one vertex: `weld` gives the first of them, and `points` maps every
  * authored point to the drawn vertex that draws it (4294967295: no drawn face uses it), so per-point results can be
- * written back to all of them. `points` is null when no points were welded that way.
+ * written back to all of them. `points` is null when no points were welded that way. `indices` (with `counts`: the
+ * authored faceVertexIndices) says which authored point each corner names, which the drawn indices no longer do where
+ * points were welded: two parts that only share a position stay two parts there.
  */
 export interface MeshMap {
   faces: Int32Array<ArrayBuffer>;
   counts: Int32Array<ArrayBuffer> | null;
+  indices: Int32Array<ArrayBuffer> | null;
   weld: Uint32Array<ArrayBuffer> | null;
   points: Uint32Array<ArrayBuffer> | null;
   flipped: boolean;

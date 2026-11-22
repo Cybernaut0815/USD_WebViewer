@@ -3,6 +3,7 @@ import { UsdViewerElement } from './viewer.ts';
 export type { LocalFile } from './files.ts';
 export { LiveLink } from './live.ts';
 export type { PaintStyle } from './materials.ts';
+export type { PaintPer } from './scene.ts';
 export type * from './protocol.ts';
 export type { Section, SectionBox, SectionPlane, SectionSource } from './section.ts';
 export type { SectionGizmo } from './sectiontool.ts';

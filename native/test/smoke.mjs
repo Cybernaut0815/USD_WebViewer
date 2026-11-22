@@ -704,6 +704,7 @@ ${mesh('Split', `    point3f[] points = [${text(points)}]`)}${mesh('Moving', `  
   assert.deepEqual([...splitMap.points], [0, 1, 2, 3, 1, 4, 5, 2], 'every authored point finds its drawn vertex');
   assert.deepEqual([...splitMap.weld], [0, 1, 2, 3, 5, 6], 'and each drawn vertex its first authored point');
   assert.deepEqual([...splitMap.faces], [0, 0, 1, 1]);
+  assert.deepEqual([...splitMap.indices], [0, 1, 2, 3, 4, 5, 6, 7], 'the authored corners keep the coincident points apart');
   assert.equal(by['/Moving'].positions.length, 8 * 3, 'moving points are not welded');
   assert.equal(core.meshMap(by['/Moving'].rid).points, null);
   assert.equal(by['/Colored'].positions.length, 8 * 3, 'nor are points whose per-point values differ');
@@ -1046,6 +1047,7 @@ def Xform "World"
   const smooth = map('/World/Smooth');
   assert.equal(smooth.authored, false);
   assert.equal(smooth.counts, null);
+  assert.equal(smooth.indices, null, 'no authored corners for a refined surface');
   assert.equal(smooth.faces.length, 48);
   assert.equal(polygons(smooth.faces), 24);
   const vertices = smooth.weld ? Math.max(...smooth.weld) + 1 : meshes.get('/World/Smooth').positions.length / 3;

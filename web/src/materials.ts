@@ -538,10 +538,14 @@ export function paintEdge(x: number, up: boolean): number {
   return F32[0];
 }
 
+/** The most ranges a paint style's `band` holds. */
+export const MAX_BANDS = 32;
+
 /**
  * How paint() colours values, as a host's legend draws them: `stops` ('#rrggbb', 2 to 16) evenly spaced from `min` to
  * `max`, interpolated in sRGB; values under `below.value` / over `above.value` in their `color` instead; with a `band`
- * [lo, hi), the values outside it faded towards grey (0.15 c + 0.51). Values that are not finite are grey.
+ * [lo, hi), or a list of up to 32 such ranges (a selection of histogram bars that are not neighbours), the values in
+ * none of them faded towards grey (0.15 c + 0.51). Values that are not finite are grey.
  */
 export interface PaintStyle {
   stops: string[];
@@ -549,7 +553,7 @@ export interface PaintStyle {
   max: number;
   below?: { value: number; color: string } | null;
   above?: { value: number; color: string } | null;
-  band?: [number, number] | null;
+  band?: [number, number] | [number, number][] | null;
 }
 
 /**
@@ -565,7 +569,8 @@ export function paintLook(): { readonly material: THREE.Material; style: PaintSt
   const range: Node = uniform(new THREE.Vector3()); // min, max, stops in use
   const below: Node = uniform(new THREE.Vector4()); // sRGB colour, value
   const above: Node = uniform(new THREE.Vector4());
-  const band: Node = uniform(new THREE.Vector2());
+  const bands = Array.from({ length: MAX_BANDS }, () => new THREE.Vector2());
+  const BANDS: Node = uniformArray(bands, 'vec2'); // [lo, hi) each; a slot not in use holds no value
   // The legend's colorAt and rgbFor, in float32.
   const colour = Fn(() => {
     const v: Node = attribute('paintValue', 'float').toConst();
@@ -575,7 +580,10 @@ export function paintLook(): { readonly material: THREE.Material; style: PaintSt
     const k: Node = u.floor().min(last.sub(1)).toConst();
     const gradient = mix(STOPS.element(int(k)).xyz, STOPS.element(int(k).add(1)).xyz, u.sub(k));
     const c: Node = select(v.lessThanEqual(NO_VALUE), vec3(0.5), select(v.lessThan(below.w), below.xyz, select(v.greaterThan(above.w), above.xyz, gradient))).toConst();
-    const linear: Node = sRGBTransferEOTF(select(v.greaterThanEqual(band.x).and(v.lessThan(band.y)), c, c.mul(0.15).add(0.51)));
+    // in any band: one test per slot, no loop (the same code on both backends; 32 compares per vertex)
+    let lit: Node = v.greaterThanEqual(BANDS.element(0).x).and(v.lessThan(BANDS.element(0).y));
+    for (let i = 1; i < MAX_BANDS; i++) lit = lit.or(v.greaterThanEqual(BANDS.element(i).x).and(v.lessThan(BANDS.element(i).y)));
+    const linear: Node = sRGBTransferEOTF(select(lit, c, c.mul(0.15).add(0.51)));
     return vec4(linear, 1);
   });
   const material = section(new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide }));
@@ -600,7 +608,10 @@ export function paintLook(): { readonly material: THREE.Material; style: PaintSt
       else below.value.w = NO_VALUE;
       if (s.above) color(s.above.color, above.value, paintEdge(s.above.value, false));
       else above.value.w = -NO_VALUE;
-      band.value.set(s.band ? paintEdge(s.band[0], true) : NO_VALUE, s.band ? paintEdge(s.band[1], true) : -NO_VALUE);
+      const list = !s.band ? [] : Array.isArray(s.band[0]) ? (s.band as [number, number][]) : [s.band as [number, number]];
+      if (list.length > MAX_BANDS) throw new RangeError(`paintStyle: at most ${MAX_BANDS} bands`);
+      // none given: one band that holds every value (nothing fades); else the slots past the list hold none
+      bands.forEach((b, i) => (list[i] ? b.set(paintEdge(list[i][0], true), paintEdge(list[i][1], true)) : list.length ? b.set(-NO_VALUE, NO_VALUE) : b.set(NO_VALUE, -NO_VALUE)));
       current = structuredClone(s);
     },
   };

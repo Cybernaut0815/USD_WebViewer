@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three/webgpu';
-import { batchLook, HIDDEN, HIDDEN_DOUBLE, paintEdge, PLAIN } from '../src/materials.ts';
+import { batchLook, HIDDEN, HIDDEN_DOUBLE, MAX_BANDS, paintEdge, paintLook, PLAIN } from '../src/materials.ts';
 import type { MeshEntry, RenderDelta } from '../src/protocol.ts';
 import { type BatchMesh, type Item, paintPlan, SceneSync } from '../src/scene.ts';
 
@@ -385,6 +385,20 @@ test('paint draws items from values in pieces and gives their drawing back', () 
   for (let c = 0; c < 36; c++) assert.equal(cornered.geometry.attributes.paintValue.getX(c), c + 0.5);
   paint([{ rid: 3, values: new Float32Array(24) }], 'corner');
   assert.equal(warnings.length, 2, 'one value per vertex is not one per corner: skipped');
+});
+
+test('a paint style takes one band, a list of them, or none; more than the shader holds is refused', () => {
+  const look = paintLook(), base = { stops: ['#000000', '#ffffff'], min: 0, max: 1 };
+  look.style = { ...base, band: [0.2, 0.4] };
+  assert.deepEqual(look.style.band, [0.2, 0.4]);
+  look.style = { ...base, band: [[0.1, 0.2], [0.6, 0.9]] };
+  assert.deepEqual(look.style.band, [[0.1, 0.2], [0.6, 0.9]]);
+  look.style = { ...base, band: null };
+  assert.equal(look.style.band, null);
+  const many = Array.from({ length: MAX_BANDS + 1 }, (_, i): [number, number] => [i, i + 0.5]);
+  assert.throws(() => (look.style = { ...base, band: many }), /at most 32 bands/);
+  look.style = { ...base, band: many.slice(0, MAX_BANDS) };
+  assert.equal((look.style.band as number[][]).length, MAX_BANDS);
 });
 
 test('paint thresholds split float32 values as the doubles do', () => {

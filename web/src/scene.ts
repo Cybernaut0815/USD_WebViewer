@@ -832,7 +832,7 @@ export class SceneSync {
     this.invalidate();
   }
 
-  /** Edge overlays on every mesh, or none, depending on the display mode. */
+  /** Edge overlays on every mesh but the painted ones (their colours alone), or none, depending on the display mode. */
   private wireframes(): void {
     for (const proxy of this.wires.values()) dispose(proxy);
     this.wires.clear();
@@ -840,7 +840,7 @@ export class SceneSync {
     for (const b of this.batches) this.batchLines(b, look);
     if (!look) return;
     for (const item of this.items.values()) {
-      if (item.batched) continue; // its batch draws its edges
+      if (item.batched || item.painted) continue; // its batch draws its edges; a painted one draws none
       const proxy = this.lines(item, look);
       if (proxy) this.wires.set(item, proxy);
     }
@@ -1593,9 +1593,13 @@ export class SceneSync {
     this.root.add(piece.mesh);
   }
 
-  /** The item stops drawing itself: out of its batch (its own lines in a wire mode), its GPU copy freed, a stand-in. */
+  /**
+   * The item stops drawing itself: out of its batch, its GPU copy freed, a stand-in. Its colours show alone in every
+   * display mode: no lines of its own in a wire mode.
+   */
   private toPaint(item: Item): void {
-    this.unbatch(item, false);
+    this.unbatch(item, false, false);
+    this.dropWire(item);
     item.geometry!.dispose(); // the arrays stay: picks, bounds, a fill or a host child (which uploads it again)
     item.painted = [];
     this.painted.add(item);
@@ -1603,7 +1607,10 @@ export class SceneSync {
     this.assign(item);
   }
 
-  /** The item's paint goes (its slots are holes); with `restore`, it draws itself again, and may batch. */
+  /**
+   * The item's paint goes (its slots are holes); with `restore`, it draws itself again (its own lines in a wire mode),
+   * and may batch.
+   */
   private dropPaint(item: Item, restore = true): void {
     const parts = item.painted;
     if (!parts) return;
@@ -1619,6 +1626,9 @@ export class SceneSync {
     this.standInFor(item, false);
     if (!restore) return;
     this.assign(item);
+    const look = item.object ? this.wireLook() : null;
+    const proxy = look && this.lines(item, look);
+    if (proxy) this.wires.set(item, proxy);
     this.unsettle(item);
   }
 

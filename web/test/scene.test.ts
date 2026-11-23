@@ -387,6 +387,28 @@ test('paint draws items from values in pieces and gives their drawing back', () 
   assert.equal(warnings.length, 2, 'one value per vertex is not one per corner: skipped');
 });
 
+test('in the wire modes painted items draw their colours alone; unpainted, their own lines come back', () => {
+  const { s, item } = sync();
+  const outline = new Uint32Array(Array.from({ length: 6 }, (_, f) => [0, 1, 1, 2, 2, 3, 3, 0].map((v) => f * 4 + v)).flat());
+  const lines = (rid: number) => item(rid).object!.children.filter((o) => (o as THREE.LineSegments).isLineSegments).length;
+  const paint = (rids: number[]) => [...s.paint(rids.map((rid) => ({ rid, values: new Float32Array(12) })), 'face')];
+  s.apply(row(3, 1, { edges: outline }));
+  s.setDisplayMode('shaded-wire');
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1]);
+  paint([2]);
+  assert.deepEqual([1, 2, 3].map(lines), [1, 0, 1], 'its lines go with its own drawing');
+  s.setDisplayMode('wire');
+  assert.deepEqual([1, 2, 3].map(lines), [1, 0, 1], 'another wire mode makes none for it');
+  s.apply({ meshes: [{ rid: 2, edges: outline }] });
+  assert.equal(lines(2), 0, 'new edges neither');
+  paint([]);
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1]);
+  s.setDisplayMode('shaded');
+  paint([3]);
+  s.setDisplayMode('plain-wire');
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 0]);
+});
+
 test('a paint style takes one band, a list of them, or none; more than the shader holds is refused', () => {
   const look = paintLook(), base = { stops: ['#000000', '#ffffff'], min: 0, max: 1 };
   look.style = { ...base, band: [0.2, 0.4] };

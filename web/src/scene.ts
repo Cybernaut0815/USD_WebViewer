@@ -1200,6 +1200,7 @@ export class SceneSync {
         (mesh!.instanceMatrix.array as Float32Array).set(e.instances!);
         mesh!.instanceMatrix.needsUpdate = true;
         if (item.instanceBuffer) item.instanceBuffer.needsUpdate = true;
+        item.instanceBuffer = null; // three never uploads a buffer it holds again for a new overlay: the rebuilt ones need a new one
         mesh!.computeBoundingSphere();
         moved = true;
       } else rebuild = true;

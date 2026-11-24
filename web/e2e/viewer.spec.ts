@@ -1722,6 +1722,33 @@ test.describe('mock core', () => {
     expect(errors).toEqual([]);
   });
 
+  test('instances moved in place take their selection wire along, drawn as when rebuilt there', async ({ page }) => {
+    const errors = await open(page, MOCK);
+    const result = await page.evaluate(async () => {
+      const v = document.querySelector('usd-viewer') as UsdViewerElement;
+      const image = async () => new Uint8Array(await (await v.screenshot()).arrayBuffer()).join();
+      const proto = () => v.three.objectsFor('/World/Instances/Proto')[0] as any;
+      v.displayMode = 'plain-selwire';
+      v.select('/World/Instances');
+      await v.idle();
+      const before = await image();
+      // Up by 1, still within the stage's bounds: the clip planes stay as they are.
+      const moved = () => new Float32Array([-2, 0, 2].flatMap((x) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, 1, 2, 1]));
+      v.session.emit('delta', { meshes: [{ rid: 2, instances: moved() }] } as any);
+      await v.idle();
+      const inPlace = await image();
+      const object = proto(), g = object.geometry;
+      const edges = new Uint32Array(Array.from({ length: 6 }, (_, f) => [0, 1, 1, 2, 2, 3, 3, 0].map((k) => f * 4 + k)).flat());
+      v.session.emit('delta', {
+        meshes: [{ rid: 2, indices: new Uint32Array(g.index.array), positions: new Float32Array(g.attributes.position.array), normals: new Float32Array(g.attributes.normal.array), edges, counts: { points: 8, faces: 6, edges: 12 }, primvars: [{ name: 'st', size: 2, data: new Float32Array(g.attributes.uv.array) }], instances: moved() }],
+      } as any);
+      await v.idle();
+      return { moved: inPlace !== before, rebuilt: proto() !== object, same: inPlace === (await image()) };
+    });
+    expect(result).toEqual({ moved: true, rebuilt: true, same: true });
+    expect(errors).toEqual([]);
+  });
+
   test('small static meshes of one look draw in one batch, looking as drawn one by one', async ({ page }) => {
     const errors = await open(page, MOCK);
     const rids = Array.from({ length: 80 }, (_, i) => 100 + i);

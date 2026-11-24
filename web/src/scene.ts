@@ -832,24 +832,30 @@ export class SceneSync {
     this.invalidate();
   }
 
-  /** Edge overlays on every mesh but the painted ones (their colours alone), or none, depending on the display mode. */
+  /** Edge overlays on every mesh (the painted ones' over their colours), or none, depending on the display mode. */
   private wireframes(): void {
     for (const proxy of this.wires.values()) dispose(proxy);
     this.wires.clear();
     const look = this.wireLook();
     for (const b of this.batches) this.batchLines(b, look);
     if (!look) return;
-    for (const item of this.items.values()) {
-      if (item.batched || item.painted) continue; // its batch draws its edges; a painted one draws none
-      const proxy = this.lines(item, look);
-      if (proxy) this.wires.set(item, proxy);
-    }
+    for (const item of this.items.values()) if (!item.batched) this.wire(item); // a batched one: its batch draws its edges
   }
 
-  /** The line look of the wire display modes; null in the others. */
-  private wireLook(): THREE.LineBasicNodeMaterial | null {
+  /**
+   * The line look of the wire display modes; null in the others. A painted item's colours draw in every mode, so its
+   * edges are always the ones over a surface.
+   */
+  private wireLook(painted = false): THREE.LineBasicNodeMaterial | null {
     const mode = this.displayMode;
-    return mode === 'wire' ? LINE_ALONE : mode === 'shaded-wire' || mode === 'plain-wire' ? LINE : null;
+    return mode === 'wire' ? (painted ? LINE : LINE_ALONE) : mode === 'shaded-wire' || mode === 'plain-wire' ? LINE : null;
+  }
+
+  /** An item's own edges in a wire mode (none in the others). */
+  private wire(item: Item): void {
+    const look = item.object ? this.wireLook(!!item.painted) : null;
+    const proxy = look && this.lines(item, look);
+    if (proxy) this.wires.set(item, proxy);
   }
 
   /** An item's own wire lines, gone (it joined a batch, or its object goes). */
@@ -1354,9 +1360,7 @@ export class SceneSync {
     }
     this.standInFor(item, false);
     if (restore) this.assign(item);
-    const look = lines && item.object ? this.wireLook() : null;
-    const proxy = look && this.lines(item, look);
-    if (proxy) this.wires.set(item, proxy);
+    if (lines) this.wire(item);
     this.unsettle(item);
   }
 
@@ -1594,8 +1598,8 @@ export class SceneSync {
   }
 
   /**
-   * The item stops drawing itself: out of its batch, its GPU copy freed, a stand-in. Its colours show alone in every
-   * display mode: no lines of its own in a wire mode.
+   * The item stops drawing itself: out of its batch, its GPU copy freed, a stand-in. Its colours show in every display
+   * mode, with its own edges over them in a wire mode (which upload its positions again while they show).
    */
   private toPaint(item: Item): void {
     this.unbatch(item, false, false);
@@ -1605,11 +1609,12 @@ export class SceneSync {
     this.painted.add(item);
     this.standInFor(item, true);
     this.assign(item);
+    this.wire(item);
   }
 
   /**
-   * The item's paint goes (its slots are holes); with `restore`, it draws itself again (its own lines in a wire mode),
-   * and may batch.
+   * The item's paint goes (its slots are holes); with `restore`, it draws itself again (its own lines in a wire mode,
+   * as an unpainted item's), and may batch.
    */
   private dropPaint(item: Item, restore = true): void {
     const parts = item.painted;
@@ -1626,9 +1631,8 @@ export class SceneSync {
     this.standInFor(item, false);
     if (!restore) return;
     this.assign(item);
-    const look = item.object ? this.wireLook() : null;
-    const proxy = look && this.lines(item, look);
-    if (proxy) this.wires.set(item, proxy);
+    this.dropWire(item);
+    this.wire(item);
     this.unsettle(item);
   }
 

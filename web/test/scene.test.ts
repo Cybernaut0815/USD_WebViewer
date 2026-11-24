@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as THREE from 'three/webgpu';
-import { batchLook, HIDDEN, HIDDEN_DOUBLE, MAX_BANDS, paintEdge, paintLook, PLAIN } from '../src/materials.ts';
+import { batchLook, HIDDEN, HIDDEN_DOUBLE, LINE, LINE_ALONE, MAX_BANDS, paintEdge, paintLook, PLAIN } from '../src/materials.ts';
 import type { MeshEntry, RenderDelta } from '../src/protocol.ts';
 import { type BatchMesh, type Item, paintPlan, SceneSync } from '../src/scene.ts';
 
@@ -387,26 +387,32 @@ test('paint draws items from values in pieces and gives their drawing back', () 
   assert.equal(warnings.length, 2, 'one value per vertex is not one per corner: skipped');
 });
 
-test('in the wire modes painted items draw their colours alone; unpainted, their own lines come back', () => {
+test('in the wire modes painted items keep their colours and draw their own edges over them', () => {
   const { s, item } = sync();
   const outline = new Uint32Array(Array.from({ length: 6 }, (_, f) => [0, 1, 1, 2, 2, 3, 3, 0].map((v) => f * 4 + v)).flat());
-  const lines = (rid: number) => item(rid).object!.children.filter((o) => (o as THREE.LineSegments).isLineSegments).length;
+  const own = (rid: number) => item(rid).object!.children.filter((o) => (o as THREE.LineSegments).isLineSegments) as THREE.LineSegments[];
+  const lines = (rid: number) => own(rid).length;
   const paint = (rids: number[]) => [...s.paint(rids.map((rid) => ({ rid, values: new Float32Array(12) })), 'face')];
   s.apply(row(3, 1, { edges: outline }));
   s.setDisplayMode('shaded-wire');
   assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1]);
   paint([2]);
-  assert.deepEqual([1, 2, 3].map(lines), [1, 0, 1], 'its lines go with its own drawing');
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1], 'painted, it keeps one set of lines');
+  assert.ok(item(2).painted, 'and its colours');
   s.setDisplayMode('wire');
-  assert.deepEqual([1, 2, 3].map(lines), [1, 0, 1], 'another wire mode makes none for it');
-  s.apply({ meshes: [{ rid: 2, edges: outline }] });
-  assert.equal(lines(2), 0, 'new edges neither');
-  paint([]);
   assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1]);
+  assert.equal(own(2)[0].material, LINE, 'over its colours: the lines over a surface');
+  assert.equal(own(1)[0].material, LINE_ALONE, 'an unpainted item alone: the lines against the background');
+  s.apply({ meshes: [{ rid: 2, edges: outline }] });
+  assert.equal(lines(2), 1, 'new edges make its lines again');
+  paint([]);
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1], 'unpainted: still one set each');
+  assert.equal(own(2)[0].material, LINE_ALONE);
   s.setDisplayMode('shaded');
   paint([3]);
+  assert.deepEqual([1, 2, 3].map(lines), [0, 0, 0], 'no wire mode: no lines');
   s.setDisplayMode('plain-wire');
-  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 0]);
+  assert.deepEqual([1, 2, 3].map(lines), [1, 1, 1]);
 });
 
 test('a paint style takes one band, a list of them, or none; more than the shader holds is refused', () => {

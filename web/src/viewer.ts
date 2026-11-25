@@ -981,6 +981,7 @@ export class UsdViewerElement extends HTMLElement {
       this.dispatchEvent(new Event('sectiongizmochange'));
     };
     this.viewport.onsectionmenu = (x, y) => this.selectedSectionMenu(x, y);
+    this.viewport.ondevicelost = (message) => this.fatal(`The GPU stopped drawing (${message}): reload the page to view the stage again.`);
     on('delta', (e) => {
       this.viewport.sync.apply(e.detail);
       if (e.detail.cameras?.length || e.detail.removed?.length) this.dispatchEvent(new Event('cameraschange'));

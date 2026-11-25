@@ -1081,6 +1081,10 @@ export class SceneSync {
       for (let i = 0; i < colors.length; i++) colors[i] = item.displayColor[i % 3];
       g.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     }
+    // A MaterialX normal map reads a tangent stream; three's come from the normals and uvs.
+    if (g?.index && g.attributes.normal && g.attributes.uv && !g.attributes.tangent && [materials].flat().some((m) => m.userData.readsTangents)) {
+      g.computeTangents();
+    }
     return materials;
   }
 
@@ -1181,6 +1185,12 @@ export class SceneSync {
       stream(g, name, pv.data, pv.size);
       if (pv.size === 2 && !g.attributes.uv) g.setAttribute('uv', g.attributes[name]);
     }
+    if (g.attributes.tangent && (e.positions || e.normals !== undefined || e.primvars?.length)) {
+      if (g.attributes.normal && g.attributes.uv) {
+        g.computeTangents(); // into the stream it has, which three does not mark
+        g.attributes.tangent.needsUpdate = true;
+      } else g.deleteAttribute('tangent');
+    }
     if (e.subsets !== undefined) {
       item.subsets = e.subsets;
       g.clearGroups();
@@ -1253,7 +1263,8 @@ export class SceneSync {
     const material = this.materials.get(item.material)?.material;
     if (!material) return item.displayOpacity >= 1;
     const m = material as THREE.MeshPhysicalNodeMaterial;
-    return !m.transparent && !m.transmission && !m.positionNode && !(m.userData.readsDisplayColor && !g.attributes.color);
+    // A batch places each item's normals (materials.ts PLACE), not its tangents.
+    return !m.transparent && !m.transmission && !m.positionNode && !m.userData.readsTangents && !(m.userData.readsDisplayColor && !g.attributes.color);
   }
 
   /** Items of one key share a batch: one look (side apart, which only swaps the material), one vertex layout. */

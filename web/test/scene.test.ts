@@ -76,6 +76,26 @@ test('matrices follow xforms and drag previews; a mirrored item gets a mirrored 
   assert.equal(item(200).batched, null);
 });
 
+test('instances moved in place redo their wires over a new matrix buffer', () => {
+  const { s, item } = sync();
+  const outline = new Uint32Array(Array.from({ length: 6 }, (_, f) => [0, 1, 1, 2, 2, 3, 3, 0].map((v) => f * 4 + v)).flat());
+  const at = (y: number) => new Float32Array([0, 4].flatMap((x) => [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, x, y, 0, 1]));
+  const lines = () => s.root.children.filter((o) => (o as THREE.LineSegments).isLineSegments && o.userData.item === item(1));
+  s.apply({ meshes: [cube(1, { edges: outline, instances: at(0) })], selected: [{ rid: 1 }] });
+  const object = item(1).object;
+  for (const [mode, y] of [['plain-selwire', 1], ['wire', 2]] as const) {
+    s.setDisplayMode(mode);
+    assert.equal(lines().length, 1, `${mode}: the selection wire, or the edges`);
+    const before = item(1).instanceBuffer;
+    s.apply({ meshes: [{ rid: 1, instances: at(y) }] });
+    assert.equal(item(1).object, object, 'moved in place');
+    assert.equal(lines().length, 1, 'its lines redone');
+    // three never uploads a buffer it holds again for a new overlay: over the old one the wires would stay behind.
+    assert.notEqual(item(1).instanceBuffer, before);
+    assert.deepEqual([...item(1).instanceBuffer!.array], [...at(y)]);
+  }
+});
+
 test('far from the stage origin a batch keeps float64 placement: its slots hold matrices relative to its own', () => {
   const { s, batches, item } = sync();
   const far = row(64);

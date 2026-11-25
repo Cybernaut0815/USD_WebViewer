@@ -48,6 +48,8 @@ const extension = (path: string) => /\.([a-z0-9]+)\]?$/i.exec(path)?.[1].toLower
 
 export class TextureCache {
   private readonly cache = new Map<string, Promise<THREE.Texture | null>>();
+  /** The textures share() handed out, per image and then per sampler. */
+  private readonly shared = new Map<object, Map<string, THREE.Texture>>();
   private readonly host: MaterialHost;
   constructor(host: MaterialHost) {
     this.host = host;
@@ -67,9 +69,29 @@ export class TextureCache {
     return entry;
   }
 
+  /**
+   * One texture per image and sampler for every look that reads it: three's WebGPU backend uploads each texture
+   * object on its own, shared image or not, and three's MaterialX loader wraps the images anew for each document.
+   * The cache frees them with its own.
+   */
+  share(texture: THREE.Texture): THREE.Texture {
+    const image = texture.image as object | null;
+    if (!image) return texture;
+    let samplers = this.shared.get(image);
+    if (!samplers) this.shared.set(image, (samplers = new Map()));
+    const t = texture;
+    const key = [t.wrapS, t.wrapT, t.magFilter, t.minFilter, t.anisotropy, t.colorSpace, t.flipY, t.generateMipmaps, t.premultiplyAlpha, t.format, t.type, t.mapping, t.channel].join('|');
+    const first = samplers.get(key);
+    if (first) return first;
+    samplers.set(key, texture);
+    return texture;
+  }
+
   dispose(): void {
     for (const entry of this.cache.values()) entry.then((t) => t?.dispose());
     this.cache.clear();
+    for (const samplers of this.shared.values()) for (const texture of samplers.values()) texture.dispose();
+    this.shared.clear();
   }
 
   private async decode(path: string, colorSpace: string): Promise<THREE.Texture | null> {
@@ -314,8 +336,16 @@ async function buildMaterialX(xml: string, textures: TextureCache, host: Materia
   const result = (new MaterialXLoader(manager) as any).parse(xml, { uvSpace: 'top-left', throwOnErrors: false });
   await Promise.all(loading);
   for (const issue of result.errors ?? []) host.warn(`MaterialX: ${issue.message ?? JSON.stringify(issue)}`);
-  const material = Object.values(result.materials ?? {})[0] as THREE.Material | undefined;
+  const material = Object.values(result.materials ?? {})[0] as THREE.MeshPhysicalNodeMaterial | undefined;
   if (!material) return null;
+  for (const [slot, node] of Object.entries(material)) {
+    if (slot.endsWith('Node') && (node as Node)?.isNode) {
+      (node as Node).traverse((n: Node) => n.isTextureNode && n.value?.isTexture && (n.value = textures.share(n.value)));
+    }
+  }
+  // Its normal map reads the tangent stream in the vertex stage (a missing one breaks the normals, glass draws
+  // nothing): the scene computes one for the meshes it draws.
+  material.userData.readsTangents = !!(material.normalNode || material.clearcoatNormalNode);
   material.side = THREE.DoubleSide;
   return section(material);
 }

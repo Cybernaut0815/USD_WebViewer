@@ -2100,6 +2100,42 @@ test.describe('wasm core', () => {
     await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('materialx.png', shot(page));
   });
 
+  test('MaterialX glass with a normal map draws, shares its texture with the other look, and a lost GPU says so', async ({ page }) => {
+    const errors = await open(page, '/?forceWebGL=1&src=samples/materialx-glass.usda');
+    expect(errors).toEqual([]);
+    const looks = () =>
+      page.evaluate(async () => {
+        const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+        await viewer.idle();
+        const [pane, back] = ['/World/Pane', '/World/Back'].map((path) => viewer.three.objectsFor(path)[0] as any);
+        const textures = (object: any) => {
+          const found = new Set<unknown>();
+          for (const [slot, node] of Object.entries(object.material)) {
+            if (slot.endsWith('Node') && (node as any)?.isNode) (node as any).traverse((n: any) => n.isTextureNode && n.value?.image?.width && found.add(n.value));
+          }
+          return found;
+        };
+        const glass = textures(pane);
+        return {
+          tangents: !!pane.geometry.attributes.tangent, // its normal map reads them in the vertex stage
+          shared: [...textures(back)].some((t) => glass.has(t)), // both read checker.png
+          gpuTextures: viewer.three.renderer.info.memory.textures,
+        };
+      });
+    const first = await looks();
+    expect(first).toMatchObject({ tangents: true, shared: true });
+    await expect(page.locator('usd-viewer canvas')).toHaveScreenshot('materialx-glass.png', shot(page));
+    await page.evaluate(() => (document.querySelector('usd-viewer') as UsdViewerElement).open('samples/materialx-glass.usda'));
+    expect((await looks()).gpuTextures, 'the closed stage freed its textures').toBe(first.gpuTextures);
+    const status = await page.evaluate(() => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      (viewer.three.renderer as any).onDeviceLost({ api: 'WebGL', message: 'Out of memory', reason: null });
+      const element = viewer.shadowRoot!.querySelector('.status') as HTMLElement;
+      return { text: element.textContent, shown: !element.hidden, fatal: element.classList.contains('fatal') };
+    });
+    expect(status).toEqual({ text: 'The GPU stopped drawing (Out of memory): reload the page to view the stage again.', shown: true, fatal: true });
+  });
+
   test('hierarchy and properties show the selected prim', async ({ page }) => {
     await open(page, SHOWCASE);
     await page.locator('usd-viewer .row', { hasText: 'Shapes' }).locator('.twisty').click();

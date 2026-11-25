@@ -96,6 +96,8 @@ export class Viewport {
   onsectiongizmo: () => void = () => {};
   /** A right click on a section entry, which is selected by then (set by the element: its section menu). */
   onsectionmenu: (x: number, y: number) => void = () => {};
+  /** The GPU device (or WebGL context) is gone: three draws nothing from then on (set by the element: its status). */
+  ondevicelost: (message: string) => void = () => {};
   private sectionState = EMPTY;
   /** The section packed for the shader and keeps() (section.ts rows()), in stage space. */
   private sectionRows = rows(EMPTY, 'Y');
@@ -148,7 +150,7 @@ export class Viewport {
     const { onError, onDeviceLost } = this.renderer as unknown as Record<'onError' | 'onDeviceLost', (info: object) => void>;
     Object.assign(this.renderer, {
       onError: (info: object) => (onError.call(this.renderer, info), report(info)),
-      onDeviceLost: (info: object) => (onDeviceLost.call(this.renderer, info), report(info)),
+      onDeviceLost: (info: { message?: string }) => (onDeviceLost.call(this.renderer, info), report(info), this.ondevicelost(info?.message ?? 'unknown reason')),
     });
     await this.renderer.init();
     THREE.RectAreaLightNode.setLTC((await areaTables).RectAreaLightTexturesLib.init());

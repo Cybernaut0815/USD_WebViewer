@@ -154,6 +154,29 @@ test('cutouts keep their alpha test in batches and in flat variants (three r186 
   assert.equal(((item(100).object as THREE.Mesh).material as THREE.Material).alphaTest, 0.5, 'a flat item drawn alone');
 });
 
+test('a look that reads tangents (a MaterialX normal map) gets a tangent stream, kept current, and draws alone', async () => {
+  const { s, batches, item } = sync();
+  const look = { rid: 900, path: '/Looks/Glass', network: { surface: 'S', nodes: { S: { type: 'UsdPreviewSurface', params: {}, inputs: {} } } } };
+  s.apply({ materials: [look] });
+  await s.settled();
+  // MaterialX does not parse under node (no DOMParser): the flag buildMaterialX sets on a look with a normal map.
+  (s as any).materials.get(900).material.userData.readsTangents = true;
+  // Each face's u runs along its first edge: u = 1 gives tangents along it, u = -1 against it.
+  const st = (u: number) => [{ name: 'st', size: 2, data: new Float32Array(Array.from({ length: 6 }, () => [0, 0, u, 0, u, 1, 0, 1]).flat()) }];
+  s.apply(row(64, 1, { material: 900, primvars: st(1) }));
+  assert.equal(batches().length, 0, 'a batch places normals, not tangents: each draws alone');
+  const tangent = () => item(1).geometry!.attributes.tangent as THREE.BufferAttribute | undefined;
+  assert.equal(tangent()?.itemSize, 4, 'computed with the look');
+  assert.deepEqual([tangent()!.getX(0), tangent()!.getY(0), tangent()!.getZ(0), tangent()!.getW(0)].map((v) => Math.round(v) + 0), [0, 1, 0, 1]);
+  s.apply({ meshes: [{ rid: 1, primvars: st(-1) }] });
+  assert.equal(tangent()!.getY(0), -1, 'new uvs in place: tangents follow');
+  s.apply({ meshes: [{ rid: 1, normals: null }] });
+  assert.equal(tangent(), undefined, 'without normals there are none to keep');
+  const plain = sync();
+  plain.s.apply(row(1, 1, { primvars: st(1) }));
+  assert.equal(plain.item(1).geometry!.attributes.tangent, undefined, 'only looks that read them get them');
+});
+
 test('moving points, removal and clear', () => {
   const { s, batches, item } = sync();
   s.apply(row(64));

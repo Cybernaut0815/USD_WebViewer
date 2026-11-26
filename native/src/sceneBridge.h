@@ -31,6 +31,8 @@ public:
     /// Global refinement level; -1 (automatic) refines only meshes that author a subdivision
     /// scheme, at the highest level <= 2 that keeps them under the triangle budget.
     void SetRefineLevel(int level);
+    /// On: the global level also for meshes with their own refinement override (kept, used again when off).
+    void SetRefineOverride(bool on);
     /// Output triangles the automatic level may produce (also scales the per-mesh cap).
     void SetRefineBudget(double triangles);
     /// Re-converts the meshes and curves whose refinement level changed.
@@ -95,6 +97,7 @@ private:
     HdSceneIndexBaseRefPtr _scene; // end of the filtering chain
     HdsiPrimManagingSceneIndexObserverRefPtr _observer;
     int _refineLevel = 0;  // like usdview and Omniverse; -1: automatic from a triangle budget
+    bool _refineOverride = false; // the global level wins over the meshes' own (SetRefineOverride)
     bool _edges = false;      // meshes send their face edges (SetEdges)
     double _autoBudget = 3e6; // output triangles the automatic level may produce (set from the page)
     int _autoLevel = 0;     // what automatic resolved to for this stage

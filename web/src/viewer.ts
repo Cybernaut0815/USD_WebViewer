@@ -1032,7 +1032,8 @@ export class UsdViewerElement extends HTMLElement {
     on('changedprims', () => this.tree.redraw());
     on('lockchange', () => this.tree.redraw());
     on('refinechange', () => {
-      this.props.globalRefine = { setting: session.refineLevel, effective: session.effectiveRefineLevel };
+      this.props.globalRefine = { setting: session.refineLevel, effective: session.effectiveRefineLevel, override: session.refineOverride };
+      if (this.active) this.showProps(this.active); // its Global and Effective rows
     });
 
     this.tree.onselect = (paths, mode) =>

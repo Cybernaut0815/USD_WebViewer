@@ -79,6 +79,8 @@ export interface UsdStageApi {
   importLayer(name: string, data: Uint8Array | string, format?: 'usda' | 'usdc', create?: boolean): Promise<void>;
   /** Global subdivision refinement level; -1 = automatic. */
   setComplexity(level: number): Promise<void>;
+  /** On: the global level also for meshes with their own override, which stay authored and apply again when off. */
+  setRefineOverride(on: boolean): Promise<void>;
   /** Output triangles the automatic level may produce; the viewer sets it from the hardware. */
   setRefineBudget(triangles: number): Promise<void>;
   /** Omniverse-style per-prim override (refinementEnableOverride + refinementLevel on the mesh). */
@@ -177,6 +179,8 @@ export class UsdSession extends EventTarget {
   readonly locked = new Set<Path>();
   /** Global refinement level: 0 like usdview and Omniverse; -1 = automatic from a triangle budget. */
   refineLevel = 0;
+  /** The global level wins over the meshes' own refinement overrides (setRefineOverride). */
+  refineOverride = false;
   /** The level the core resolved the global setting to. */
   effectiveRefineLevel = 0;
   /** Identifiers of layers with unsaved edits. */
@@ -252,6 +256,12 @@ export class UsdSession extends EventTarget {
       this.refineLevel = level;
       this.core.call('setRefineLevel', level);
       this.emit('refinechange', { level });
+      await this.flush();
+    },
+    setRefineOverride: async (on) => {
+      this.refineOverride = on;
+      this.core.call('setRefineOverride', on);
+      this.emit('refinechange', { level: this.refineLevel });
       await this.flush();
     },
     setRefineBudget: async (triangles) => {

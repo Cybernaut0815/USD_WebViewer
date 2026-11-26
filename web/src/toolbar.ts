@@ -57,14 +57,17 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
   viewer.addEventListener('camerachange', refresh);
 
   const refine = select(
-    'Global subdivision refinement level for every catmullClark / loop mesh. Auto: only meshes whose file sets subdivisionScheme, at the highest level (up to 2) within the Auto budget (View ▸ Subdivision). Meshes with their own refinement override keep it',
+    'Global subdivision refinement level for every catmullClark / loop mesh. Auto: only meshes whose file sets subdivisionScheme, at the highest level (up to 2) within the Auto budget (View ▸ Subdivision). Meshes with their own refinement override keep it, unless View ▸ Subdivision ▸ Override prims is on',
     [['-1', 'Refine: auto'], ['0', 'Refine 0'], ['1', 'Refine 1'], ['2', 'Refine 2'], ['3', 'Refine 3']],
     (v) => session.usd.setComplexity(Number(v)),
     String(session.refineLevel),
   );
+  const refineOverride = h('input', { type: 'checkbox', checked: session.refineOverride }) as HTMLInputElement;
+  refineOverride.addEventListener('change', () => session.usd.setRefineOverride(refineOverride.checked).catch(() => {}));
   session.addEventListener('refinechange', (e) => {
     refine.value = String((e as CustomEvent).detail.level);
     refine.options[0].textContent = session.refineLevel < 0 ? `Refine: auto (${session.effectiveRefineLevel})` : 'Refine: auto';
+    refineOverride.checked = session.refineOverride;
   });
   const display = select(
     'Display mode',
@@ -266,6 +269,12 @@ export function toolbar(viewer: UsdViewerElement, viewport: Viewport): HTMLEleme
     ],
     [
       'Subdivision',
+      h(
+        'label',
+        { title: "On: every catmullClark / loop mesh at the Refine level, also those with their own refinement override (kept in the stage). Off: those keep their own level again" },
+        refineOverride,
+        ' Override prims',
+      ),
       h('label', { title: 'Refine: auto smooths authored subdivision surfaces up to this many triangles' }, 'Auto budget ', budget, ' M triangles'),
       button(`Hardware default (${millions(hardwareRefineBudget())})`, 'From this machine: memory and CPU threads', () => (viewer.refineBudget = null)),
       h('span', { className: 'dim' }, 'Above 8M the 4 GB core heap is at risk'),

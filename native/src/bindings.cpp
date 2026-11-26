@@ -193,6 +193,7 @@ val readAsset(const std::string& resolvedPath)
 
 void setTime(double time) { gBridge.SetTime(Time(time)); }
 void setRefineLevel(int level) { gBridge.SetRefineLevel(level); }
+void setRefineOverride(bool on) { gBridge.SetRefineOverride(on); }
 void setRefineBudget(double triangles) { gBridge.SetRefineBudget(triangles); }
 
 val flush(int maxItems)
@@ -319,6 +320,7 @@ EMSCRIPTEN_BINDINGS(usdcore)
     function("readAsset", &readAsset);
     function("setTime", &setTime);
     function("setRefineLevel", &setRefineLevel);
+    function("setRefineOverride", &setRefineOverride);
     function("setRefineBudget", &setRefineBudget);
     function("flush", &flush);
     function("setSelection", &setSelection);

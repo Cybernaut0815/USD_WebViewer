@@ -49,6 +49,8 @@ export interface CoreApi {
   setTime(time: number): void;
   /** Global subdivision refinement level; -1 = automatic from a triangle budget. */
   setRefineLevel(level: number): void;
+  /** On: the global level also for meshes with their own override (kept in the stage, used again when off). */
+  setRefineOverride(on: boolean): void;
   /** Output triangles the automatic level may produce (clamped to 0.5M–8M; also scales the per-mesh cap). */
   setRefineBudget(triangles: number): void;
   /** Omniverse-style per-prim override: authors refinementEnableOverride + refinementLevel on the mesh. */

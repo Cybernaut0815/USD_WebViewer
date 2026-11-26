@@ -92,6 +92,7 @@ const api = {
   setTime(t) { time = Number.isNaN(t) ? 1 : t; timeDirty = true; },
   setEdges(on) { edgesOn = on; },
   setRefineLevel() {},
+  setRefineOverride() {},
   setRefineBudget() {},
   flush() {
     if (!open) return {};

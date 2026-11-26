@@ -2205,6 +2205,25 @@ test.describe('wasm core', () => {
     expect(result).toMatchObject({ cage: 36, refined: 576, before: 'Cube', after: 'Cone', drawn: 1 });
   });
 
+  test('the global level overrides the meshes own refinement and gives it back', async ({ page }) => {
+    await open(page, SHOWCASE);
+    const result = await page.evaluate(async () => {
+      const viewer = document.querySelector('usd-viewer') as UsdViewerElement;
+      const indexCount = () => (viewer.three.objectsFor('/World/SubdivCube')[0] as any).geometry.index.count;
+      await viewer.usd.setRefinement('/World/SubdivCube', true, 2);
+      const own = indexCount(); // at the global level 0
+      await viewer.usd.setRefineOverride(true);
+      const cage = indexCount();
+      await viewer.usd.setComplexity(1);
+      const global = indexCount();
+      await viewer.usd.setComplexity(0);
+      await viewer.usd.setRefineOverride(false);
+      return { own, cage, global, back: indexCount(), authored: await viewer.usd.exportPrim('/World/SubdivCube', 'authored') };
+    });
+    expect(result).toMatchObject({ own: 576, cage: 36, global: 144, back: 576 });
+    expect(result.authored).toContain('custom int refinementLevel = 2');
+  });
+
   test('time changes move animated prims', async ({ page }) => {
     await open(page, SHOWCASE);
     const [start, later] = await page.evaluate(async () => {

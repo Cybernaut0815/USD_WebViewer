@@ -610,6 +610,15 @@ void SceneBridge::SetRefineLevel(int level)
     MarkRefinable();
 }
 
+void SceneBridge::SetRefineOverride(bool on)
+{
+    if (on == _refineOverride) return;
+    _refineOverride = on;
+    _autoDirty = true; // the cages under the automatic level change
+    UpdateAutoLevel();
+    MarkRefinable();
+}
+
 void SceneBridge::SetRefineBudget(double triangles)
 {
     // Above ~8M output triangles a large stage risks the 4 GB wasm32 heap.
@@ -681,14 +690,14 @@ bool AuthoredSubdivision(const UsdPrim& prim)
 
 } // namespace
 
-/// The level a mesh is refined at: its own override when enabled; else the global level, or in
-/// automatic mode the automatic level for authored subdivision surfaces and 0 for the rest;
-/// lowered until the output stays under the per-mesh cap.
+/// The level a mesh is refined at: its own override when enabled (unless the global level
+/// overrides those); else the global level, or in automatic mode the automatic level for authored
+/// subdivision surfaces and 0 for the rest; lowered until the output stays under the per-mesh cap.
 int SceneBridge::MeshRefineLevel(const SdfPath& path, const HdContainerDataSourceHandle& source) const
 {
     int level = RefineLevel();
     const UsdPrim prim = UsdPrimOf(path, source);
-    if (OverrideEnabled(prim)) {
+    if (!_refineOverride && OverrideEnabled(prim)) {
         int own = 0;
         prim.GetAttribute(kRefineLevel).Get(&own);
         level = std::clamp(own, 0, kMaxRefineLevel);
@@ -714,7 +723,7 @@ bool SceneBridge::UpdateAutoLevel()
         const HdMeshTopologySchema topology = mesh ? mesh.GetTopology() : HdMeshTopologySchema(nullptr);
         if (!topology || !Refinable(Value(mesh.GetSubdivisionScheme(), PxOsdOpenSubdivTokens->none))) continue;
         const UsdPrim prim = UsdPrimOf(path, source);
-        if (!OverrideEnabled(prim) && AuthoredSubdivision(prim)) cage += CageTriangles(Value(topology.GetFaceVertexCounts()));
+        if ((_refineOverride || !OverrideEnabled(prim)) && AuthoredSubdivision(prim)) cage += CageTriangles(Value(topology.GetFaceVertexCounts()));
     }
     int level = 0;
     while (cage > 0 && level < kAutoMaxLevel && cage * std::pow(4.0, level + 1) <= _autoBudget) level++;

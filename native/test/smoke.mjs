@@ -269,6 +269,19 @@ def Xform "World"
   assert.equal(own.subsets.find((s) => s.count === 384).count, 384, 'the subset quad refined 64 times');
   assert.deepEqual(JSON.parse(core.primDetails('/World/Box', NaN)).refinement, { enabled: true, level: 3 });
   assert.ok(core.exportPrim('/World/Box', 'authored').includes('custom int refinementLevel = 3'));
+  // The global level over the meshes' own: theirs stay authored and come back when the override goes off.
+  const boxIndices = () => flush().meshes?.find((m) => m.path === '/World/Box')?.indices.length;
+  core.setRefineOverride(true);
+  assert.equal(boxIndices(), 36, 'the global level 0 over its own 3');
+  core.setRefineLevel(1);
+  assert.equal(boxIndices(), 144);
+  core.setRefineLevel(-1);
+  assert.equal(boxIndices(), 576, 'the automatic level 2 over its own 3');
+  core.setRefineLevel(0);
+  flush();
+  core.setRefineOverride(false);
+  assert.equal(boxIndices(), 2304, 'its own level again');
+  assert.deepEqual(JSON.parse(core.primDetails('/World/Box', NaN)).refinement, { enabled: true, level: 3 }, 'never unauthored');
   assert.ok(JSON.parse(core.clearRefinement('/World/Box')).ok);
   assert.equal(flush().meshes.find((m) => m.path === '/World/Box').indices.length, 36);
 

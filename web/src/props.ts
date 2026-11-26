@@ -80,8 +80,8 @@ export interface CopyChoice {
 
 export class Props {
   readonly element = h('div', { className: 'props' });
-  /** The global refinement setting and what it resolved to, shown next to a mesh's own override. */
-  globalRefine = { setting: -1, effective: 0 };
+  /** The global refinement setting, what it resolved to and whether it overrides the meshes' own, shown next to a mesh's override. */
+  globalRefine = { setting: -1, effective: 0, override: false };
   onvariant: (path: Path, variantSet: string, variant: string) => void = () => {};
   onloaded: (path: Path, loaded: boolean) => void = () => {};
   onnavigate: (path: Path) => void = () => {};
@@ -302,7 +302,8 @@ export class Props {
         apply();
       });
       value.addEventListener('change', apply);
-      const global = this.globalRefine.setting < 0 ? `auto (${this.globalRefine.effective})` : String(this.globalRefine.setting);
+      const { setting, effective, override: wins } = this.globalRefine;
+      const global = `${setting < 0 ? `auto (${effective})` : String(setting)}${wins ? ', overrides prims' : ''}`;
       parts.push(
         this.section(
           'Refinement',
@@ -311,7 +312,7 @@ export class Props {
             ['Override', h('label', {}, override, ' use this prim’s level')],
             ['Level', value],
             field('Global', global),
-            field('Effective', String(enabled ? level : this.globalRefine.effective)),
+            field('Effective', String(enabled && !wins ? level : effective)),
           ]),
         ),
       );
